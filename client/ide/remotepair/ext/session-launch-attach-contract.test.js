@@ -43,7 +43,8 @@ test("client launches and reattaches persistent host sessions by stable IDs, not
 
   assert.match(xpair, /case "\$session" in \*\[!A-Za-z0-9_\.-\]\*\|''\) echo "invalid session name:/);
   // Attach runs mosh non-exec (trapped) so an orphaned client is detached server-side on close (Q-attach-close).
-  assert.match(xpair, /mosh --server="\$\{MOSH_SERVER:-\$HOME\/\.local\/bin\/mosh-server\}"/);
+  // --client pins our bundled static mosh-client (brew-free) regardless of PATH; --server is the remote host side.
+  assert.match(xpair, /mosh --client="\$\{MOSH_CLIENT:-\$HOME\/\.local\/bin\/mosh-client\}" --server="\$\{MOSH_SERVER:-\$HOME\/\.local\/bin\/mosh-server\}"/);
   assert.match(xpair, /attach -d -t "=\$session"/);
 
   assert.match(launcher, /Session name base = <readable-name>-<full-path-hash5>/);

@@ -78,17 +78,31 @@ echo "=== build mosh $MOSH_VER (STATIC=$STATIC) ==="
   make -j"$(sysctl -n hw.ncpu)" >/dev/null )
 
 SRV="$BUILD/mosh-$MOSH_VER/src/frontend/mosh-server"
-[ -x "$SRV" ] || { echo "✗ mosh-server not built ($SRV)"; exit 1; }
+CLI="$BUILD/mosh-$MOSH_VER/src/frontend/mosh-client"   # same `make` builds it (host uses server, client uses client)
+WRAP="$BUILD/mosh-$MOSH_VER/scripts/mosh"              # perl wrapper (execs mosh-client via PATH; accepts --client=PATH)
+[ -x "$SRV" ]  || { echo "✗ mosh-server not built ($SRV)"; exit 1; }
+[ -x "$CLI" ]  || { echo "✗ mosh-client not built ($CLI)"; exit 1; }
+[ -f "$WRAP" ] || { echo "✗ mosh wrapper not built ($WRAP)"; exit 1; }
 
-mkdir -p "$(dirname "$DEST")"
-cp "$SRV" "$DEST" && chmod 755 "$DEST"
-echo "installed: $DEST ($("$DEST" --version 2>&1 | head -1 || echo '?'))"
+BINDIR="$(dirname "$DEST")"                            # ~/.local/bin
+mkdir -p "$BINDIR"
+cp "$SRV"  "$BINDIR/mosh-server" && chmod 755 "$BINDIR/mosh-server"
+cp "$CLI"  "$BINDIR/mosh-client" && chmod 755 "$BINDIR/mosh-client"
+cp "$WRAP" "$BINDIR/mosh"        && chmod 755 "$BINDIR/mosh"
+echo "installed: $BINDIR/mosh-server ($("$BINDIR/mosh-server" --version 2>&1 | head -1 || echo '?'))"
+echo "installed: $BINDIR/mosh-client + $BINDIR/mosh (perl wrapper)"
 
 # ── 3. self-containment assertion (no brew dylib = embeddable) ──
+# Check both Mach-O binaries (server + client). The `mosh` wrapper is a perl script → no dylib deps.
 echo "=== dynamic dependency check (no brew dylib = self-contained) ==="
-if otool -L "$DEST" | tail -n +2 | grep -q "/opt/homebrew"; then
-  echo "⚠ brew dylib links still remain:"; otool -L "$DEST" | grep "/opt/homebrew"
-  [ "$STATIC" = 1 ] && { echo "✗ STATIC=1 must be self-contained — failing"; exit 1; }
-else
-  echo "✓ 0 brew dylib dependencies — self-contained (ready to embed in XpairHost.app)"
+_brewfree=1
+for _b in "$BINDIR/mosh-server" "$BINDIR/mosh-client"; do
+  if otool -L "$_b" | tail -n +2 | grep -q "/opt/homebrew"; then
+    echo "⚠ brew dylib links remain in $_b:"; otool -L "$_b" | grep "/opt/homebrew"; _brewfree=0
+  fi
+done
+if [ "$_brewfree" = 1 ]; then
+  echo "✓ 0 brew dylib dependencies — self-contained (ready to embed in Xpair apps)"
+elif [ "$STATIC" = 1 ]; then
+  echo "✗ STATIC=1 must be self-contained — failing"; exit 1
 fi

@@ -200,6 +200,27 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
   cp -R "$CLI_SRC/Launch Xpair.workflow" "$_cli/client/cli/Launch Xpair.workflow"
   chmod -R u+w "$_cli"
   echo "→ bundled Xpair client CLI → $(basename "$app")/Contents/Resources/app/extensions/remotepair/cli"
+  # Static mosh + mosh-client (brew-free client attach). build-mosh.sh emits both to ~/.local/bin
+  # (static protobuf 3.21.12, pre-abseil → 0 brew dylib). Bundle into the repo-shaped tree so
+  # `install.sh --role client` copies them to ~/.local/bin exactly like the xpair CLI. Missing/failed
+  # build → skip (attach falls back to ssh); never hard-fail the IDE build.
+  if [ ! -x "$HOME/.local/bin/mosh-client" ] || [ ! -x "$HOME/.local/bin/mosh" ]; then
+    echo "  mosh-client/mosh missing (~/.local/bin) → auto-running ./host/build-mosh.sh ..."
+    ( cd "$HERE/../.." && ./host/build-mosh.sh ) || echo "⚠ build-mosh.sh failed — bundling without mosh (attach falls back to ssh)" >&2
+  fi
+  if [ -x "$HOME/.local/bin/mosh-client" ] && [ -x "$HOME/.local/bin/mosh" ]; then
+    mkdir -p "$_cli/client/cli/bin"
+    cp "$HOME/.local/bin/mosh-client" "$_cli/client/cli/bin/mosh-client"
+    cp "$HOME/.local/bin/mosh"        "$_cli/client/cli/bin/mosh"
+    chmod +x "$_cli/client/cli/bin/mosh-client" "$_cli/client/cli/bin/mosh"
+    if otool -L "$_cli/client/cli/bin/mosh-client" | tail -n +2 | grep -q "/opt/homebrew"; then
+      echo "✗ bundled mosh-client links a /opt/homebrew dylib — not brew-free" >&2
+      otool -L "$_cli/client/cli/bin/mosh-client" | grep "/opt/homebrew" >&2; exit 1
+    fi
+    echo "→ bundled static mosh + mosh-client → .../remotepair/cli/client/cli/bin/"
+  else
+    echo "  (no ~/.local/bin/mosh-client — skipping mosh bundle; client attach uses ssh fallback)"
+  fi
   # Also bundle the SIGNED host app so the onboarding's `xpair install-host` (default scp mode) finds a
   # local .app to ship to the host. The installed CLI (~/.local/bin/xpair) runs install-host with
   # RP_REPO_ROOT=<this cli dir> (config.sh derives REPO_ROOT=<cli>; install.sh persists it to

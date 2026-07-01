@@ -139,7 +139,9 @@ for p in \
   "$HOME/.local/bin/xpair-desktop" \
   "$HOME/.local/bin/xpair-editor" \
   "$HOME/.local/bin/xpair-mount" \
-  "$HOME/.local/bin/xpair-launch"; do
+  "$HOME/.local/bin/xpair-launch" \
+  "$HOME/.local/bin/mosh" \
+  "$HOME/.local/bin/mosh-client"; do
   run rm -f "$p"
 done
 remove_xpair_app_symlink "$HOME/.local/bin/tmux-aqua"
