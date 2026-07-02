@@ -196,6 +196,9 @@ cmd_mount() {
   # Guard: already mounted?
   if is_mounted "$mountpoint"; then
     ok "Already mounted at $mountpoint"
+    # Emit the same Mountpoint: line the success path prints so onboarding-bridge.mount()
+    # parses a non-empty mountpoint on an idempotent re-mount (else code 0 + empty → false failure).
+    printf '  Mountpoint: %s\n' "$mountpoint"
     return 0
   fi
 
