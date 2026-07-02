@@ -873,7 +873,19 @@ cmd_attach() {
   local rc=0
   if command -v mosh >/dev/null 2>&1; then
     printf 'attaching via mosh → tmux session "%s" on %s ...\n' "$session" "$REMOTE_HOST"
-    if mosh --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
+    # Pin --client to OUR bundled mosh-client ONLY when the mosh we're invoking IS our own
+    # ($LOCAL_BIN/mosh). If a system/Homebrew mosh is on PATH, let it resolve its matching mosh-client
+    # via PATH — don't force it onto a possibly-stale/unrelated $LOCAL_BIN/mosh-client. $MOSH_CLIENT
+    # (explicit override) always wins; a system mosh with no bundled client just does its PATH lookup.
+    local _clientarg=()
+    if [ -n "${MOSH_CLIENT:-}" ]; then
+      _clientarg=(--client="$MOSH_CLIENT")
+    elif [ ! -L "$LOCAL_BIN/mosh" ] && [ "$(command -v mosh)" = "$LOCAL_BIN/mosh" ] && [ -x "$LOCAL_BIN/mosh-client" ]; then
+      # ! -L: our install writes a REGULAR-FILE shim (install.sh skips/preserves user symlinks), so a
+      # symlink at $LOCAL_BIN/mosh is a user shim (e.g. Homebrew) — don't force our client onto it.
+      _clientarg=(--client="$LOCAL_BIN/mosh-client")
+    fi
+    if mosh ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
       trap - HUP TERM
       return 0
     fi

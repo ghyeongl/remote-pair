@@ -91,22 +91,32 @@ case ":$PATH:" in *":$LOCAL_BIN:"*) : ;; *) warn "$LOCAL_BIN is not in PATH — 
 mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
 
 # ── Common: ensure mosh (resilient UDP attach; ssh fallback if absent) ──
-# Split by role. The CLIENT runs `mosh`/`mosh-client` to connect and always has Homebrew (it installed
-# Xpair via cask), so install the mosh package there if missing. The HOST needs only mosh-server, which
-# ships INSIDE XpairHost.app — built static against protobuf 3.21.12 (pre-abseil → 0 Homebrew dylib deps;
-# see host/build-mosh.sh) and symlinked to ~/.local/bin/mosh-server by the app's self-installer. So a
-# host-only install never touches brew. Untracked by the manifest (like cliclick) — uninstall leaves it.
-if command -v mosh >/dev/null 2>&1; then
-  say "mosh present ($(command -v mosh))"
-elif is_client; then
-  BREW="$(command -v brew 2>/dev/null || true)"
-  for _b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -n "$BREW" ] && break; [ -x "$_b" ] && BREW="$_b"; done
-  if [ -n "$BREW" ]; then
-    say "mosh not found — installing via Homebrew (client attach)"
-    "$BREW" install mosh || warn "mosh install failed — manual: brew install mosh (attach falls back to ssh)"
+# CLIENT: ship a self-contained STATIC mosh + mosh-client inside Xpair.app (built against protobuf
+# 3.21.12, pre-abseil → 0 Homebrew dylib deps; see host/build-mosh.sh), bundled into this repo-shaped
+# CLI tree by client/ide/build.sh. Install them to ~/.local/bin the same way the xpair CLI is installed,
+# so a client install is fully brew-free. A dev checkout (no client build → no bundle) falls back to any
+# system mosh on PATH, else to `ssh -t` at attach time. HOST: needs only mosh-server, shipped INSIDE
+# XpairHost.app and symlinked to ~/.local/bin by the app's self-installer — so a host install is brew-free too.
+if command -v mosh >/dev/null 2>&1 && command -v mosh-client >/dev/null 2>&1; then
+  # A COMPLETE mosh (the wrapper AND its mosh-client helper) is already on PATH. RESPECT it — never
+  # overwrite/rm a user-owned binary or symlink (would corrupt e.g. a Homebrew install). Brew-free:
+  # this branch invokes no brew. A mosh wrapper WITHOUT its mosh-client is broken, so we fall through
+  # and install the complete bundled pair. A brew-less client has neither and also falls through.
+  say "mosh present ($(command -v mosh)) — keeping it"
+elif is_client && [ -x "$CLIENT_DIR/bin/mosh" ] && [ -x "$CLIENT_DIR/bin/mosh-client" ]; then
+  # Treat the wrapper + mosh-client as ONE unit. If EITHER $LOCAL_BIN target is a user-owned symlink
+  # (e.g. a Homebrew shim, even off-PATH), keep the user's setup and install NEITHER: installing only
+  # half the pair would mismatch (our client beside their wrapper), and install_file's `cp` would follow
+  # a symlink and overwrite the user's real binary. Only install when BOTH dests are regular-file/absent.
+  if [ -L "$LOCAL_BIN/mosh" ] || [ -L "$LOCAL_BIN/mosh-client" ]; then
+    warn "$LOCAL_BIN/mosh(-client) is a user-owned symlink — keeping the user's mosh, not installing the bundled pair"
   else
-    warn "mosh not found and Homebrew unavailable — attach falls back to ssh. Install Homebrew, then: brew install mosh"
+    say "mosh (bundled static) → $LOCAL_BIN (brew-free client attach)"
+    install_file "$CLIENT_DIR/bin/mosh"        "$LOCAL_BIN/mosh"        755
+    install_file "$CLIENT_DIR/bin/mosh-client" "$LOCAL_BIN/mosh-client" 755
   fi
+elif is_client; then
+  warn "no bundled mosh in this build and none on PATH — attach falls back to ssh (dev checkout)"
 else
   say "mosh-server provided by XpairHost.app bundle (host needs no Homebrew mosh)"
 fi
