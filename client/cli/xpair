@@ -896,7 +896,10 @@ cmd_attach() {
       # symlink at $LOCAL_BIN/mosh is a user shim (e.g. Homebrew) — don't force our client onto it.
       _clientarg=(--client="$LOCAL_BIN/mosh-client")
     fi
-    if mosh ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
+    # mosh spawns its OWN ssh for the server handshake — the ssh() shell wrapper above does NOT apply to
+    # it — so thread the pairing identity through --ssh (mirrors xpair-launch). On a host paired only with
+    # ~/.xpair/host/pairing_ed25519, omitting this fails the mosh handshake before it can attach.
+    if mosh --ssh="ssh $SSH_ID" ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
       trap - HUP TERM
       return 0
     fi

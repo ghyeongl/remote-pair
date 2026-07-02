@@ -46,7 +46,9 @@ test("client launches and reattaches persistent host sessions by stable IDs, not
   // --client pins our bundled mosh-client ONLY when the mosh being invoked is our own $LOCAL_BIN/mosh
   // (a system/Homebrew mosh resolves its own helper via PATH); --server is the host side.
   assert.match(xpair, /elif \[ ! -L "\$LOCAL_BIN\/mosh" \] && \[ "\$\(command -v mosh\)" = "\$LOCAL_BIN\/mosh" \] && \[ -x "\$LOCAL_BIN\/mosh-client" \]; then/);
-  assert.match(xpair, /mosh \$\{_clientarg\[@\]\+"\$\{_clientarg\[@\]\}"\} --server="\$\{MOSH_SERVER:-\$HOME\/\.local\/bin\/mosh-server\}"/);
+  // --ssh threads the pairing identity into mosh's own ssh handshake (mosh doesn't use the ssh() wrapper),
+  // so a host paired only with the dedicated pairing key can still reattach over mosh.
+  assert.match(xpair, /mosh --ssh="ssh \$SSH_ID" \$\{_clientarg\[@\]\+"\$\{_clientarg\[@\]\}"\} --server="\$\{MOSH_SERVER:-\$HOME\/\.local\/bin\/mosh-server\}"/);
   assert.match(xpair, /attach -d -t "=\$session"/);
 
   assert.match(launcher, /Session name base = <readable-name>-<full-path-hash5>/);

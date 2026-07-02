@@ -30,7 +30,7 @@ test("Q0383/Q0384 no discovered host guides to host onboarding and rescan", () =
   assert.match(bridge, /async discover\(\)[\s\S]*cli\(\["discover", "--json"\]\)/, "onboarding bridge must call real xpair discovery");
 
   assert.match(app, /w\.index === 3 && !selectedHost/);
-  assert.match(app, /w\.index === 3 && \([\s\S]*<StepDiscover selected=\{selectedHost\} setSelected=\{setSelected\} \/>/);
+  assert.match(app, /w\.index === 3 && \([\s\S]*<StepDiscover[\s\S]*selected=\{selectedHost\}[\s\S]*setSelected=\{setSelected\}/);
   assert.match(stepDiscover, /const empty = !scanning && hosts\.length === 0;/);
   assert.match(stepDiscover, /hosts\.length === 0 && scanning/);
   assert.match(stepDiscover, /t\("discover\.installedQ"\)/);

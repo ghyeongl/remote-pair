@@ -42,6 +42,17 @@ export function StepUpdate({ host, state, setState, pct, setPct, onBackToDiscove
       const status = await window.remotepair.hostAppStatus(target);
       setPct(90);
       if (status.compatible) {
+        // `xpair install-host` normalizes a user-qualified target (user@addr) to a bare host and writes
+        // REMOTE_HOST=<bare> — so an already-paired below-floor host loses its login user after the
+        // update, and later heartbeat/launch/RD connect as the local username and fail. Re-save the
+        // original account-qualified target (`config set host` preserves user@addr).
+        const saved = await window.remotepair.setHost(target);
+        if (saved && saved.code !== 0) {
+          setError(saved.err || saved.out || t("update.error"));
+          setPct(0);
+          setState("idle");
+          return;
+        }
         setPct(100);
         setState("done");
         return;

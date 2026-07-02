@@ -34,7 +34,7 @@ test("first connection scans Bonjour LAN first and offers discovered host rows (
   assert.match(app, /WELCOME: 0,[\s\S]*CONSENT_CRASH: 1,[\s\S]*CONSENT_ANALYTICS: 2,[\s\S]*DISCOVER: 3,[\s\S]*UPDATE: 4,[\s\S]*WAIT_PERM: 5,/);
   assert.match(app, /const \[selectedHost, setSelectedHost\] = useState<DiscoveredHost \| null>\(null\);/);
   assert.match(app, /const setSelected = useCallback\(\(host: DiscoveredHost \| null\) => \{/);
-  assert.match(app, /w\.index === 3 && \([\s\S]*<StepDiscover selected=\{selectedHost\} setSelected=\{setSelected\} \/>/);
+  assert.match(app, /w\.index === 3 && \([\s\S]*<StepDiscover[\s\S]*selected=\{selectedHost\}[\s\S]*setSelected=\{setSelected\}/);
 
   assert.match(stepDiscover, /window\.remotepair\.discover\(\)/);
   assert.match(stepDiscover, /for \(const peer of res\.peers \|\| \[\]\)/);

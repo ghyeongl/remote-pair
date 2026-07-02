@@ -25,6 +25,9 @@ type BridgePeer = Awaited<ReturnType<typeof window.remotepair.discover>>["peers"
 type Props = {
   selected: DiscoveredHost | null;
   setSelected: (h: DiscoveredHost | null) => void;
+  // Set when onboarding was opened by the launch guard because the HOST's agent engine is missing/
+  // unauthenticated (?startStep=engine). The client has no engine step, so surface a host-onboarding CTA.
+  engineRecovery?: boolean;
 };
 
 function peerToHost(peer: BridgePeer): DiscoveredHost {
@@ -55,7 +58,7 @@ function deriveHostFlags(r: Awaited<ReturnType<typeof window.remotepair.hostAppS
   return { majorMismatch, outdated };
 }
 
-export function StepDiscover({ selected, setSelected }: Props) {
+export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
   const { t } = useT();
   const [scanning, setScanning] = useState(true);
   const [hosts, setHosts] = useState<DiscoveredHost[]>([]);
@@ -192,6 +195,21 @@ export function StepDiscover({ selected, setSelected }: Props) {
           )}
         </Button>
       </div>
+
+      {engineRecovery && (
+        <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4">
+          <h3 className="text-sm font-semibold text-foreground">
+            {t("discover.engineRecovery.title")}
+          </h3>
+          <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+            {t("discover.engineRecovery.desc")}
+          </p>
+          <Button size="sm" className="mt-3" onClick={openHostOnboarding} disabled={openingHost}>
+            {t("discover.openHost")}
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
 
       <div className="mt-5 space-y-2">
         {hosts.length === 0 && scanning && (

@@ -406,7 +406,10 @@ _remote_next_n() {
 # safe even if the remote has no romanize/claude.
 HOST_DIR="$(map_to_host "$PROJECT_DIR")"
 REMOTE_PROJ="${REMOTE_HOST}_$(_proj_base "$HOST_DIR")"
-REMOTE_PROJ="${REMOTE_PROJ//[.:]/_}"
+# REMOTE_HOST may be user-qualified (user@addr). tmux session names must stay within the
+# [A-Za-z0-9_.-] set that `xpair attach` accepts, so sanitize '@' too (not just '.'/':') — otherwise
+# detached/history reattach from the Sessions UI fails for hosts paired as hostUser@addr.
+REMOTE_PROJ="${REMOTE_PROJ//[.:@]/_}"
 HOST_DIR_Q="$(sh_quote "$HOST_DIR")"
 AQUA_SOCK_Q="$(sh_quote "$AQUA_SOCK")"
 REMOTE_PROJ_Q="$(sh_quote "$REMOTE_PROJ")"

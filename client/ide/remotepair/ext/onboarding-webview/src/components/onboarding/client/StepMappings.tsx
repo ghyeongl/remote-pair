@@ -17,6 +17,9 @@ export type Mapping = {
   hostPath?: string;
   clientPath?: string;
   savedClientPath?: string;
+  // The host path actually persisted for savedClientPath — used to tell a benign client-path narrowing
+  // (host unchanged) from a real host-folder change that `xpair map add` would silently no-op.
+  savedHostPath?: string;
   persisted?: boolean;
   persisting?: boolean;
   error?: string;
@@ -63,6 +66,7 @@ export function parseFolderMaps(raw: string, modes?: string): Mapping[] {
         hostPath,
         clientPath,
         savedClientPath: clientPath,
+        savedHostPath: hostPath,
         persisted: !!clientPath && !!hostPath,
       };
     });
@@ -204,6 +208,18 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
       // path via longest-prefix resolution) → data loss. Only remove the old entry when the add really
       // persisted a distinct new one.
       const addWasNoOp = /already mapped/i.test(added.out || "");
+      if (savedPath && changingPath && addWasNoOp && resolvedHostPath !== mapping.savedHostPath) {
+        // The new client path is a descendant of an existing mapped root, so `xpair map add` refused it
+        // ("already mapped") and the host-folder change was NOT persisted — the old root still resolves
+        // this subtree to the OLD host path. Marking the row saved with the new host path would let the
+        // completion gate pass while launches resolve files to the wrong host directory. Reject and ask
+        // the user to remove the parent mapping first. (A benign narrowing that keeps the same host path
+        // falls through and is recorded against the existing root below.)
+        throw new Error(
+          `This client folder is already inside the mapping for ${savedPath}. ` +
+            "Remove that mapping first to point it at a different host folder.",
+        );
+      }
       if (savedPath && changingPath && !addWasNoOp) {
         // The replacement is saved above, so it is now safe to drop the OLD entry. Doing the remove
         // AFTER a successful add means a bad/nonexistent new client path can never lose the old mapping.
@@ -219,6 +235,7 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
         clientPath: persistedKey,
         hostPath: resolvedHostPath,
         savedClientPath: persistedKey,
+        savedHostPath: resolvedHostPath,
         persisted: true,
         persisting: false,
         error: "",

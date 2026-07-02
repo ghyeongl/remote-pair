@@ -58,6 +58,15 @@ function initialStepFromLocation() {
   return S.WELCOME;
 }
 
+// The native launch guard opens onboarding with `?startStep=engine` when the HOST's agent engine is
+// missing/unauthenticated. initialStepFromLocation() collapses that to S.DISCOVER (the client has no
+// engine step — engine setup lives in the host app), which would lose WHY we landed here. Read the raw
+// reason so Discover can surface the host-engine-repair CTA instead of behaving like a normal scan.
+function initialStartReason(): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("startStep") || "";
+}
+
 function deriveHostFlags(r: Awaited<ReturnType<typeof window.remotepair.hostAppStatus>>) {
   const majorMismatch =
     !!r.installed && !r.compatible && r.incompatibleKind === "major_mismatch";
@@ -69,6 +78,9 @@ function deriveHostFlags(r: Awaited<ReturnType<typeof window.remotepair.hostAppS
 export default function App() {
   const { t } = useT();
   const [initialStep] = useState(() => initialStepFromLocation());
+  // Sticky for the window's lifetime: if the engine is fixed on the host, the next launch's native guard
+  // won't return `engine`, so the window simply won't reopen in this mode.
+  const [engineRecovery] = useState(() => initialStartReason() === "engine");
   const w = useWizard(TOTAL, initialStep);
 
   useEffect(() => {
@@ -363,7 +375,11 @@ export default function App() {
             <StepConsent kind="analytics" value={analytics} onChange={setAnalytics} />
           )}
           {w.index === 3 && (
-            <StepDiscover selected={selectedHost} setSelected={setSelected} />
+            <StepDiscover
+              selected={selectedHost}
+              setSelected={setSelected}
+              engineRecovery={engineRecovery}
+            />
           )}
           {w.index === 4 && (
             <StepUpdate

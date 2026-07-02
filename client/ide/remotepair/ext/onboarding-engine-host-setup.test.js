@@ -40,6 +40,22 @@ test("Q0545 client flow has no engine step, but native resume still checks host.
   assert.match(onboardingMain, /probeBridge\.hostEngineStatus\(engineToCheck\)/);
 });
 
+test("Q0545 engine guard failure surfaces the host-onboarding CTA, not a bare Discover", () => {
+  // R15-5: `?startStep=engine` must not be silently collapsed into a normal Discover landing — an
+  // already-paired host would just re-pair and re-hit the guard. App preserves the reason and threads
+  // an engineRecovery flag into StepDiscover, which renders a host-onboarding CTA (engine setup lives
+  // in the host app; the client has no engine step).
+  const discover = fs.readFileSync(
+    path.join(root, "onboarding-webview/src/components/onboarding/client/StepDiscover.tsx"),
+    "utf8",
+  );
+  assert.match(clientApp, /function initialStartReason\(\)/);
+  assert.match(clientApp, /engineRecovery\] = useState\(\(\) => initialStartReason\(\) === "engine"\)/);
+  assert.match(clientApp, /<StepDiscover[\s\S]*engineRecovery=\{engineRecovery\}/);
+  assert.match(discover, /engineRecovery\?: boolean/);
+  assert.match(discover, /engineRecovery &&[\s\S]*discover\.engineRecovery\.title[\s\S]*openHostOnboarding/);
+});
+
 test("Q0545 host onboarding owns the 11-step engine setup gate", () => {
   assert.match(hostApp, /const CONSENT_ANALYTICS_IDX = 2;/);
   assert.match(hostApp, /const PERM_START = 3;/);
