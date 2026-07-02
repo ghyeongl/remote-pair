@@ -94,11 +94,14 @@ echo "installed: $BINDIR/mosh-client + $BINDIR/mosh (perl wrapper)"
 
 # ── 3. self-containment assertion (no brew dylib = embeddable) ──
 # Check both Mach-O binaries (server + client). The `mosh` wrapper is a perl script → no dylib deps.
-echo "=== dynamic dependency check (no brew dylib = self-contained) ==="
+# "self-contained" = links ONLY system dylibs (/usr/lib, /System) — reject ANY non-system prefix,
+# not just /opt/homebrew (arm64 brew): /usr/local (Intel brew) and others would also break brew-less Macs.
+echo "=== dynamic dependency check (system-only dylibs = self-contained) ==="
 _brewfree=1
 for _b in "$BINDIR/mosh-server" "$BINDIR/mosh-client"; do
-  if otool -L "$_b" | tail -n +2 | grep -q "/opt/homebrew"; then
-    echo "⚠ brew dylib links remain in $_b:"; otool -L "$_b" | grep "/opt/homebrew"; _brewfree=0
+  _ns="$(otool -L "$_b" | tail -n +2 | awk '{print $1}' | grep -vE '^/(usr/lib|System)/' || true)"
+  if [ -n "$_ns" ]; then
+    echo "⚠ non-system dylib links remain in $_b:"; printf '  %s\n' "$_ns"; _brewfree=0
   fi
 done
 if [ "$_brewfree" = 1 ]; then

@@ -99,6 +99,11 @@ mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
 # XpairHost.app and symlinked to ~/.local/bin by the app's self-installer — so a host install is brew-free too.
 if is_client && [ -x "$CLIENT_DIR/bin/mosh" ] && [ -x "$CLIENT_DIR/bin/mosh-client" ]; then
   say "mosh (bundled static) → $LOCAL_BIN (brew-free client attach)"
+  # If mosh/mosh-client is a SYMLINK (e.g. into a Homebrew install), remove the LINK first — otherwise
+  # install_file's `cp "$src" "$dst"` follows the link and overwrites the user's real mosh binary
+  # (corrupting their Homebrew install). Removing a symlink never touches its target; we replace only
+  # Xpair's own shim. A regular-file dest is left to install_file's backup-and-overwrite.
+  for _l in "$LOCAL_BIN/mosh" "$LOCAL_BIN/mosh-client"; do [ -L "$_l" ] && rm -f "$_l"; done
   install_file "$CLIENT_DIR/bin/mosh"        "$LOCAL_BIN/mosh"        755
   install_file "$CLIENT_DIR/bin/mosh-client" "$LOCAL_BIN/mosh-client" 755
 elif command -v mosh >/dev/null 2>&1; then
