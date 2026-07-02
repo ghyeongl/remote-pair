@@ -43,11 +43,11 @@ test("US-004 window close tears down pairing and backend TTL force-closes Broadc
     /private func expireBroadcastWindowLocked\(\) \{[\s\S]*phase = "closed"[\s\S]*incoming = nil[\s\S]*incomingExpiresAt = nil[\s\S]*lastError = "broadcast expired; restart pairing"[\s\S]*closeEndpoint\(cancelBroadcastTimer: false\)/,
     "TTL expiry must force the same closed endpoint state as UI cleanup",
   );
-  assert.match(
-    manager,
-    /private func closeEndpoint\(cancelBroadcastTimer: Bool = true\) \{[\s\S]*broadcastExpiryTimer\?\.cancel\(\)[\s\S]*endpoint\?\.cancel\(\)[\s\S]*serviceInstanceID = ""[\s\S]*hostNonce = ""[\s\S]*BonjourAdvertiser\.setPairingInfo\(nil\)/,
-    "normal endpoint close must cancel TTL, clear broadcast identity, and stop Bonjour pairing info",
-  );
+	  assert.match(
+	    manager,
+	    /private func closeEndpoint\(cancelBroadcastTimer: Bool = true, cancelMetadata: Bool = true\) \{[\s\S]*broadcastExpiryTimer\?\.cancel\(\)[\s\S]*metadataServer\?\.cancel\(\)[\s\S]*endpoint\?\.cancel\(\)[\s\S]*serviceInstanceID = ""[\s\S]*hostNonce = ""[\s\S]*BonjourAdvertiser\.setPairingInfo\(nil\)/,
+	    "normal endpoint close must cancel TTL, clear broadcast identity, and stop Bonjour pairing info",
+	  );
 });
 
 test("US-004 pairing nonce uses SecRandomCopyBytes before advertising", () => {
@@ -78,14 +78,17 @@ test("US-004 SSH proof requires observed fingerprint and has no filesystem marke
   assert.match(manager, /throw PairingSecurityError\.missingLoginFingerprint/);
   assert.match(manager, /PairingSecurity\.proofMatches\(approvedFingerprint: approved, loginFingerprint: login\)/);
   assert.match(manager, /throw PairingSecurityError\.proofFingerprintMismatch/);
-  assert.match(
-    manager,
-    /static let defaultGatePath = "\/usr\/local\/bin\/xpair-ssh-gate"/,
-    "production gate path must remain the OpenSSH forced-command helper",
-  );
-  assert.match(
-    manager,
-    /command="\\#\(gatePath\) \\#\(clientID\) \\#\(fingerprint\)"/,
+	  assert.match(
+	    manager,
+	    /static var defaultGatePath: String \{ "\\\(home\)\/\.xpair\/host\/bin\/xpair-ssh-gate" \}/,
+	    "production gate path must live under the user-writable Xpair host bin dir",
+	  );
+	  assert.match(manager, /permitopen="127\.0\.0\.1:\\#\(remoteDesktopSignalPort\)"/);
+	  assert.match(manager, /static let remoteDesktopSignalPort = 8890/);
+	  assert.match(manager, /assert\(!line\.contains\("no-port-forwarding"\)\)/);
+	  assert.match(
+	    manager,
+	    /command="\\#\(gatePath\) \\#\(clientID\) \\#\(fingerprint\)"/,
     "authorized_keys forced command must carry the matched key fingerprint into the live gate",
   );
   assert.match(manager, /export XPAIR_GATE_LOGIN_FP="\$login_fp"/);
@@ -132,14 +135,16 @@ test("US-004 pending proof confirms pairing and exits before command execution",
 });
 
 test("US-004 key install is ledger-first and rolls back on partial failure", () => {
-  assert.match(manager, /let originalLines = readAuthorizedKeyLines\(\)/);
-  assert.match(manager, /let originalLedger = readLedger\(\)/);
+	  assert.match(manager, /let originalLines = readAuthorizedKeyLines\(\)/);
+	  assert.match(manager, /authorizedKeyBlob\(in: existing\) == req\.keyBlob/);
+	  assert.match(manager, /let originalLedger = readLedger\(\)/);
   assert.match(
     manager,
     /try writeLedger\(ledger\)[\s\S]*do \{[\s\S]*try ensureGateHelperReady\(\)[\s\S]*try writeAuthorizedKeyLines\(lines\)[\s\S]*\} catch \{[\s\S]*try\? writeLedger\(originalLedger\)[\s\S]*try\? writeAuthorizedKeyLines\(originalLines\)/,
     "ledger write must happen before authorized_keys write, with rollback for later failures",
-  );
-});
+	  );
+	  assert.match(manager, /private static func installRemovesLegacyDuplicateAuthorizedKey\(pubLine: String\) throws/);
+	});
 
 test("US-004 UDP rate limiting has a global bucket and LRU source eviction", () => {
   assert.match(manager, /private var globalRateBucket = SourceRateBucket/);

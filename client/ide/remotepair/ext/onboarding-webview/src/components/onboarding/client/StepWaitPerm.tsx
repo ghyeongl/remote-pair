@@ -47,18 +47,36 @@ export function StepWaitPerm({
 
     let stopped = false;
     let pollTimer: number | undefined;
+    let sendTimer: number | undefined;
+    let lastFingerprint = "";
+    const pairingHost = host.pairingAddress ?? host.address;
+    const sshTarget = host.sshTarget ?? host.address;
+    const clearTimers = () => {
+      if (pollTimer !== undefined) window.clearInterval(pollTimer);
+      if (sendTimer !== undefined) window.clearInterval(sendTimer);
+      pollTimer = undefined;
+      sendTimer = undefined;
+    };
     const poll = async (expectedFingerprint: string) => {
       try {
-        const status = await window.remotepair.pairingStatus({ host: host.address });
+        const status = await window.remotepair.pairingStatus({
+          host: sshTarget,
+          pairingHost,
+        });
         if (stopped) return;
         if (status.paired && (!expectedFingerprint || status.fingerprint === expectedFingerprint)) {
-          if (pollTimer !== undefined) window.clearInterval(pollTimer);
-          await window.remotepair.setHost(host.address).catch(() => {});
+          clearTimers();
+          const pinned = await window.remotepair.pinHostKey(sshTarget, host.hostKeyFP!);
+          if (!pinned.ok) {
+            if (!stopped) setError(pinned.err || "Could not save the confirmed host key.");
+            return;
+          }
+          await window.remotepair.setHost(sshTarget).catch(() => {});
           if (!stopped) setAccepted(true);
           return;
         }
         if (status.denied) {
-          if (pollTimer !== undefined) window.clearInterval(pollTimer);
+          clearTimers();
           onDeny();
           return;
         }
@@ -71,35 +89,45 @@ export function StepWaitPerm({
     void (async () => {
       setError("");
       setClientFingerprint("");
-      const sent = await window.remotepair.sendPairingRequest({
-        host: host.address,
-        port: host.pairPort!,
-        hostKeyFP: host.hostKeyFP!,
-        hostNonce: host.hostNonce!,
-        serviceInstanceID: host.serviceInstanceID!,
-      });
-      if (stopped) return;
-      if (!sent.ok) {
-        setError(sent.err || "Could not send pairing request.");
-        return;
-      }
-      setClientFingerprint(sent.fingerprint);
-      await poll(sent.fingerprint);
-      if (!stopped) {
-        pollTimer = window.setInterval(() => void poll(sent.fingerprint), 1500);
-      }
+      const sendOnce = async () => {
+        const sent = await window.remotepair.sendPairingRequest({
+          host: pairingHost,
+          port: host.pairPort!,
+          hostKeyFP: host.hostKeyFP!,
+          hostNonce: host.hostNonce!,
+          serviceInstanceID: host.serviceInstanceID!,
+        });
+        if (stopped) return;
+        if (!sent.ok) {
+          setError(sent.err || "Could not send pairing request.");
+          return;
+        }
+        lastFingerprint = sent.fingerprint;
+        setClientFingerprint(sent.fingerprint);
+        setError("");
+        if (pollTimer === undefined) {
+          await poll(sent.fingerprint);
+          if (!stopped && pollTimer === undefined) {
+            pollTimer = window.setInterval(() => void poll(lastFingerprint), 1500);
+          }
+        }
+      };
+      await sendOnce();
+      if (!stopped) sendTimer = window.setInterval(() => void sendOnce(), 2000);
     })().catch((err) => {
       if (!stopped) setError(err instanceof Error ? err.message : String(err));
     });
 
     return () => {
       stopped = true;
-      if (pollTimer !== undefined) window.clearInterval(pollTimer);
+      clearTimers();
     };
   }, [
     accepted,
     denied,
     host?.address,
+    host?.pairingAddress,
+    host?.sshTarget,
     host?.hostKeyFP,
     host?.hostNonce,
     host?.pairPort,

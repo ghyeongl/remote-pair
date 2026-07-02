@@ -42,14 +42,17 @@ test("Q0369 Q0402 Q0474 client onboarding reaches completion only from gated Don
   assert.match(app, /if \(!selectedHost\) \{[\s\S]*w\.goTo\(S\.DISCOVER, "prev"\)/);
   assert.match(app, /if \(majorMismatch \|\| \(needsUpdate && updateState !== "done"\)\) \{[\s\S]*w\.goTo\(S\.UPDATE, "prev"\)/);
   assert.match(app, /if \(!permAccepted \|\| permDenied\) \{[\s\S]*w\.goTo\(S\.WAIT_PERM, "prev"\)/);
-  assert.match(app, /if \(mappings\.length === 0\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
+  assert.match(app, /const hasRealMapping = mappings\.some\(isPersistedRealMapping\)/);
+  assert.match(app, /if \(!hasRealMapping\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
   assert.match(app, /footerSlot=\{[\s\S]*w\.isLast \? \([\s\S]*window\.remotepair\.complete\(\)/);
   assert.match(app, /w\.index === 7 && <StepDone host=\{selectedHost\} mappings=\{mappings\} \/>/);
 
-  assert.match(waitPerm, /status\.paired[\s\S]*await window\.remotepair\.setHost\(host\.address\)/);
+  assert.match(waitPerm, /status\.paired[\s\S]*window\.remotepair\.pinHostKey\(sshTarget, host\.hostKeyFP!\)/);
+  assert.match(waitPerm, /status\.paired[\s\S]*await window\.remotepair\.setHost\(sshTarget\)/);
   assert.match(waitPerm, /setAccepted\(true\)/);
   assert.match(mappings, /mappings: Mapping\[\]/);
-  assert.match(mappings, /setMappings: \(m: Mapping\[\]\) => void/);
+  assert.match(mappings, /setMappings: Dispatch<SetStateAction<Mapping\[\]>>/);
+  assert.match(mappings, /export function isPersistedRealMapping\(mapping: Mapping\): boolean/);
 
   assert.match(
     preload,

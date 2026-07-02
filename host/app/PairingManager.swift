@@ -7,6 +7,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import Network
 import Security
 
 struct PairingAdvertiseInfo {
@@ -250,11 +251,12 @@ private extension Data {
 
 enum XpairAuthorizedKeys {
     static let proofTimeoutSec: Int64 = 600
-    static let defaultGatePath = "/usr/local/bin/xpair-ssh-gate"
+    static let remoteDesktopSignalPort = 8890
     static var selfTestHomeOverride: String?
     static var selfTestGatePathOverride: String?
-    static var gatePath: String { selfTestGatePathOverride ?? defaultGatePath }
     static var home: String { selfTestHomeOverride ?? HOME }
+    static var defaultGatePath: String { "\(home)/.xpair/host/bin/xpair-ssh-gate" }
+    static var gatePath: String { selfTestGatePathOverride ?? defaultGatePath }
     static var sshDir: String { "\(home)/.ssh" }
     static var authorizedKeysPath: String { "\(home)/.ssh/authorized_keys" }
     static var lockPath: String { "\(home)/.ssh/.xpair-authorized-keys.lock" }
@@ -269,7 +271,7 @@ enum XpairAuthorizedKeys {
         guard PairingSecurity.validateClientID(clientID) else { throw PairingSecurityError.invalidClientID }
         let safeName = PairingSecurity.sanitizeCommentValue(name)
         let comment = "xpair:v1 client_id=\(clientID) fp=\(fingerprint) created=\(created) name=\(safeName)"
-        return #"restrict,command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
+        return #"restrict,port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)",command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
     }
 
     static func install(_ req: VerifiedPairingRequest) throws -> AuthorizedClientRecord {
@@ -286,8 +288,8 @@ enum XpairAuthorizedKeys {
             let originalLines = readAuthorizedKeyLines()
             var lines = originalLines
             lines.removeAll { existing in
-                existing.contains(" xpair:v1 ") &&
-                (existing.contains("client_id=\(clientID)") || existing.contains(" \(req.clientPubKey) "))
+                authorizedKeyBlob(in: existing) == req.keyBlob ||
+                (existing.contains(" xpair:v1 ") && existing.contains("client_id=\(clientID)"))
             }
             lines.append(line)
 
@@ -410,6 +412,16 @@ enum XpairAuthorizedKeys {
     private static func readAuthorizedKeyLines() -> [String] {
         guard let raw = try? String(contentsOfFile: authorizedKeysPath, encoding: .utf8) else { return [] }
         return raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).filter { !$0.isEmpty }
+    }
+
+    private static func authorizedKeyBlob(in line: String) -> String? {
+        let fields = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .map(String.init)
+        for i in fields.indices where fields[i] == "ssh-ed25519" && i + 1 < fields.count {
+            return fields[i + 1]
+        }
+        return nil
     }
 
     private static func writeAuthorizedKeyLines(_ lines: [String]) throws {
@@ -748,6 +760,50 @@ final class PairingUDPServer {
     }
 }
 
+final class PairingMetadataHTTPServer {
+    static let port: UInt16 = 8891
+    private let listener: NWListener
+    private let response: () -> [String: Any]
+
+    init(queue: DispatchQueue, response: @escaping () -> [String: Any]) throws {
+        guard let endpointPort = NWEndpoint.Port(rawValue: Self.port) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+        }
+        self.response = response
+        listener = try NWListener(using: .tcp, on: endpointPort)
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            connection.start(queue: queue)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { _, _, _, _ in
+                let body = (try? JSONSerialization.data(withJSONObject: self.response(), options: [.sortedKeys]))
+                    ?? Data("{}".utf8)
+                var payload = Data(
+                    """
+                    HTTP/1.1 200 OK\r
+                    Content-Type: application/json\r
+                    Cache-Control: no-store\r
+                    Content-Length: \(body.count)\r
+                    Connection: close\r
+                    \r
+                    """.utf8
+                )
+                payload.append(body)
+                connection.send(content: payload, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+            }
+        }
+        listener.start(queue: queue)
+    }
+
+    func cancel() {
+        listener.cancel()
+    }
+}
+
 private struct SourceRateBucket {
     var tokens: Double
     var lastRefill: Int64
@@ -759,6 +815,7 @@ final class PairingManager {
     static let shared = PairingManager()
     private let queue = DispatchQueue(label: "xpair.pairing")
     private var endpoint: PairingUDPServer?
+    private var metadataServer: PairingMetadataHTTPServer?
     private var serviceInstanceID = ""
     private var hostNonce = ""
     private var consumed = Set<String>()
@@ -778,7 +835,10 @@ final class PairingManager {
     private var lastError = ""
     private var proofExpiryTimer: DispatchSourceTimer?
     private var broadcastExpiryTimer: DispatchSourceTimer?
+    private var deniedExpiryTimer: DispatchSourceTimer?
+    private var deniedFingerprint = ""
     private let maxBroadcastTTLSec = 300
+    private let deniedMetadataTTLSec = 30
 
     func beginWindow() throws -> [String: Any] {
         try queue.sync {
@@ -806,6 +866,7 @@ final class PairingManager {
             incomingExpiresAt = nil
             frozenDropLogCount = 0
             accepted = nil
+            deniedFingerprint = ""
             lastError = ""
             phase = "closed"
             let nextServiceInstanceID = UUID().uuidString
@@ -817,6 +878,7 @@ final class PairingManager {
             serviceInstanceID = nextServiceInstanceID
             hostNonce = nextHostNonce
             endpoint = server
+            try startMetadataServerLocked()
             BonjourAdvertiser.setPairingInfo(PairingAdvertiseInfo(serviceInstanceID: serviceInstanceID,
                                                                   hostNonce: hostNonce,
                                                                   pairPort: server.port))
@@ -883,11 +945,13 @@ final class PairingManager {
 
     func denyIncoming() -> [String: Any] {
         queue.sync {
+            deniedFingerprint = incoming?.fingerprint ?? ""
             incoming = nil
             incomingExpiresAt = nil
             accepted = nil
             phase = "denied"
-            closeEndpoint()
+            closeEndpoint(cancelMetadata: false)
+            scheduleDeniedExpiryLocked()
             log(.info, "pairing: denied incoming request")
             return statusLocked()
         }
@@ -1074,6 +1138,22 @@ final class PairingManager {
         timer.resume()
     }
 
+    private func scheduleDeniedExpiryLocked() {
+        deniedExpiryTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + .seconds(deniedMetadataTTLSec))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            if self.phase == "denied" {
+                self.phase = "closed"
+                self.deniedFingerprint = ""
+                self.closeEndpoint(cancelBroadcastTimer: false)
+            }
+        }
+        deniedExpiryTimer = timer
+        timer.resume()
+    }
+
     private func expireBroadcastWindowLocked() {
         broadcastExpiryTimer?.cancel()
         broadcastExpiryTimer = nil
@@ -1099,6 +1179,9 @@ final class PairingManager {
             "pairPort": endpoint?.port ?? 0,
             "error": lastError,
         ]
+        if phase == "denied", !deniedFingerprint.isEmpty {
+            out["deniedFingerprint"] = deniedFingerprint
+        }
         if let req = incoming {
             out["request"] = [
                 "id": req.id,
@@ -1128,10 +1211,42 @@ final class PairingManager {
         return out
     }
 
-    private func closeEndpoint(cancelBroadcastTimer: Bool = true) {
+    private func metadataStatusLocked() -> [String: Any] {
+        var out: [String: Any] = [
+            "role": "host",
+            "phase": phase,
+            "serviceInstanceID": serviceInstanceID,
+            "hostNonce": hostNonce,
+            "pairPort": endpoint?.port ?? 0,
+            "hostKeyFP": hostKeyFingerprint() ?? "",
+            "hostUser": NSUserName(),
+            "hostname": Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
+            "version": APP_VERSION,
+        ]
+        if phase == "denied", !deniedFingerprint.isEmpty {
+            out["deniedFingerprint"] = deniedFingerprint
+        }
+        return out
+    }
+
+    private func startMetadataServerLocked() throws {
+        metadataServer?.cancel()
+        metadataServer = try PairingMetadataHTTPServer(queue: queue) { [weak self] in
+            self?.metadataStatusLocked() ?? [:]
+        }
+    }
+
+    private func closeEndpoint(cancelBroadcastTimer: Bool = true, cancelMetadata: Bool = true) {
         if cancelBroadcastTimer {
             broadcastExpiryTimer?.cancel()
             broadcastExpiryTimer = nil
+        }
+        if cancelMetadata {
+            deniedExpiryTimer?.cancel()
+            deniedExpiryTimer = nil
+            deniedFingerprint = ""
+            metadataServer?.cancel()
+            metadataServer = nil
         }
         endpoint?.cancel()
         endpoint = nil
@@ -1237,12 +1352,16 @@ enum PairingSecuritySelfTest {
                                                                        name: "ok") }
         let line = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
                                                                fingerprint: "SHA256:x", created: ts, name: "ok")
-        assert(line.hasPrefix(#"restrict,command="/usr/local/bin/xpair-ssh-gate abc_DEF-123 SHA256:x",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc ssh-ed25519 "#))
+        assert(line.contains("restrict,port-forwarding"))
+        assert(line.contains(#"permitopen="127.0.0.1:8890""#))
+        assert(line.contains("command=\"\(XpairAuthorizedKeys.gatePath) abc_DEF-123 SHA256:x\""))
+        assert(!line.contains("no-port-forwarding"))
         assert(PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:A"))
         assert(!PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:B"))
         try markPairedRequiresObservedSSHLoginFingerprint(pubLine: pubLine)
         try acceptIncomingRequiresExactNonEmptyFingerprint(pubLine: pubLine)
         try gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: pubLine)
+        try installRemovesLegacyDuplicateAuthorizedKey(pubLine: pubLine)
         try installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: pubLine)
         print("pairing security self-test passed")
     }
@@ -1356,9 +1475,9 @@ enum PairingSecuritySelfTest {
             .write(to: ledgerURL)
 
         let auth = """
-        restrict,command="/usr/local/bin/xpair-ssh-gate expired_123 SHA256:expired",no-agent-forwarding \(pubLine) xpair:v1 client_id=expired_123 fp=SHA256:expired created=\(now) name=expired
-        restrict,command="/usr/local/bin/xpair-ssh-gate revoked_123 SHA256:revoked",no-agent-forwarding \(pubLine) xpair:v1 client_id=revoked_123 fp=SHA256:revoked created=\(now) name=revoked
-        restrict,command="/usr/local/bin/xpair-ssh-gate pending_123 SHA256:pending",no-agent-forwarding \(pubLine) xpair:v1 client_id=pending_123 fp=SHA256:pending created=\(now) name=pending
+        restrict,command="\(gate.path) expired_123 SHA256:expired",no-agent-forwarding \(pubLine) xpair:v1 client_id=expired_123 fp=SHA256:expired created=\(now) name=expired
+        restrict,command="\(gate.path) revoked_123 SHA256:revoked",no-agent-forwarding \(pubLine) xpair:v1 client_id=revoked_123 fp=SHA256:revoked created=\(now) name=revoked
+        restrict,command="\(gate.path) pending_123 SHA256:pending",no-agent-forwarding \(pubLine) xpair:v1 client_id=pending_123 fp=SHA256:pending created=\(now) name=pending
         """
         try auth.write(to: sshDir.appendingPathComponent("authorized_keys"), atomically: true, encoding: .utf8)
 
@@ -1420,6 +1539,30 @@ enum PairingSecuritySelfTest {
             let auth = (try? String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)) ?? ""
             assert(!auth.contains(" xpair:v1 "))
             assert(!auth.contains(pubLine))
+        }
+    }
+
+    private static func installRemovesLegacyDuplicateAuthorizedKey(pubLine: String) throws {
+        try withTemporaryAuthorizedKeysHome {
+            let parsed = try PairingSecurity.parseEd25519PublicKey(pubLine)
+            FileManager.default.createFile(atPath: XpairAuthorizedKeys.authorizedKeysPath,
+                                           contents: Data("\(pubLine) legacy-copy\n".utf8),
+                                           attributes: [.posixPermissions: 0o600])
+            let req = VerifiedPairingRequest(id: "legacy_cleanup",
+                                             name: "legacy",
+                                             user: "tester",
+                                             sourceIP: "127.0.0.1",
+                                             clientPubKey: pubLine,
+                                             keyBlob: parsed.keyBlob,
+                                             fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
+                                             timestamp: Int64(Date().timeIntervalSince1970))
+            _ = try XpairAuthorizedKeys.install(req)
+            let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
+            let occurrences = auth.components(separatedBy: parsed.keyBlob).count - 1
+            assert(occurrences == 1)
+            assert(auth.contains(" xpair:v1 "))
+            assert(auth.contains(#"permitopen="127.0.0.1:8890""#))
+            assert(!auth.contains("legacy-copy"))
         }
     }
 

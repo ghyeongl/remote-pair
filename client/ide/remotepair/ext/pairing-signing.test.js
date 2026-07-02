@@ -75,6 +75,15 @@ check("pairing public key sanitizer rejects malformed keys and strips comments",
   );
 });
 
+check("pairing signer supports encrypted keys through ssh-agent without changing raw signature format", () => {
+  const bridgeSource = fs.readFileSync(path.join(__dirname, "onboarding-bridge.js"), "utf8");
+  assert.match(bridgeSource, /async function signWithAgent\(pubBlob, transcript\)/);
+  assert.match(bridgeSource, /SSH_AGENTC_SIGN_REQUEST = 13/);
+  assert.match(bridgeSource, /sigType\.toString\("utf8"\) !== "ssh-ed25519" \|\| rawSig\.length !== 64/);
+  assert.match(bridgeSource, /return await signWithAgent\(pub\.blob, transcript\)/);
+  assert.match(bridgeSource, /encrypted client key is not available through ssh-agent/);
+});
+
 check("gateway MAC guard runs before automatic ssh reachability", () => {
   const extension = fs.readFileSync(path.join(__dirname, "extension.js"), "utf8");
   const probeIdx = extension.indexOf("const probeHost = async () =>");
@@ -139,8 +148,12 @@ check("client wait step uses real pairing request and proof polling", () => {
   assert.match(discover, /serviceInstanceID: peer\.serviceInstanceID/);
   assert.match(discover, /hostNonce: peer\.hostNonce/);
   assert.match(discover, /pairPort: peer\.pairPort/);
+  assert.match(discover, /pairingAddress/);
+  assert.match(discover, /sshTarget/);
   assert.match(wait, /window\.remotepair\.sendPairingRequest/);
   assert.match(wait, /window\.remotepair\.pairingStatus/);
+  assert.match(wait, /window\.setInterval\(\(\) => void sendOnce\(\), 2000\)/);
+  assert.match(wait, /window\.remotepair\.pinHostKey\(sshTarget, host\.hostKeyFP!\)/);
   assert.match(wait, /status\.paired/);
   assert.doesNotMatch(wait, /simAccept|simDeny|setAccepted\(true\)\}/);
 });

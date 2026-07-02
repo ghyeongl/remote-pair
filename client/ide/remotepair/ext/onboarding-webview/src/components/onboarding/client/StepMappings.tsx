@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import { ChevronRight, Folder, FolderOpen, FolderTree, Home, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +16,9 @@ export type Mapping = {
   mode: MappingMode;
   hostPath?: string;
   clientPath?: string;
+  persisted?: boolean;
+  persisting?: boolean;
+  error?: string;
 };
 
 // FALLBACK ONLY: when a mapping has no stored method (FOLDER_MAP_MODES), infer it from the
@@ -58,8 +61,17 @@ export function parseFolderMaps(raw: string, modes?: string): Mapping[] {
         mode: modeOf.get(clientPath) ?? inferMethod(clientPath),
         hostPath,
         clientPath,
+        persisted: !!clientPath && !!hostPath,
       };
     });
+}
+
+export function isPersistedRealMapping(mapping: Mapping): boolean {
+  return !!(
+    mapping.persisted &&
+    mapping.hostPath?.trim() &&
+    mapping.clientPath?.trim()
+  );
 }
 
 type FsNode = { name: string; children?: FsNode[] };
@@ -90,16 +102,62 @@ const HOST_FS: FsNode = {
 
 type Props = {
   mappings: Mapping[];
-  setMappings: (m: Mapping[]) => void;
+  setMappings: Dispatch<SetStateAction<Mapping[]>>;
 };
 
 export function StepMappings({ mappings, setMappings }: Props) {
   const { t } = useT();
   const add = () =>
-    setMappings([...mappings, { id: crypto.randomUUID(), mode: "mount" }]);
-  const remove = (id: string) => setMappings(mappings.filter((m) => m.id !== id));
+    setMappings((current) => [...current, { id: crypto.randomUUID(), mode: "mount" }]);
+  const remove = (id: string) => setMappings((current) => current.filter((m) => m.id !== id));
   const patch = (id: string, p: Partial<Mapping>) =>
-    setMappings(mappings.map((m) => (m.id === id ? { ...m, ...p } : m)));
+    setMappings((current) =>
+      current.map((m) =>
+        m.id === id ? { ...m, ...p, persisted: false, error: undefined } : m,
+      ),
+    );
+  const patchInternal = (id: string, p: Partial<Mapping>) =>
+    setMappings((current) => current.map((m) => (m.id === id ? { ...m, ...p } : m)));
+  const persist = async (mapping: Mapping) => {
+    const hostPath = mapping.hostPath?.trim() || "";
+    const clientPath = mapping.clientPath?.trim() || "";
+    if (!hostPath) {
+      patchInternal(mapping.id, { error: "Choose a host folder first." });
+      return;
+    }
+    if (mapping.mode === "sync" && !clientPath) {
+      patchInternal(mapping.id, { error: "Choose a client folder first." });
+      return;
+    }
+    patchInternal(mapping.id, { persisting: true, error: "" });
+    try {
+      let persistedClientPath = clientPath;
+      if (mapping.mode === "mount") {
+        const mounted = await window.remotepair.mount(hostPath);
+        if (mounted.code !== 0) throw new Error(mounted.err || mounted.out || "mount failed");
+        persistedClientPath =
+          mounted.mountpoint || (await window.remotepair.defaultMountpoint(hostPath));
+      }
+      const added = await window.remotepair.addMapping(
+        persistedClientPath,
+        hostPath,
+        mapping.mode,
+      );
+      if (added.code !== 0) throw new Error(added.err || added.out || "mapping save failed");
+      patchInternal(mapping.id, {
+        clientPath: persistedClientPath,
+        persisted: true,
+        persisting: false,
+        error: "",
+      });
+    } catch (error) {
+      patchInternal(mapping.id, {
+        persisted: false,
+        persisting: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
 
   return (
     <div>
@@ -122,6 +180,7 @@ export function StepMappings({ mappings, setMappings }: Props) {
             index={i}
             mapping={m}
             onChange={(p) => patch(m.id, p)}
+            onPersist={() => void persist(m)}
             onRemove={() => remove(m.id)}
           />
         ))}
@@ -139,16 +198,19 @@ function MappingRow({
   index,
   mapping,
   onChange,
+  onPersist,
   onRemove,
 }: {
   index: number;
   mapping: Mapping;
   onChange: (p: Partial<Mapping>) => void;
+  onPersist: () => void;
   onRemove: () => void;
 }) {
   const { t } = useT();
   const [browserOpen, setBrowserOpen] = useState(false);
   const [clientOpen, setClientOpen] = useState(false);
+  const canPersist = !!mapping.hostPath && (mapping.mode === "mount" || !!mapping.clientPath);
 
   return (
     <div className="rounded-xl border border-border bg-card p-4">
@@ -171,7 +233,7 @@ function MappingRow({
           <button
             type="button"
             key={mode}
-            onClick={() => onChange({ mode })}
+            onClick={() => onChange({ mode, clientPath: mode === "mount" ? undefined : mapping.clientPath })}
             className={
               "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
               (mapping.mode === mode
@@ -201,6 +263,32 @@ function MappingRow({
             onClick={() => setClientOpen(true)}
           />
         )}
+      </div>
+
+      {mapping.mode === "mount" && mapping.clientPath ? (
+        <div className="mt-2 truncate font-mono text-[11px] text-muted-foreground">
+          {mapping.clientPath}
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <div className="min-w-0 text-xs">
+          {mapping.error ? (
+            <span className="text-destructive">{mapping.error}</span>
+          ) : mapping.persisted ? (
+            <span className="text-primary">Saved</span>
+          ) : (
+            <span className="text-muted-foreground">Not saved</span>
+          )}
+        </div>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={!canPersist || mapping.persisting}
+          onClick={onPersist}
+        >
+          {mapping.persisting ? "Saving" : "Save"}
+        </Button>
       </div>
 
       <HostFolderBrowser

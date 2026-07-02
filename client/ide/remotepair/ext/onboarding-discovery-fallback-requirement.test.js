@@ -37,12 +37,17 @@ test("Q0383/Q0384 no discovered host guides to host onboarding and rescan", () =
   assert.match(stepDiscover, /t\("discover\.empty\.title"\)/);
   assert.match(stepDiscover, /t\("discover\.empty\.desc"\)/);
   assert.match(stepDiscover, /t\("discover\.openHost"\)/);
+  assert.match(stepDiscover, /const openHostOnboarding = useCallback/);
+  assert.match(stepDiscover, /window\.remotepair\.openHostOnboarding\(\)/);
+  assert.match(bridge, /async openHostOnboarding\(\)[\s\S]*open", \["-a", "XpairHost"\][\s\S]*HOST_SETUP_URL/);
   assert.match(stepDiscover, /t\("discover\.rescan"\)/);
   assert.match(stepDiscover, /setScanNonce\(\(nonce\) => nonce \+ 1\)/);
 });
 
 test("Tailscale remains part of discovery without reviving the deleted manual StepConnect path", () => {
   assert.match(stepDiscover, /transport: peer\.source === "tailscale" \? "Tailscale" : "LAN"/);
+  assert.match(cli, /RP_TAILNET_PAIRING_METADATA_PORT=8891/);
+  assert.match(cli, /hostKeyFP[\s\S]*serviceInstanceID[\s\S]*hostNonce[\s\S]*pairPort[\s\S]*hostUser/);
   assert.match(stepDiscover, /host\.transport === "LAN"[\s\S]*bg-blue-500\/10 text-blue-500/);
   assert.doesNotMatch(app, /onManual|StepConnect|S\.CONNECT/);
   assert.equal(

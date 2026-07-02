@@ -11,6 +11,8 @@ export interface Peer {
   // not in ssh config falls back to password auth and hangs the GUI askpass. Optional for
   // back-compat with an older CLI that did not emit it (fall back to addrs[0] || name).
   target?: string
+  pairingAddress?: string
+  hostUser?: string
   source: PeerSource
   sources: PeerSource[]
   fp: string | null
@@ -33,6 +35,7 @@ declare global {
       // No dead end: install the bundled client CLI to ~/.local/bin (install.sh --role client). The
       // onboarding calls this when cliReady is false; only ok===false blocks (with Retry).
       installCli: () => Promise<{ ok: boolean; err: string }>
+      openHostOnboarding: () => Promise<{ ok: boolean; err: string }>
       // Hard host-app guard (Connect/Reconnect): reachable is not enough — the host must have the
       // Xpair host app installed AND be version-compatible. installed/compatible false → block the step.
       hostAppStatus: (host: string) => Promise<{
@@ -100,7 +103,7 @@ declare global {
         name?: string
         user?: string
       }) => Promise<{ ok: boolean; err: string; fingerprint: string }>
-      pairingStatus: (opts: { host: string }) => Promise<{
+      pairingStatus: (opts: { host: string; pairingHost?: string }) => Promise<{
         paired: boolean
         pending: boolean
         denied: boolean

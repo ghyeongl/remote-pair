@@ -4,6 +4,10 @@ const path = require("node:path");
 
 const root = __dirname;
 const app = fs.readFileSync(path.join(root, "onboarding-webview/src/App.tsx"), "utf8");
+const stepDiscover = fs.readFileSync(
+  path.join(root, "onboarding-webview/src/components/onboarding/client/StepDiscover.tsx"),
+  "utf8",
+);
 const bridge = fs.readFileSync(path.join(root, "onboarding-bridge.js"), "utf8");
 const onboardingMain = fs.readFileSync(path.join(root, "onboarding-main.cjs"), "utf8");
 const extension = fs.readFileSync(path.join(root, "extension.js"), "utf8");
@@ -45,11 +49,13 @@ test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a native pre-workbench h
     /catch \{\s*return START_STEP\.WELCOME\s*\}[\s\S]*probeBridge\.sshReachable\(host\)/,
     "CLI probe failures must happen before any remote host probe",
   );
-  assert.doesNotMatch(
-    app,
-    /CLI_DEPENDENT_STEPS|cliGateActive|installCliNow|StepConnect/,
-    "the redesign moved CLI gating out of the renderer and removed the old StepConnect gate",
+  assert.match(
+    stepDiscover,
+    /const cli = await window\.remotepair\.cliReady\(\)[\s\S]*if \(!cli\.ready\)[\s\S]*window\.remotepair\.installCli\(\)[\s\S]*const res = await window\.remotepair\.discover\(\)/,
+    "the renderer must install/gate the CLI before discovery so fresh clients do not see a false empty scan",
   );
+  assert.match(stepDiscover, /setScanError\(res\.err\)/, "discover errors must be surfaced");
+  assert.doesNotMatch(app, /CLI_DEPENDENT_STEPS|cliGateActive|installCliNow|StepConnect/);
 
   assert.match(
     extension,

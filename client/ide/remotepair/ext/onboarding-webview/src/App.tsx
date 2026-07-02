@@ -16,6 +16,7 @@ import {
 import { StepWaitPerm } from "@/components/onboarding/client/StepWaitPerm";
 import {
   parseFolderMaps,
+  isPersistedRealMapping,
   StepMappings,
   type Mapping,
 } from "@/components/onboarding/client/StepMappings";
@@ -136,6 +137,8 @@ export default function App() {
             id: remoteHost,
             name: remoteHost,
             address: remoteHost,
+            pairingAddress: remoteHost,
+            sshTarget: remoteHost,
             transport: "LAN",
             version: "",
           },
@@ -153,7 +156,7 @@ export default function App() {
     if (!host) return null;
     const probeId = ++hostProbeId.current;
     try {
-      const r = await window.remotepair.hostAppStatus(host.address);
+      const r = await window.remotepair.hostAppStatus(host.sshTarget ?? host.address);
       const flags = deriveHostFlags(r);
       if (hostProbeId.current === probeId) {
         setSelectedHost((current) => {
@@ -188,6 +191,7 @@ export default function App() {
   const majorMismatch = !!selectedHost?.majorMismatch;
   const blockedOnUpdate = w.index === 4 && majorMismatch;
   const blockedOnDeny = w.index === 5 && permDenied;
+  const hasRealMapping = mappings.some(isPersistedRealMapping);
 
   const goBackToDiscover = () => {
     setSelected(null);
@@ -226,7 +230,7 @@ export default function App() {
       w.goTo(S.WAIT_PERM, "prev");
       return;
     }
-    if (mappings.length === 0) {
+    if (!hasRealMapping) {
       w.goTo(S.MAPPINGS, "prev");
     }
   }, [
@@ -237,7 +241,7 @@ export default function App() {
     updateState,
     permAccepted,
     permDenied,
-    mappings.length,
+    hasRealMapping,
     w.goTo,
   ]);
 
@@ -254,7 +258,7 @@ export default function App() {
     (w.index === 4 && needsUpdate && updateState !== "done") ||
     blockedOnDeny ||
     (w.index === 5 && !permAccepted) ||
-    (w.index === 6 && mappings.length === 0);
+    (w.index === 6 && !hasRealMapping);
 
   const showNext = !w.isLast && !blockedOnUpdate && !blockedOnDeny;
 

@@ -41,7 +41,7 @@ test("discovery classifies host update states before leaving Discover", () => {
   assert.match(discover, /function deriveHostFlags/);
   assert.match(discover, /!!r\.installed && !r\.compatible && r\.incompatibleKind === "major_mismatch"/);
   assert.match(discover, /!majorMismatch && !!r\.installed && !r\.compatible && r\.incompatibleKind === "below_floor"/);
-  assert.match(discover, /const status = await window\.remotepair\.hostAppStatus\(host\.address\)/);
+  assert.match(discover, /const status = await window\.remotepair\.hostAppStatus\(host\.sshTarget \?\? host\.address\)/);
   assert.match(discover, /outdated: flags\.outdated/);
   assert.match(discover, /majorMismatch: flags\.majorMismatch/);
 });
@@ -54,7 +54,7 @@ test("App gates the Update step and cannot finish while update or pairing is inc
   assert.match(app, /w\.index === 4 && needsUpdate && updateState !== "done"/);
   assert.match(app, /if \(majorMismatch \|\| \(needsUpdate && updateState !== "done"\)\) \{[\s\S]*w\.goTo\(S\.UPDATE, "prev"\)/);
   assert.match(app, /if \(!permAccepted \|\| permDenied\) \{[\s\S]*w\.goTo\(S\.WAIT_PERM, "prev"\)/);
-  assert.match(app, /if \(mappings\.length === 0\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
+  assert.match(app, /if \(!hasRealMapping\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
   assert.match(app, /w\.index === 4 && !needsUpdate && !majorMismatch && updateState !== "done"[\s\S]*setTimeout\(\(\) => w\.next\(\), 650\)/);
 });
 

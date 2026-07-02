@@ -69,6 +69,7 @@ export function StepEngine({ selected, setSelected }: Props) {
 
   const persistEngine = useCallback(async (e: EngineKey) => {
     try {
+      // xpair-launch reads this host.env ENGINE over SSH; host onboarding is the write site.
       await window.xpair.setEngine(e);
     } catch {
       /* Persist failure should not make a ready local engine look unready. */

@@ -66,6 +66,8 @@ export default function App() {
   const [hydrated, setHydrated] = useState(false);
   const [crashReports, setCrashReports] = useState(true);
   const [analytics, setAnalytics] = useState(false);
+  const [consentLoaded, setConsentLoaded] = useState(false);
+  const [consentDirty, setConsentDirty] = useState(false);
   const [perm, setPerm] = useState<PermState>(EMPTY_PERM);
   const [engines, setEngines] = useState<Set<EngineKey>>(new Set());
   const [broadcast, setBroadcast] = useState<BroadcastState>("waiting");
@@ -131,12 +133,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    void window.xpair
+      .getConsent()
+      .then((c) => {
+        if (!active) return;
+        setAnalytics(!!c.telemetry);
+        setCrashReports(!!c.crash);
+        setConsentLoaded(true);
+      })
+      .catch(() => {
+        /* The WK bridge is injected in-app; local Vite preview can run without it. */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!consentLoaded || !consentDirty) return;
     try {
       void window.xpair.setConsent({ telemetry: analytics, crash: crashReports });
     } catch {
       /* The WK bridge is injected in-app; local Vite preview can run without it. */
     }
-  }, [analytics, crashReports]);
+  }, [analytics, crashReports, consentDirty, consentLoaded]);
 
   useEffect(() => {
     let active = true;
@@ -380,10 +401,24 @@ export default function App() {
       <AnimatedStep stepKey={w.index} direction={w.direction}>
         {w.index === 0 && <StepWelcome />}
         {w.index === 1 && (
-          <StepConsent kind="crash" value={crashReports} onChange={setCrashReports} />
+          <StepConsent
+            kind="crash"
+            value={crashReports}
+            onChange={(v) => {
+              setConsentDirty(true);
+              setCrashReports(v);
+            }}
+          />
         )}
         {w.index === CONSENT_ANALYTICS_IDX && (
-          <StepConsent kind="analytics" value={analytics} onChange={setAnalytics} />
+          <StepConsent
+            kind="analytics"
+            value={analytics}
+            onChange={(v) => {
+              setConsentDirty(true);
+              setAnalytics(v);
+            }}
+          />
         )}
         {inPerms && currentPermKey && (
           <StepSinglePerm

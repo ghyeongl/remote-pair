@@ -4,7 +4,8 @@
 // can discover it via Bonjour (NWBrowser / `dns-sd -B`) for `xpair discover`.
 // A legacy `_remotepair._tcp` advertisement is kept for older clients. TXT record carries:
 //   hn   = friendly hostname        v   = app version (Config.swift APP_VERSION)
-//   role = currentRole() (host|both)  fp = ed25519 host-key fingerprint (HostKey.swift, for TOFU)
+//   role = currentRole() (host|both)  user = host GUI account
+//   fp = ed25519 host-key fingerprint (HostKey.swift, for TOFU)
 //   sid/nonce/pp = transient pairing-window serviceInstanceID, hostNonce, UDP port (US-004)
 //
 // This is ADVERTISE-ONLY. Bonjour requires a bound TCP port to advertise, so incoming
@@ -68,6 +69,7 @@ final class BonjourAdvertiser {
         txt["v"] = APP_VERSION
         let role = currentRole()
         txt["role"] = role.isEmpty ? "host" : role
+        txt["user"] = NSUserName()
         if let fp = hostKeyFingerprint() { txt["fp"] = fp }
         if let p = BonjourAdvertiser.pairingInfo() {
             txt["sid"] = p.serviceInstanceID

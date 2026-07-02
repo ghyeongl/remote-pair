@@ -91,7 +91,8 @@ test("US-003 gates remain hard: current permission, >=1 ready engine, persisted 
   assert.match(app, /w\.index === ENGINE_IDX && engines\.size === 0/);
   assert.match(app, /const \[crashReports, setCrashReports\] = useState\(true\)/);
   assert.match(app, /const \[analytics, setAnalytics\] = useState\(false\)/);
-  assert.match(app, /window\.xpair\.setConsent\(\{ telemetry: analytics, crash: crashReports \}\)/);
+  assert.match(app, /window\.xpair[\s\S]*\.getConsent\(\)[\s\S]*setConsentLoaded\(true\)/);
+  assert.match(app, /if \(!consentLoaded \|\| !consentDirty\) return;[\s\S]*window\.xpair\.setConsent\(\{ telemetry: analytics, crash: crashReports \}\)/);
 });
 
 console.log(`REDGREEN ${passed} ${failed}`);

@@ -7,6 +7,9 @@ export type DiscoveredHost = {
   id: string;
   name: string;
   address: string;
+  pairingAddress?: string;
+  sshTarget?: string;
+  hostUser?: string;
   transport: "LAN" | "Tailscale";
   version: string;
   hostKeyFP?: string;
@@ -25,11 +28,16 @@ type Props = {
 };
 
 function peerToHost(peer: BridgePeer): DiscoveredHost {
-  const address = peer.target ?? peer.addrs[0] ?? peer.name;
+  const pairingAddress = peer.pairingAddress ?? peer.addrs[0] ?? peer.name;
+  const sshTarget =
+    peer.target ?? (peer.hostUser ? `${peer.hostUser}@${pairingAddress}` : pairingAddress);
   return {
-    id: peer.fp ?? peer.target ?? peer.name,
+    id: peer.fp ?? sshTarget ?? peer.name,
     name: peer.name,
-    address,
+    address: pairingAddress,
+    pairingAddress,
+    sshTarget,
+    hostUser: peer.hostUser,
     transport: peer.source === "tailscale" ? "Tailscale" : "LAN",
     version: "",
     hostKeyFP: peer.fp || undefined,
@@ -53,11 +61,14 @@ export function StepDiscover({ selected, setSelected }: Props) {
   const [hosts, setHosts] = useState<DiscoveredHost[]>([]);
   const [selectingId, setSelectingId] = useState<string | null>(null);
   const [scanNonce, setScanNonce] = useState(0);
+  const [scanError, setScanError] = useState("");
+  const [openingHost, setOpeningHost] = useState(false);
 
   const rescan = useCallback(() => {
     setSelected(null);
     setScanning(true);
     setHosts([]);
+    setScanError("");
     setScanNonce((nonce) => nonce + 1);
   }, [setSelected]);
 
@@ -65,17 +76,41 @@ export function StepDiscover({ selected, setSelected }: Props) {
     let stopped = false;
     const scan = async () => {
       setScanning(true);
+      setScanError("");
       try {
+        const cli = await window.remotepair.cliReady();
+        if (!cli.ready) {
+          const installed = await window.remotepair.installCli();
+          if (!installed.ok) {
+            if (!stopped) {
+              setHosts([]);
+              setScanError(installed.err || cli.err || "Could not install the xpair CLI.");
+            }
+            return;
+          }
+          const afterInstall = await window.remotepair.cliReady();
+          if (!afterInstall.ready) {
+            if (!stopped) {
+              setHosts([]);
+              setScanError(afterInstall.err || "xpair CLI installed but is not ready.");
+            }
+            return;
+          }
+        }
         const res = await window.remotepair.discover();
         if (stopped) return;
+        if (res.err) setScanError(res.err);
         const byId = new Map<string, DiscoveredHost>();
         for (const peer of res.peers || []) {
           const host = peerToHost(peer);
           byId.set(host.id, host);
         }
         setHosts(Array.from(byId.values()));
-      } catch {
-        if (!stopped) setHosts([]);
+      } catch (error) {
+        if (!stopped) {
+          setHosts([]);
+          setScanError(error instanceof Error ? error.message : String(error));
+        }
       } finally {
         if (!stopped) setScanning(false);
       }
@@ -89,7 +124,7 @@ export function StepDiscover({ selected, setSelected }: Props) {
   const chooseHost = async (host: DiscoveredHost) => {
     setSelectingId(host.id);
     try {
-      const status = await window.remotepair.hostAppStatus(host.address);
+      const status = await window.remotepair.hostAppStatus(host.sshTarget ?? host.address);
       const flags = deriveHostFlags(status);
       setSelected({
         ...host,
@@ -103,6 +138,19 @@ export function StepDiscover({ selected, setSelected }: Props) {
       setSelectingId(null);
     }
   };
+
+  const openHostOnboarding = useCallback(async () => {
+    setOpeningHost(true);
+    setScanError("");
+    try {
+      const res = await window.remotepair.openHostOnboarding();
+      if (!res.ok) setScanError(res.err || "Could not open host onboarding.");
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOpeningHost(false);
+    }
+  }, []);
 
   const empty = !scanning && hosts.length === 0;
 
@@ -150,7 +198,7 @@ export function StepDiscover({ selected, setSelected }: Props) {
                   {t("discover.installedDesc")}
                 </p>
                 <div className="mt-4 flex items-center gap-3">
-                  <Button size="sm" variant="outline" onClick={() => {}}>
+                  <Button size="sm" variant="outline" onClick={openHostOnboarding} disabled={openingHost}>
                     {t("discover.openHost")}
                     <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
                   </Button>
@@ -168,6 +216,12 @@ export function StepDiscover({ selected, setSelected }: Props) {
             </div>
           </div>
         )}
+
+        {scanError ? (
+          <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {scanError}
+          </p>
+        ) : null}
 
         {hosts.map((h) => {
           const host = selected?.id === h.id ? { ...h, ...selected } : h;
@@ -194,7 +248,7 @@ export function StepDiscover({ selected, setSelected }: Props) {
               {t("discover.empty.desc")}
             </p>
             <div className="mt-4 flex flex-col items-center gap-3">
-              <Button size="sm" variant="outline" onClick={() => {}}>
+              <Button size="sm" variant="outline" onClick={openHostOnboarding} disabled={openingHost}>
                 {t("discover.openHost")}
                 <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
               </Button>

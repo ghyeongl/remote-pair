@@ -43,22 +43,25 @@ test("native guard still returns the old startStep words used by electron-main",
 
 test("discover selection probes host status and carries pairing transcript fields", () => {
   assert.match(discover, /function peerToHost\(peer: BridgePeer\): DiscoveredHost/);
-  assert.match(discover, /const address = peer\.target \?\? peer\.addrs\[0\] \?\? peer\.name;/);
+  assert.match(discover, /const pairingAddress = peer\.pairingAddress \?\? peer\.addrs\[0\] \?\? peer\.name;/);
+  assert.match(discover, /const sshTarget =[\s\S]*peer\.target \?\? \(peer\.hostUser \? `\$\{peer\.hostUser\}@\$\{pairingAddress\}` : pairingAddress\)/);
   assert.match(discover, /transport: peer\.source === "tailscale" \? "Tailscale" : "LAN"/);
   assert.match(discover, /hostKeyFP: peer\.fp \|\| undefined/);
   assert.match(discover, /serviceInstanceID: peer\.serviceInstanceID/);
   assert.match(discover, /hostNonce: peer\.hostNonce/);
   assert.match(discover, /pairPort: peer\.pairPort/);
-  assert.match(discover, /const status = await window\.remotepair\.hostAppStatus\(host\.address\)/);
+  assert.match(discover, /const status = await window\.remotepair\.hostAppStatus\(host\.sshTarget \?\? host\.address\)/);
   assert.match(discover, /majorMismatch[\s\S]*incompatibleKind === "major_mismatch"/);
   assert.match(discover, /outdated[\s\S]*incompatibleKind === "below_floor"/);
 });
 
 test("pairing wait step sends the signed request and persists host only after proof", () => {
-  assert.match(waitPerm, /window\.remotepair\.sendPairingRequest\(\{[\s\S]*host: host\.address,[\s\S]*port: host\.pairPort!,[\s\S]*hostKeyFP: host\.hostKeyFP!,[\s\S]*hostNonce: host\.hostNonce!,[\s\S]*serviceInstanceID: host\.serviceInstanceID!,/);
-  assert.match(waitPerm, /window\.remotepair\.pairingStatus\(\{ host: host\.address \}\)/);
+  assert.match(waitPerm, /const pairingHost = host\.pairingAddress \?\? host\.address/);
+  assert.match(waitPerm, /const sshTarget = host\.sshTarget \?\? host\.address/);
+  assert.match(waitPerm, /window\.remotepair\.sendPairingRequest\(\{[\s\S]*host: pairingHost,[\s\S]*port: host\.pairPort!,[\s\S]*hostKeyFP: host\.hostKeyFP!,[\s\S]*hostNonce: host\.hostNonce!,[\s\S]*serviceInstanceID: host\.serviceInstanceID!,/);
+  assert.match(waitPerm, /window\.remotepair\.pairingStatus\(\{[\s\S]*host: sshTarget,[\s\S]*pairingHost,/);
   assert.match(waitPerm, /status\.paired[\s\S]*status\.fingerprint === expectedFingerprint/);
-  assert.match(waitPerm, /await window\.remotepair\.setHost\(host\.address\)\.catch\(\(\) => \{\}\)/);
+  assert.match(waitPerm, /await window\.remotepair\.setHost\(sshTarget\)\.catch\(\(\) => \{\}\)/);
   assert.match(waitPerm, /status\.denied[\s\S]*onDeny\(\)/);
   assert.match(waitPerm, /Host is not broadcasting pairing details/);
 });

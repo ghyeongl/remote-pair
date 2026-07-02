@@ -12,6 +12,8 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const dgram = require("dgram");
+const net = require("net");
+const http = require("http");
 
 // Zero-dep telemetry (PostHog capture + consent). Shared with the extension host. Consent is
 // opt-in (default OFF) → all capture() calls below are no-ops until the user opts in.
@@ -30,6 +32,9 @@ const SSH_KNOWN_HOSTS_DEFAULTS = [
 ];
 const HOST_RE = /^(?!-)[A-Za-z0-9._-]+$/;
 const ACCOUNT_RE = /^(?!-)[A-Za-z0-9._-]+$/;
+const SSH_TARGET_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
+const TAILNET_PAIRING_METADATA_PORT = 8891;
+const HOST_SETUP_URL = "https://github.com/x10lab/xpair#host-setup";
 const EFFECTIVE_KNOWN_HOSTS_FILES = new Map();
 let sshEphemeralKnownHostsDir;
 
@@ -39,6 +44,14 @@ function validHost(host) {
 
 function invalidHost(host) {
   return `invalid host: ${String(host || "").trim()}`;
+}
+
+function validSshTarget(target) {
+  return SSH_TARGET_RE.test(String(target || "").trim());
+}
+
+function invalidSshTarget(target) {
+  return invalidHost(target);
 }
 
 function validAccount(account) {
@@ -784,6 +797,154 @@ function parseOpenSSHEd25519PrivateKey(pem) {
   return { keyObject: crypto.createPrivateKey({ key: jwk, format: "jwk" }), publicRaw: pubRaw };
 }
 
+function sshAgentRequest(payload, timeoutMs = 5000) {
+  const sockPath = sshAuthSock();
+  if (!sockPath) return Promise.reject(new Error("ssh-agent socket not found"));
+  const body = Buffer.from(payload);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(body.length, 0);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let chunks = [];
+    let total = 0;
+    let expected = null;
+    const socket = net.createConnection(sockPath);
+    const finish = (err, result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (err) reject(err);
+      else resolve(result);
+    };
+    const timer = setTimeout(() => finish(new Error("ssh-agent request timed out")), timeoutMs);
+    socket.on("connect", () => socket.write(Buffer.concat([len, body])));
+    socket.on("error", (err) => finish(err));
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      total += chunk.length;
+      const buf = Buffer.concat(chunks, total);
+      if (expected === null && buf.length >= 4) expected = buf.readUInt32BE(0);
+      if (expected !== null && buf.length >= expected + 4) {
+        finish(null, buf.subarray(4, 4 + expected));
+      }
+    });
+    socket.on("end", () => {
+      if (!done) finish(new Error("ssh-agent closed before responding"));
+    });
+  });
+}
+
+async function sshAgentIdentities() {
+  const SSH_AGENTC_REQUEST_IDENTITIES = 11;
+  const SSH_AGENT_IDENTITIES_ANSWER = 12;
+  const response = await sshAgentRequest(Buffer.from([SSH_AGENTC_REQUEST_IDENTITIES]));
+  if (!response.length || response[0] !== SSH_AGENT_IDENTITIES_ANSWER) {
+    throw new Error("ssh-agent did not return identities");
+  }
+  let [count, off] = readU32(response, 1);
+  const identities = [];
+  for (let i = 0; i < count; i++) {
+    let blob, comment;
+    [blob, off] = readSSHString(response, off);
+    [comment, off] = readSSHString(response, off);
+    identities.push({ blob, comment: comment.toString("utf8") });
+  }
+  return identities;
+}
+
+async function signWithAgent(pubBlob, transcript) {
+  const SSH_AGENTC_SIGN_REQUEST = 13;
+  const SSH_AGENT_SIGN_RESPONSE = 14;
+  const SSH_AGENT_FAILURE = 5;
+  const identities = await sshAgentIdentities();
+  const match = identities.find((identity) => identity.blob.equals(pubBlob));
+  if (!match) throw new Error("client key is not loaded in ssh-agent");
+  const flags = Buffer.alloc(4);
+  flags.writeUInt32BE(0, 0);
+  const payload = Buffer.concat([
+    Buffer.from([SSH_AGENTC_SIGN_REQUEST]),
+    sshString(match.blob),
+    sshString(transcript),
+    flags,
+  ]);
+  const response = await sshAgentRequest(payload);
+  if (!response.length || response[0] === SSH_AGENT_FAILURE) {
+    throw new Error("ssh-agent refused to sign with the client key");
+  }
+  if (response[0] !== SSH_AGENT_SIGN_RESPONSE) {
+    throw new Error("ssh-agent returned an unexpected signing response");
+  }
+  let sigBlob;
+  [sigBlob] = readSSHString(response, 1);
+  let off = 0;
+  let sigType, rawSig;
+  [sigType, off] = readSSHString(sigBlob, off);
+  [rawSig, off] = readSSHString(sigBlob, off);
+  if (sigType.toString("utf8") !== "ssh-ed25519" || rawSig.length !== 64 || off !== sigBlob.length) {
+    throw new Error("ssh-agent returned a non-ed25519 signature");
+  }
+  return rawSig;
+}
+
+async function signPairingTranscript(pub, transcript) {
+  try {
+    return await signWithAgent(pub.blob, transcript);
+  } catch (agentError) {
+    try {
+      const privateKey = parseOpenSSHEd25519PrivateKey(fs.readFileSync(SSH_KEY, "utf8"));
+      if (!pub.raw.equals(privateKey.publicRaw)) throw new Error("private/public key mismatch");
+      return crypto.sign(null, transcript, privateKey.keyObject);
+    } catch (privateError) {
+      const msg = privateError && privateError.message ? privateError.message : String(privateError);
+      if (/encrypted OpenSSH private keys/.test(msg)) {
+        const agentMsg = agentError && agentError.message ? agentError.message : String(agentError);
+        throw new Error(`encrypted client key is not available through ssh-agent: ${agentMsg}`);
+      }
+      throw privateError;
+    }
+  }
+}
+
+function sshTargetHost(target) {
+  const s = String(target || "").trim();
+  const at = s.indexOf("@");
+  return at === -1 ? s : s.slice(at + 1);
+}
+
+function pairingMetadataURL(host) {
+  const h = sshTargetHost(host);
+  const wrapped = h.includes(":") && !h.startsWith("[") ? `[${h}]` : h;
+  return `http://${wrapped}:${TAILNET_PAIRING_METADATA_PORT}/.well-known/xpair-pairing.json`;
+}
+
+function fetchPairingMetadata(host, timeoutMs = 1200) {
+  const h = sshTargetHost(host);
+  if (!validHost(h)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const req = http.get(pairingMetadataURL(h), { timeout: timeoutMs }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > 16384) req.destroy();
+      });
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(body || "{}"));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on("error", () => resolve(null));
+  });
+}
+
 function sendUdpJSON(host, port, obj) {
   return new Promise((resolve) => {
     const socket = dgram.createSocket("udp4");
@@ -1060,6 +1221,17 @@ const bridge = {
     return { ok: true, err: "" };
   },
 
+  async openHostOnboarding() {
+    const app = await run("open", ["-a", "XpairHost"]);
+    if (app.code === 0) return { ok: true, err: "" };
+    const docs = await run("open", [HOST_SETUP_URL]);
+    if (docs.code === 0) return { ok: true, err: "" };
+    return {
+      ok: false,
+      err: docs.err || app.err || `could not open host onboarding (${HOST_SETUP_URL})`,
+    };
+  },
+
   // Current client config (real state, not hardcoded).
   // SSOT: mappings come from the CLI (`map list --json`), NOT from re-parsing client.env here.
   // rp_set shell-escapes FOLDER_MAPS (e.g. `a::b\;c::d`); the CLI `.`-sources it (unescaping),
@@ -1132,10 +1304,10 @@ const bridge = {
   async sshReachable(host) {
     const h = String(host || "").trim();
     if (!h) return { reachable: false, err: "no host" };
-    if (!validHost(h)) {
+    if (!validSshTarget(h)) {
       return {
         reachable: false,
-        err: invalidHost(h),
+        err: invalidSshTarget(h),
         state: SSH_STATE.INVALID_HOST,
         action: SSH_ACTION.ABORT,
       };
@@ -1175,12 +1347,12 @@ const bridge = {
     const e = String(engine || "");
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { installed: false, authed: false, version: "", err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
+    if (!validSshTarget(host)) {
       return {
         installed: false,
         authed: false,
         version: "",
-        err: invalidHost(host),
+        err: invalidSshTarget(host),
         state: SSH_STATE.INVALID_HOST,
         action: SSH_ACTION.ABORT,
       };
@@ -1225,8 +1397,8 @@ const bridge = {
     const e = String(engine || "");
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
-      return { ok: false, err: invalidHost(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(host)) {
+      return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     if (!ENGINE_INSTALL[e]) return { ok: false, err: `unknown engine: ${e}` };
     // Run the native installer, then persist PATH (skip for shell — nothing was installed).
@@ -1250,8 +1422,8 @@ const bridge = {
     const e = String(engine || "");
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
-      return { ok: false, err: invalidHost(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(host)) {
+      return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     if (!apiKey) return { ok: false, err: "no API key" };
     const writer = ENGINE_AUTH_WRITE[e];
@@ -1280,8 +1452,8 @@ const bridge = {
     if (!p) return { exists: false, err: "no path" };
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { exists: false, err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
-      return { exists: false, err: invalidHost(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(host)) {
+      return { exists: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     const r = await run("ssh", [...sshProbeOpts(host, 5), host, "test -e " + shPathQuotePreserveHome(p)]);
     if (r.code === 0) return { exists: true, err: "", state: SSH_STATE.READY, action: SSH_ACTION.CONTINUE };
@@ -1397,19 +1569,21 @@ const bridge = {
       return { ok: false, err: `could not read client public key: ${e.message || e}`, fingerprint: "" };
     }
 
-    let privateKey;
     let pub;
     try {
-      privateKey = parseOpenSSHEd25519PrivateKey(fs.readFileSync(SSH_KEY, "utf8"));
       pub = parseEd25519PublicKey(pubkey);
-      if (!pub.raw.equals(privateKey.publicRaw)) throw new Error("private/public key mismatch");
     } catch (e) {
-      return { ok: false, err: `could not sign pairing request: ${e.message || e}`, fingerprint: "" };
+      return { ok: false, err: `could not read client public key: ${e.message || e}`, fingerprint: "" };
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
     const transcript = canonicalPairingTranscript(hostKeyFP, hostNonce, serviceInstanceID, pub.clean, timestamp);
-    const sig = crypto.sign(null, transcript, privateKey.keyObject).toString("base64");
+    let sig;
+    try {
+      sig = (await signPairingTranscript(pub, transcript)).toString("base64");
+    } catch (e) {
+      return { ok: false, err: `could not sign pairing request: ${e.message || e}`, fingerprint: pub.fingerprint };
+    }
     const sent = await sendUdpJSON(h, p, {
       clientPubKey: pub.clean,
       name: String(name || os.hostname()),
@@ -1420,15 +1594,15 @@ const bridge = {
     return { ok: sent.ok, err: sent.err, fingerprint: pub.fingerprint };
   },
 
-  async pairingStatus({ host } = {}) {
+  async pairingStatus({ host, pairingHost } = {}) {
     const h = String(host || "").trim();
     if (!h) return { paired: false, pending: false, denied: false, err: "no host", fingerprint: "" };
-    if (!validHost(h)) {
+    if (!validSshTarget(h)) {
       return {
         paired: false,
         pending: false,
         denied: false,
-        err: invalidHost(h),
+        err: invalidSshTarget(h),
         fingerprint: "",
         state: SSH_STATE.INVALID_HOST,
         action: SSH_ACTION.ABORT,
@@ -1451,6 +1625,24 @@ const bridge = {
       };
     }
 
+    const metadata = await fetchPairingMetadata(pairingHost || h);
+    if (
+      metadata &&
+      metadata.phase === "denied" &&
+      metadata.deniedFingerprint &&
+      metadata.deniedFingerprint === pub.fingerprint
+    ) {
+      return {
+        paired: false,
+        pending: false,
+        denied: true,
+        err: "pairing request denied on host",
+        fingerprint: pub.fingerprint,
+        state: SSH_STATE.KEY_AUTH_BLOCKED,
+        action: SSH_ACTION.ABORT,
+      };
+    }
+
     const probe =
       `XPAIR_CLIENT_ID=${clientID} /usr/bin/perl -MJSON::PP -e '` +
       'use strict; use warnings; ' +
@@ -1460,7 +1652,7 @@ const bridge = {
       'my $j=eval { JSON::PP->new->decode($raw) }; exit 3 if $@ || ref($j) ne "HASH" || ref($j->{clients}) ne "ARRAY"; ' +
       'for my $r (@{$j->{clients}}) { next unless ref($r) eq "HASH" && ($r->{clientID}//"") eq $id; if (($r->{status}//"") eq "paired") { print "paired\\n"; exit 0; } exit 4; } exit 5;' +
       "'";
-    const r = await run("ssh", [...sshProbeOpts(5), h, probe]);
+    const r = await run("ssh", [...sshProbeOpts(h, 5), h, probe]);
     if (r.code === 0 && /\bpaired\b/.test(r.out || "")) {
       return { paired: true, pending: false, denied: false, err: "", fingerprint: pub.fingerprint };
     }
@@ -1653,8 +1845,8 @@ const bridge = {
   // do not re-TOFU.
   async pinHostKey(host, expectedFp) {
     const h = String(host || "").trim();
-    if (!validHost(h)) {
-      return { ok: false, err: invalidHost(h), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(h)) {
+      return { ok: false, err: invalidSshTarget(h), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     if (!expectedFp) return { ok: false, err: "no fingerprint to confirm" };
 
@@ -1732,7 +1924,7 @@ const bridge = {
 
   async hasDurableHostKey(host) {
     const h = String(host || "").trim();
-    if (!validHost(h)) return { ok: false, present: false, err: invalidHost(h) };
+    if (!validSshTarget(h)) return { ok: false, present: false, err: invalidSshTarget(h) };
     const r = await run("ssh", [
       ...sshDurablePinOpts(8),
       "-o", "StrictHostKeyChecking=yes",
@@ -1763,13 +1955,13 @@ const bridge = {
   async hostAppStatus(host) {
     const h = String(host || "").trim();
     if (!h) return { installed: false, version: "", compatible: false, incompatibleKind: "", err: "no host" };
-    if (!validHost(h)) {
+    if (!validSshTarget(h)) {
       return {
         installed: false,
         version: "",
         compatible: false,
         incompatibleKind: "",
-        err: invalidHost(h),
+        err: invalidSshTarget(h),
         state: SSH_STATE.INVALID_HOST,
         action: SSH_ACTION.ABORT,
       };

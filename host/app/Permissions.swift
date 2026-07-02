@@ -14,9 +14,7 @@ enum Permissions {
     static func srGranted() -> Bool { CGPreflightScreenCaptureAccess() }
 
     static func loginGranted() -> Bool {
-        let output = runProbe("/usr/sbin/systemsetup", ["-getremotelogin"]).lowercased()
-        // ponytail: heuristic probe, tighten if it false-positives on a firewalled sshd.
-        return output.contains("remote login: on")
+        runProbeStatus("/bin/launchctl", ["print", "system/com.openssh.sshd"]) == 0
     }
 
     static func sharingGranted() -> Bool {
@@ -63,24 +61,6 @@ enum Permissions {
             if !srGranted() { CGRequestScreenCaptureAccess() }
         default:
             break   // fda: no programmatic request API — the user adds the app via the Full Disk Access pane
-        }
-    }
-
-    private static func runProbe(_ path: String, _ args: [String]) -> String {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: path)
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8) ?? ""
-        } catch {
-            log(.debug, "permission probe failed: \(path) \(args.joined(separator: " ")) — \(error)")
-            return ""
         }
     }
 
