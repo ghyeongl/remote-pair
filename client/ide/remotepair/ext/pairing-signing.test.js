@@ -75,13 +75,20 @@ check("pairing public key sanitizer rejects malformed keys and strips comments",
   );
 });
 
-check("pairing signer supports encrypted keys through ssh-agent without changing raw signature format", () => {
+check("pairing signer uses the dedicated pairing key (raw ed25519, no agent, no id_ed25519 collision)", () => {
   const bridgeSource = fs.readFileSync(path.join(__dirname, "onboarding-bridge.js"), "utf8");
-  assert.match(bridgeSource, /async function signWithAgent\(pubBlob, transcript\)/);
-  assert.match(bridgeSource, /SSH_AGENTC_SIGN_REQUEST = 13/);
-  assert.match(bridgeSource, /sigType\.toString\("utf8"\) !== "ssh-ed25519" \|\| rawSig\.length !== 64/);
-  assert.match(bridgeSource, /return await signWithAgent\(pub\.blob, transcript\)/);
-  assert.match(bridgeSource, /encrypted client key is not available through ssh-agent/);
+  // Dedicated key kept OUTSIDE ~/.ssh so it never collides with the user's personal id_ed25519 —
+  // the host installs only this key as the restricted forced-command line, so the gate always runs.
+  assert.match(bridgeSource, /const PAIRING_KEY = path\.join\(RP_DIR, "pairing_ed25519"\)/);
+  // Generated unencrypted on demand (ensurePairingKey), then signed RAW — no ssh-agent needed.
+  assert.match(bridgeSource, /"ssh-keygen"[\s\S]*"-f", PAIRING_KEY/);
+  assert.match(
+    bridgeSource,
+    /function signPairingTranscript\(transcript\) \{[\s\S]*parseOpenSSHEd25519PrivateKey\(fs\.readFileSync\(PAIRING_KEY[\s\S]*crypto\.sign\(null, transcript, privateKey\.keyObject\)/,
+  );
+  // The pairing request + status read the DEDICATED pub, and client→host ssh uses the paired identity.
+  assert.match(bridgeSource, /fs\.readFileSync\(PAIRING_KEY \+ "\.pub"/);
+  assert.match(bridgeSource, /function pairingIdentityKey\(\)/);
 });
 
 check("gateway MAC guard runs before automatic ssh reachability", () => {

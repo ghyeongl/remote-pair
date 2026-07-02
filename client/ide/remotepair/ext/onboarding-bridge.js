@@ -23,6 +23,12 @@ const HOME = os.homedir();
 const RP_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 const SSH_KEY = path.join(HOME, ".ssh", "id_ed25519");
+// Dedicated xpair pairing key — used ONLY for pairing (request signature), the SSH proof, and the
+// paired runtime (launch/heartbeat/RD). Kept OUTSIDE ~/.ssh so it never collides with the user's
+// personal id_ed25519: the host installs ONLY this key as the restricted, fingerprint-bound
+// forced-command line, so the xpair-ssh-gate always runs and the proof completes. Generated
+// unencrypted (owned by us) → signed raw, no ssh-agent needed.
+const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
 const SSH_KNOWN_HOSTS = path.join(HOME, ".ssh", "known_hosts");
 const SSH_KNOWN_HOSTS_DEFAULTS = [
   SSH_KNOWN_HOSTS,
@@ -504,7 +510,8 @@ function sshProbeOpts(host, connectTimeout = 5) {
     "-o", "StrictHostKeyChecking=accept-new",
   ];
   try {
-    if (fs.existsSync(SSH_KEY)) opts.push("-o", "IdentitiesOnly=yes", "-i", SSH_KEY);
+    const idKey = pairingIdentityKey();
+    if (fs.existsSync(idKey)) opts.push("-o", "IdentitiesOnly=yes", "-i", idKey);
   } catch { /* key probe failed — let ssh use the agent / defaults */ }
   return opts;
 }
@@ -524,7 +531,8 @@ function sshDurablePinOpts(connectTimeout = 5) {
     "-o", "HostKeyAlgorithms=ssh-ed25519",
   ];
   try {
-    if (fs.existsSync(SSH_KEY)) opts.push("-o", "IdentitiesOnly=yes", "-i", SSH_KEY);
+    const idKey = pairingIdentityKey();
+    if (fs.existsSync(idKey)) opts.push("-o", "IdentitiesOnly=yes", "-i", idKey);
   } catch { /* key probe failed — let ssh use the agent / defaults */ }
   return opts;
 }
@@ -898,23 +906,31 @@ async function signWithAgent(pubBlob, transcript) {
   return rawSig;
 }
 
-async function signPairingTranscript(pub, transcript) {
+async function ensurePairingKey() {
   try {
-    return await signWithAgent(pub.blob, transcript);
-  } catch (agentError) {
-    try {
-      const privateKey = parseOpenSSHEd25519PrivateKey(fs.readFileSync(SSH_KEY, "utf8"));
-      if (!pub.raw.equals(privateKey.publicRaw)) throw new Error("private/public key mismatch");
-      return crypto.sign(null, transcript, privateKey.keyObject);
-    } catch (privateError) {
-      const msg = privateError && privateError.message ? privateError.message : String(privateError);
-      if (/encrypted OpenSSH private keys/.test(msg)) {
-        const agentMsg = agentError && agentError.message ? agentError.message : String(agentError);
-        throw new Error(`encrypted client key is not available through ssh-agent: ${agentMsg}`);
-      }
-      throw privateError;
-    }
+    fs.mkdirSync(RP_DIR, { recursive: true });
+    fs.chmodSync(RP_DIR, 0o700);
+  } catch { /* best-effort dir perms */ }
+  if (!fs.existsSync(PAIRING_KEY)) {
+    await run("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", PAIRING_KEY, "-C", "xpair-pairing", "-q"]);
   }
+  try { fs.chmodSync(PAIRING_KEY, 0o600); } catch { /* ssh-keygen already sets 600 */ }
+  return fs.existsSync(PAIRING_KEY);
+}
+
+/** The SSH identity for ALL client→host xpair connections: the dedicated pairing key once it exists
+ *  (installed on the host as the restricted, fingerprint-bound authorized_keys line), else the
+ *  personal id_ed25519 as a pre-pairing fallback. id_ed25519 is NEVER installed by pairing. */
+function pairingIdentityKey() {
+  try { if (fs.existsSync(PAIRING_KEY)) return PAIRING_KEY; } catch { /* fall through to default key */ }
+  return SSH_KEY;
+}
+
+/** Sign the pairing transcript with the DEDICATED pairing key. It is generated unencrypted and owned
+ *  by us, so it signs directly (no ssh-agent, no encrypted-key handling). */
+function signPairingTranscript(transcript) {
+  const privateKey = parseOpenSSHEd25519PrivateKey(fs.readFileSync(PAIRING_KEY, "utf8"));
+  return crypto.sign(null, transcript, privateKey.keyObject);
 }
 
 function sshTargetHost(target) {
@@ -1628,26 +1644,28 @@ const bridge = {
       return { ok: false, err: "missing pairing transcript fields", fingerprint: "" };
     }
 
-    await bridge.sshKeygen();
+    if (!(await ensurePairingKey())) {
+      return { ok: false, err: "could not create the xpair pairing key", fingerprint: "" };
+    }
     let pubkey;
     try {
-      pubkey = sanitizeEd25519PublicKey(fs.readFileSync(SSH_KEY + ".pub", "utf8"));
+      pubkey = sanitizeEd25519PublicKey(fs.readFileSync(PAIRING_KEY + ".pub", "utf8"));
     } catch (e) {
-      return { ok: false, err: `could not read client public key: ${e.message || e}`, fingerprint: "" };
+      return { ok: false, err: `could not read pairing public key: ${e.message || e}`, fingerprint: "" };
     }
 
     let pub;
     try {
       pub = parseEd25519PublicKey(pubkey);
     } catch (e) {
-      return { ok: false, err: `could not read client public key: ${e.message || e}`, fingerprint: "" };
+      return { ok: false, err: `could not read pairing public key: ${e.message || e}`, fingerprint: "" };
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
     const transcript = canonicalPairingTranscript(hostKeyFP, hostNonce, serviceInstanceID, pub.clean, timestamp);
     let sig;
     try {
-      sig = (await signPairingTranscript(pub, transcript)).toString("base64");
+      sig = signPairingTranscript(transcript).toString("base64");
     } catch (e) {
       return { ok: false, err: `could not sign pairing request: ${e.message || e}`, fingerprint: pub.fingerprint };
     }
@@ -1676,11 +1694,11 @@ const bridge = {
       };
     }
 
-    await bridge.sshKeygen();
+    await ensurePairingKey();
     let pub;
     let clientID;
     try {
-      pub = parseEd25519PublicKey(fs.readFileSync(SSH_KEY + ".pub", "utf8"));
+      pub = parseEd25519PublicKey(fs.readFileSync(PAIRING_KEY + ".pub", "utf8"));
       clientID = clientIDForKeyBlob(pub.clean.split(/\s+/)[1]);
     } catch (e) {
       return {
