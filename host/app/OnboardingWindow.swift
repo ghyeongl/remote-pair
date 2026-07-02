@@ -389,9 +389,16 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         _ = PairingManager.shared.endWindow()
         switch mode {
         case .runGate:
-            // Launch gate: dismissing while AX/SR are still ungranted (and not completed) quits the
-            // app. (allGranted = axTrusted && srGranted.)
-            if !completed && !Permissions.allGranted() {
+            // Launch gate: AX/SR are the hard serving gate. If they are granted, closing the window
+            // before pairing must still start serving so the host becomes pairable; pairing can finish
+            // later from the Connect flow/menu. If AX/SR are missing, keep failing closed.
+            if !completed && Permissions.allGranted() {
+                completed = true
+                SentryBridge.setupIfConsented()
+                log(.info, "onboarding dismissed after Accessibility+Screen Recording — starting serving")
+                NSApp.setActivationPolicy(.accessory)
+                onComplete()
+            } else if !completed {
                 log(.warn, "onboarding dismissed without Accessibility+Screen Recording — quitting (hard gate)")
                 NSApp.terminate(nil)
             }

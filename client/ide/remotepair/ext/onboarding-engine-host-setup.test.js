@@ -27,7 +27,7 @@ function test(name, fn) {
   }
 }
 
-test("Q0545 client flow has no engine step, but native resume still checks configured host engine", () => {
+test("Q0545 client flow has no engine step, but native resume still checks host.env engine", () => {
   assert.equal(
     fs.existsSync(path.join(root, "onboarding-webview/src/components/onboarding/client/StepEngine.tsx")),
     false,
@@ -36,8 +36,8 @@ test("Q0545 client flow has no engine step, but native resume still checks confi
   assert.match(clientApp, /engine: S\.DISCOVER/);
   assert.match(onboardingMain, /ENGINE: 'engine'/);
   assert.match(onboardingMain, /const SESSION_ENGINES = new Set\(\['claude', 'shell', 'codex', 'opencode'\]\)/);
-  assert.match(onboardingMain, /const engine = \(env\.ENGINE \|\| 'claude'\)\.trim\(\)/);
-  assert.match(onboardingMain, /probeBridge\.hostEngineStatus\(configuredEngine\(clientEnv\)\)/);
+  assert.match(onboardingMain, /configuredHostEngine\(host, probeBridge\)/);
+  assert.match(onboardingMain, /probeBridge\.hostEngineStatus\(hostEngine\)/);
 });
 
 test("Q0545 host onboarding owns the 11-step engine setup gate", () => {
@@ -55,7 +55,7 @@ test("Q0545 host onboarding owns the 11-step engine setup gate", () => {
 test("Q0545 host StepEngine probes, installs, authenticates, and persists supported engines", () => {
   assert.match(hostStepEngine, /const ORDER: EngineKey\[\] = \["claude", "codex", "opencode"\]/);
   assert.match(hostStepEngine, /window\.xpair\.engineStatus\(e\)/);
-  assert.match(hostStepEngine, /await window\.xpair\.setEngine\(e\)/);
+  assert.match(hostStepEngine, /await window\.xpair\.setEngine\(e\)|await persistEngine\(primary\)|await persistEngine\(id\)/);
   assert.match(hostStepEngine, /window\.xpair\.installEngine\(engine\)/);
   assert.match(hostStepEngine, /window\.xpair\.setEngineAuth\(engine, apiKey\.trim\(\)\)/);
   assert.match(hostStepEngine, /await probe\(engine\)/);
@@ -67,6 +67,7 @@ test("Q0545 bridge and host app engine guards still support host-side Codex setu
   assert.match(bridge, /const SESSION_ENGINES = new Set\(\[\.\.\.ENGINES, "shell"\]\)/);
   assert.match(bridge, /remoteHost: e\.REMOTE_HOST \|\| "",[\s\S]*engine: e\.ENGINE \|\| "",/);
   assert.match(bridge, /const host = String\(parseEnv\(CLIENT_ENV\)\.REMOTE_HOST \|\| ""\)\.trim\(\)/);
+  assert.match(bridge, /async hostEnvEngine\(hostArg\)[\s\S]*cat|async hostEnvEngine\(hostArg\)[\s\S]*host\.env/);
   assert.match(bridge, /const probe = ENGINE_PROBE\[e\]/);
   assert.match(bridge, /run\("ssh", \[\.\.\.sshProbeOpts\(host, 6\), host, probe\]\)/);
   assert.match(bridge, /const PATH_PERSIST =/);

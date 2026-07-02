@@ -136,7 +136,7 @@ enum PairingSecurity {
         guard pub.isValidSignature(sig, for: transcript) else {
             throw PairingSecurityError.badSignature
         }
-        guard abs(now - req.timestamp) <= timestampSkewSec else {
+        guard timestampWithinSkew(req.timestamp, now: now) else {
             throw PairingSecurityError.staleTimestamp
         }
 
@@ -156,6 +156,13 @@ enum PairingSecurity {
                                       keyBlob: parsed.keyBlob,
                                       fingerprint: fingerprintForKeyBlob(parsed.wireBlob),
                                       timestamp: req.timestamp)
+    }
+
+    static func timestampWithinSkew(_ timestamp: Int64, now: Int64) -> Bool {
+        let lower = now.subtractingReportingOverflow(timestampSkewSec)
+        let upper = now.addingReportingOverflow(timestampSkewSec)
+        guard !lower.overflow, !upper.overflow else { return false }
+        return timestamp >= lower.partialValue && timestamp <= upper.partialValue
     }
 
     static func parseEd25519PublicKey(_ key: String) throws -> (publicKey: String, keyBlob: String, wireBlob: Data, rawKey: Data) {
@@ -287,9 +294,14 @@ enum XpairAuthorizedKeys {
                                                name: req.name)
             let originalLines = readAuthorizedKeyLines()
             var lines = originalLines
+            // Legacy `xpair install-host` authorized the key with an unmarked ssh-copy-id-style
+            // line, so same-blob unmarked entries are user-owned and must be preserved. Residual:
+            // if a user manually authorized the pairing key unrestricted, that access remains until
+            // Xpair moves to a dedicated pairing keypair.
             lines.removeAll { existing in
-                authorizedKeyBlob(in: existing) == req.keyBlob ||
-                (existing.contains(" xpair:v1 ") && existing.contains("client_id=\(clientID)"))
+                isXpairAuthorizedKeyLine(existing) &&
+                    (authorizedKeyBlob(in: existing) == req.keyBlob ||
+                     existing.contains("client_id=\(clientID)"))
             }
             lines.append(line)
 
@@ -422,6 +434,10 @@ enum XpairAuthorizedKeys {
             return fields[i + 1]
         }
         return nil
+    }
+
+    private static func isXpairAuthorizedKeyLine(_ line: String) -> Bool {
+        line.contains(" xpair:v1 ")
     }
 
     private static func writeAuthorizedKeyLines(_ lines: [String]) throws {
@@ -1320,6 +1336,22 @@ enum PairingSecuritySelfTest {
                                        serviceInstanceID: sid, consumed: &consumed)
         assertThrows { _ = try PairingSecurity.verify(req, sourceIP: "127.0.0.1", hostKeyFP: host, hostNonce: nonce,
                                                       serviceInstanceID: sid, consumed: &consumed) }
+        for extreme in [Int64.min, Int64.max] {
+            let extremeSig = try privateKey.signature(for: PairingSecurity.canonicalTranscript(hostKeyFP: host,
+                                                                                               hostNonce: nonce,
+                                                                                               serviceInstanceID: sid,
+                                                                                               clientPubKey: pubLine,
+                                                                                               timestamp: extreme))
+            let extremeReq = PairingRequestWire(clientPubKey: pubLine, name: "client", user: "user",
+                                                timestamp: extreme,
+                                                sig: Data(extremeSig).base64EncodedString())
+            var extremeConsumed = Set<String>()
+            assertThrows {
+                _ = try PairingSecurity.verify(extremeReq, sourceIP: "127.0.0.1", hostKeyFP: host,
+                                               hostNonce: nonce, serviceInstanceID: sid, now: ts,
+                                               consumed: &extremeConsumed)
+            }
+        }
 
         let shiftedSig = try privateKey.signature(for: PairingSecurity.canonicalTranscript(hostKeyFP: "ab",
                                                                                            hostNonce: "c",
@@ -1361,7 +1393,8 @@ enum PairingSecuritySelfTest {
         try markPairedRequiresObservedSSHLoginFingerprint(pubLine: pubLine)
         try acceptIncomingRequiresExactNonEmptyFingerprint(pubLine: pubLine)
         try gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: pubLine)
-        try installRemovesLegacyDuplicateAuthorizedKey(pubLine: pubLine)
+        try installPreservesUnmarkedSameBlobAuthorizedKey(pubLine: pubLine)
+        try installRemovesMarkedDuplicateAuthorizedKey(pubLine: pubLine)
         try installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: pubLine)
         print("pairing security self-test passed")
     }
@@ -1542,7 +1575,7 @@ enum PairingSecuritySelfTest {
         }
     }
 
-    private static func installRemovesLegacyDuplicateAuthorizedKey(pubLine: String) throws {
+    private static func installPreservesUnmarkedSameBlobAuthorizedKey(pubLine: String) throws {
         try withTemporaryAuthorizedKeysHome {
             let parsed = try PairingSecurity.parseEd25519PublicKey(pubLine)
             FileManager.default.createFile(atPath: XpairAuthorizedKeys.authorizedKeysPath,
@@ -1559,10 +1592,38 @@ enum PairingSecuritySelfTest {
             _ = try XpairAuthorizedKeys.install(req)
             let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
             let occurrences = auth.components(separatedBy: parsed.keyBlob).count - 1
+            assert(occurrences == 2)
+            assert(auth.contains(" xpair:v1 "))
+            assert(auth.contains(#"permitopen="127.0.0.1:8890""#))
+            assert(auth.contains("legacy-copy"))
+        }
+    }
+
+    private static func installRemovesMarkedDuplicateAuthorizedKey(pubLine: String) throws {
+        try withTemporaryAuthorizedKeysHome {
+            let parsed = try PairingSecurity.parseEd25519PublicKey(pubLine)
+            let clientID = PairingSecurity.clientID(forKeyBlob: parsed.keyBlob)
+            let oldLine = """
+            restrict,command="old",no-agent-forwarding \(pubLine) xpair:v1 client_id=\(clientID) fp=SHA256:old created=1 name=old
+            """
+            FileManager.default.createFile(atPath: XpairAuthorizedKeys.authorizedKeysPath,
+                                           contents: Data(oldLine.utf8),
+                                           attributes: [.posixPermissions: 0o600])
+            let req = VerifiedPairingRequest(id: "marked_cleanup",
+                                             name: "marked",
+                                             user: "tester",
+                                             sourceIP: "127.0.0.1",
+                                             clientPubKey: pubLine,
+                                             keyBlob: parsed.keyBlob,
+                                             fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
+                                             timestamp: Int64(Date().timeIntervalSince1970))
+            _ = try XpairAuthorizedKeys.install(req)
+            let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
+            let occurrences = auth.components(separatedBy: parsed.keyBlob).count - 1
             assert(occurrences == 1)
             assert(auth.contains(" xpair:v1 "))
             assert(auth.contains(#"permitopen="127.0.0.1:8890""#))
-            assert(!auth.contains("legacy-copy"))
+            assert(!auth.contains("SHA256:old"))
         }
     }
 

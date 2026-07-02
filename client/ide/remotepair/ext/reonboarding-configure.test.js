@@ -96,6 +96,7 @@ function greenBridge(overrides = {}) {
       err: "",
     }),
     hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
+    hostEnvEngine: async () => ({ engine: "codex", err: "" }),
     hostEngineStatus: async () => ({ installed: true, authed: true, version: "ok", err: "" }),
     ...overrides,
   };
@@ -190,10 +191,28 @@ test("Q0473/Q0493/Q0494 per-launch guard parachutes to the first failing step", 
     })), "grant");
     assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
       hostEngineStatus: async (engine) => {
-        assert.equal(engine, "codex", "guard must reuse the configured #44 engine status path");
+        assert.equal(engine, "codex", "guard must use the host.env engine status path");
         return { installed: false, authed: false, version: "", err: "missing" };
       },
     })), "engine");
+  });
+});
+
+test("Q0473/Q0493/Q0494 missing host engine setting does not force client-side claude recovery", async () => {
+  await withTempHome(async (home, onboardingMain) => {
+    const rpDir = path.join(home, ".xpair/host");
+    fs.mkdirSync(rpDir, { recursive: true });
+    fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\n");
+
+    let statusCalled = false;
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      hostEnvEngine: async () => ({ engine: "", err: "host ENGINE not set" }),
+      hostEngineStatus: async () => {
+        statusCalled = true;
+        return { installed: false, authed: false, version: "", err: "should not run" };
+      },
+    })), null);
+    assert.equal(statusCalled, false, "unresolved host.env ENGINE must skip the engine guard");
   });
 });
 

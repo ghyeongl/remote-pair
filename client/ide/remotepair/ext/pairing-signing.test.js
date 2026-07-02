@@ -93,6 +93,15 @@ check("gateway MAC guard runs before automatic ssh reachability", () => {
   assert.ok(sshIdx > guardIdx, "gateway MAC guard must run before auto ssh probe");
 });
 
+check("gateway MAC guard also runs before the RD ssh tunnel", () => {
+  const extension = fs.readFileSync(path.join(__dirname, "extension.js"), "utf8");
+  const startIdx = extension.indexOf("async _startStream()");
+  const guardIdx = extension.indexOf("onboardingBridge.gatewayMacStatus()", startIdx);
+  const tunnelIdx = extension.indexOf("await this._startV2(host)", startIdx);
+  assert.ok(guardIdx > 0, "RD start must call gatewayMacStatus");
+  assert.ok(tunnelIdx > guardIdx, "gateway MAC guard must run before RD tunnel start");
+});
+
 check("host freezes the first verified incoming request until decision or timeout", () => {
   const manager = fs.readFileSync(
     path.join(__dirname, "../../../..", "host/app/PairingManager.swift"),

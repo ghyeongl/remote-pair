@@ -41,6 +41,10 @@ const ICONS: Record<EngineKey, ComponentType<{ className?: string }>> = {
 const BADGE: Partial<Record<EngineKey, "recommended">> = { claude: "recommended" };
 
 const isReady = (s: EngineStatus | null | undefined) => !!s && s.installed && s.authed;
+const primaryEngine = (selected: Set<EngineKey>, preferred?: EngineKey | null) => {
+  if (preferred && selected.has(preferred)) return preferred;
+  return ORDER.find((id) => selected.has(id)) ?? null;
+};
 
 const missingText = (s: EngineStatus | null | undefined) => {
   if (!s) return "Not checked";
@@ -96,16 +100,12 @@ export function StepEngine({ selected, setSelected }: Props) {
         }
 
         setSelected(nextSelected);
-        const focused =
-          ready.has(preferred)
-            ? preferred
-            : (nextSelected.values().next().value as EngineKey | undefined) ?? preferred;
+        const focused = primaryEngine(nextSelected, preferred) ?? preferred;
         setEngine(focused);
         setApiKey("");
 
-        for (const id of nextSelected) {
-          await persistEngine(id);
-        }
+        const primary = primaryEngine(nextSelected, focused);
+        if (primary) await persistEngine(primary);
       } finally {
         setProbing(false);
       }
@@ -121,22 +121,29 @@ export function StepEngine({ selected, setSelected }: Props) {
 
   const toggle = useCallback(
     async (id: EngineKey) => {
-      setEngine(id);
       setApiKey("");
       setActionErr("");
       const status = statuses?.[id];
-      if (!isReady(status)) return;
+      if (!isReady(status)) {
+        setEngine(id);
+        return;
+      }
 
       const next = new Set(selected);
       if (next.has(id)) {
         next.delete(id);
+        const primary = primaryEngine(next, engine === id ? null : engine);
+        setSelected(next);
+        setEngine(primary ?? id);
+        if (primary) await persistEngine(primary);
       } else {
         next.add(id);
+        setSelected(next);
+        setEngine(id);
         await persistEngine(id);
       }
-      setSelected(next);
     },
-    [persistEngine, selected, setSelected, statuses],
+    [engine, persistEngine, selected, setSelected, statuses],
   );
 
   const onInstall = useCallback(async () => {

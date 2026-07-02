@@ -533,9 +533,9 @@ function HostFolderBrowser({
   );
 }
 
-type DirectoryPickerWindow = Window & {
-  showDirectoryPicker?: () => Promise<{ name: string }>;
-};
+function isManualClientPath(p: string) {
+  return p.startsWith("/") || p.startsWith("~/");
+}
 
 function ClientPathPopover({
   open,
@@ -549,22 +549,6 @@ function ClientPathPopover({
   const { t } = useT();
   const [manual, setManual] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const picker =
-    typeof window !== "undefined"
-      ? (window as DirectoryPickerWindow).showDirectoryPicker
-      : undefined;
-
-  const pickSystem = async () => {
-    if (!picker) return;
-    setError(null);
-    try {
-      const handle = await picker();
-      onPick(`~/${handle.name}`);
-    } catch (e) {
-      const name = e instanceof DOMException ? e.name : "";
-      if (name !== "AbortError") setError(e instanceof Error ? e.message : String(e));
-    }
-  };
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -573,16 +557,9 @@ function ClientPathPopover({
           <DialogTitle className="text-base">{t("map.localTitle")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
-          {picker ? (
-            <Button size="sm" className="w-full" onClick={pickSystem}>
-              <Folder className="mr-1.5 h-4 w-4" />
-              {t("map.localPick")}
-            </Button>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {t("map.localUnsupported")}
-            </p>
-          )}
+          <p className="text-xs text-muted-foreground">
+            {t("map.localUnsupported")}
+          </p>
           <div className="space-y-1">
             <input
               value={manual}
@@ -595,7 +572,15 @@ function ClientPathPopover({
               size="sm"
               className="w-full"
               disabled={!manual.trim()}
-              onClick={() => onPick(manual.trim())}
+              onClick={() => {
+                const next = manual.trim();
+                if (!isManualClientPath(next)) {
+                  setError("Enter an absolute path starting with / or ~/.");
+                  return;
+                }
+                setError(null);
+                onPick(next);
+              }}
             >
               {t("map.chooseThis")}
             </Button>

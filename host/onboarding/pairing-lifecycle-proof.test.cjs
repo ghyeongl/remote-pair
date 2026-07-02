@@ -137,14 +137,15 @@ test("US-004 pending proof confirms pairing and exits before command execution",
 
 test("US-004 key install is ledger-first and rolls back on partial failure", () => {
 	  assert.match(manager, /let originalLines = readAuthorizedKeyLines\(\)/);
-	  assert.match(manager, /authorizedKeyBlob\(in: existing\) == req\.keyBlob/);
+	  assert.match(manager, /isXpairAuthorizedKeyLine\(existing\)[\s\S]*authorizedKeyBlob\(in: existing\) == req\.keyBlob/);
 	  assert.match(manager, /let originalLedger = readLedger\(\)/);
   assert.match(
     manager,
     /try writeLedger\(ledger\)[\s\S]*do \{[\s\S]*try ensureGateHelperReady\(\)[\s\S]*try writeAuthorizedKeyLines\(lines\)[\s\S]*\} catch \{[\s\S]*try\? writeLedger\(originalLedger\)[\s\S]*try\? writeAuthorizedKeyLines\(originalLines\)/,
     "ledger write must happen before authorized_keys write, with rollback for later failures",
 	  );
-	  assert.match(manager, /private static func installRemovesLegacyDuplicateAuthorizedKey\(pubLine: String\) throws/);
+		  assert.match(manager, /private static func installPreservesUnmarkedSameBlobAuthorizedKey\(pubLine: String\) throws/);
+		  assert.match(manager, /private static func installRemovesMarkedDuplicateAuthorizedKey\(pubLine: String\) throws/);
 	});
 
 test("US-004 UDP rate limiting has a global bucket and LRU source eviction", () => {

@@ -19,6 +19,21 @@ let nextLocalPort = 31000;
 let failTokenRead = false;
 let transientTokenReadFailuresRemaining = 0;
 const tokenReadResponses = [];
+let gatewayMacResponse = { allowed: true, state: "same", current: "aa:bb:cc:dd:ee:ff", stored: "aa:bb:cc:dd:ee:ff", err: "" };
+let gatewayMacError = null;
+// Delegate to the REAL bridge so ssh-failure classification (host-key taxonomy, key-auth,
+// etc.) stays faithful; only gatewayMacStatus is overridden so tests can drive the roaming
+// guard. Loaded before the Module._load patch below — onboarding-bridge.js has no load-time
+// side effects, so the real child_process/net are harmless at require time.
+const realBridge = require("./onboarding-bridge.js");
+const fakeBridge = {
+  ...realBridge,
+  gatewayMacStatus() {
+    if (gatewayMacError) throw gatewayMacError;
+    return gatewayMacResponse;
+  },
+};
+
 function fakeSpawn(cmd, args, opts) {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -161,6 +176,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
   if (request === "vscode") return fakeVscode;
   if (request === "child_process") return { spawn: fakeSpawn };
   if (request === "net") return fakeNet;
+  if (request === "./onboarding-bridge.js") return fakeBridge;
   return realLoad.call(this, request, parent, isMain);
 };
 
@@ -207,6 +223,8 @@ function resetHarness() {
   failTokenRead = false;
   transientTokenReadFailuresRemaining = 0;
   tokenReadResponses.length = 0;
+  gatewayMacResponse = { allowed: true, state: "same", current: "aa:bb:cc:dd:ee:ff", stored: "aa:bb:cc:dd:ee:ff", err: "" };
+  gatewayMacError = null;
 }
 
 function makePanel() {
@@ -652,6 +670,29 @@ function runRemoteDesktopWebview() {
     await waitForAsync();
 
     assert.strictEqual(spawnedChildren.length, 2, "second reveal should start a fresh ssh tunnel");
+  });
+
+  await check("RD start respects the gateway MAC roaming guard before ssh", async () => {
+    resetHarness();
+    process.env.REMOTE_HOST = "test-host";
+    gatewayMacResponse = {
+      allowed: false,
+      state: "changed",
+      current: "11:22:33:44:55:66",
+      stored: "aa:bb:cc:dd:ee:ff",
+      err: "default gateway MAC changed",
+    };
+    const panel = makePanel();
+    panel.visible = true;
+
+    await panel._startStream();
+    await waitForAsync();
+
+    assert.strictEqual(tokenReadCommands.length, 0, "blocked roaming guard must not read the RD token");
+    assert.strictEqual(spawnedChildren.length, 0, "blocked roaming guard must not open an ssh tunnel");
+    const errors = errorPosts();
+    assert.strictEqual(errors.length, 1, "blocked roaming guard should surface one RD error");
+    assert.match(errors[0].detail, /default gateway MAC changed/);
   });
 
   await check("stale settle timer cannot post obsolete v2Connect", async () => {

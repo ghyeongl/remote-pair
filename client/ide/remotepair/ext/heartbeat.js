@@ -32,13 +32,14 @@ const RP_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 const INTERVAL_MS = 30 * 1000;
 const CONNECT_TIMEOUT = "6";
-// REMOTE_HOST must be a bare ssh host alias / hostname (mirrors HOST_RE in onboarding-bridge.js).
+// REMOTE_HOST must be an ssh alias / hostname, optionally `user@host` (mirrors
+// SSH_TARGET_RE in onboarding-bridge.js).
 // The CLI/extension paths reject option-looking hosts before spawning ssh; the heartbeat read
 // REMOTE_HOST straight from client.env, so a stale/corrupt/hostile value would be passed to ssh as
 // an option. The leading `(?!-)` is essential: a bare `[A-Za-z0-9._-]+` still admits `-p2222`/`-V`
 // (the `-` is in the class), which ssh parses as an option, not the destination — defeating the
-// guard. Reject a leading dash, matching onboarding-bridge.js.
-const HOST_RE = /^(?!-)[A-Za-z0-9._-]+$/;
+// guard. Reject a leading dash in either the user or host part, matching onboarding-bridge.js.
+const HOST_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
 
 /** Sanitize to the host-side filename charset: every char outside [A-Za-z0-9._-] → '_'. */
 function sanitize(s) {

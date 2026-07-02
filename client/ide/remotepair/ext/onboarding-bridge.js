@@ -975,8 +975,11 @@ function currentGatewayMac() {
 }
 
 function gatewayMacStatus({ updateBaseline = false } = {}) {
-  const current = currentGatewayMac();
   const stored = parseEnv(CLIENT_ENV).GATEWAY_MAC || "";
+  if (process.platform !== "darwin") {
+    return { allowed: true, state: "unsupported-platform", current: "", stored, err: "" };
+  }
+  const current = currentGatewayMac();
   if (!current) {
     upsertEnv("LOCAL_MODE", "1");
     return { allowed: false, state: "unknown", current: "", stored, err: "default gateway MAC unknown" };
@@ -1343,8 +1346,26 @@ const bridge = {
   // BatchMode) runs an engine-specific probe and prints a parseable RP_* block. Auth detection is
   // engine-specific (each engine stores creds differently); see ENGINE_PROBE below. Returns
   // {installed, authed, version, err}.
+  async hostEnvEngine(hostArg) {
+    const host = String(hostArg || parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    if (!host) return { engine: "", err: "REMOTE_HOST not set" };
+    if (!validSshTarget(host)) {
+      return { engine: "", err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    }
+    const cmd = 'set -a; [ -f "$HOME/.xpair/host/host.env" ] && . "$HOME/.xpair/host/host.env"; printf "%s\\n" "${ENGINE:-}"';
+    const r = await run("ssh", [...sshProbeOpts(host, 6), host, cmd]);
+    if (r.code !== 0) {
+      const s = sshResult(r);
+      return { engine: "", err: s.err, state: s.state, action: s.action };
+    }
+    const engine = String(r.out || "").trim().split(/\r?\n/).pop().trim();
+    if (!engine) return { engine: "", err: "host ENGINE not set" };
+    if (!SESSION_ENGINES.has(engine)) return { engine: "", err: `unknown host ENGINE: ${engine}` };
+    return { engine, err: "" };
+  },
+
   async hostEngineStatus(engine) {
-    const e = String(engine || "");
+    const e = String(engine || "").trim();
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { installed: false, authed: false, version: "", err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {

@@ -68,10 +68,11 @@ const RD_SESSION_TOKEN_REMOTE_FILE = "~/.xpair/host/rd-session-token";
 const RD_SESSION_TOKEN_RE = /^[A-Za-z0-9._-]{24,128}$/;
 const RD_TOKEN_FILE_NOT_READY_RE = /rd-session-token[\s\S]*(?:No such file|ENOENT)|(?:No such file|ENOENT)[\s\S]*rd-session-token/i;
 
-// REMOTE_HOST must be a bare ssh host alias / hostname. Validate hard before
-// it ever reaches a spawned process (defense in depth even though spawn is
-// argv-safe: prevents an attacker-controlled env from injecting ssh options).
-const HOST_RE = /^[A-Za-z0-9._-]+$/;
+// REMOTE_HOST must be an ssh alias / hostname, optionally prefixed with a normal
+// login (`user@host`). Validate hard before it ever reaches a spawned process
+// (defense in depth even though spawn is argv-safe: prevents an attacker-
+// controlled env from injecting ssh options).
+const HOST_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
 const { spawnEnv, sshFailureKind, sshFailureMessage, SSH_STATE } = onboardingBridge;
 const RD_TRANSIENT_SSH_RE = /agent refused operation|signing failed|Permission denied \(publickey|Connection refused|Connection reset|kex_exchange|Operation timed out|Could not resolve|Host is down/i;
 const RD_MAX_TRANSIENT_ATTEMPTS = 4;
@@ -438,6 +439,11 @@ function classifiedSshFailureMessage(detail) {
   return sshFailureMessage(state, detail);
 }
 
+function gatewayMacBlockDetail(gw) {
+  const state = gw && gw.state ? gw.state : "unknown";
+  return `gateway MAC guard fail-closed: ${state}${gw && gw.err ? ` (${gw.err})` : ""}`;
+}
+
 function rdFailureKindForSshState(state) {
   if (state === SSH_STATE.HOST_KEY_MISMATCH) return "host-key";
   if (state === SSH_STATE.KEY_AUTH_BLOCKED) return "key-auth";
@@ -481,7 +487,7 @@ function getFreePort() {
 
 /**
  * Spawn an ssh local-forward tunnel (foreground: ssh -N).
- * argv-safe: host is validated, ports are integers.
+   * argv-safe: host is validated, ports are integers.
  *
  * Returns the child process — child.kill() to teardown.  We deliberately do NOT pass `-f`:
  * with `-f`, ssh forks into the background and the foreground (this Node child) exits
@@ -509,7 +515,7 @@ function spawnTunnel(host, localPort, remotePort) {
     "-o", "ExitOnForwardFailure=yes",
     "-N",
     "-L", `${localPort}:127.0.0.1:${rport}`,
-    host, // validated HOST_RE element
+    host, // validated HOST_RE ssh target
   ];
   log(`tunnel: ssh -N -L ${localPort}:127.0.0.1:${rport} ${host}`);
   const child = cp.spawn("ssh", args, { windowsHide: true, detached: false, env: spawnEnv() });
@@ -724,6 +730,20 @@ class RemoteDesktopPanel {
     const host = getValidHost();
     if (!host) {
       this.post({ type: "status", state: "no-host" });
+      return;
+    }
+    try {
+      const gw = onboardingBridge.gatewayMacStatus();
+      if (gw && gw.allowed === false) {
+        const detail = gatewayMacBlockDetail(gw);
+        log(detail, "warn");
+        this.post({ type: "status", state: "error", detail, failureKind: "reach" });
+        return;
+      }
+    } catch (e) {
+      const detail = `gateway MAC guard unavailable; auto-connect disabled: ${e && e.message ? e.message : e}`;
+      log(detail, "warn");
+      this.post({ type: "status", state: "error", detail, failureKind: "reach" });
       return;
     }
     await this._startV2(host);
@@ -1959,7 +1979,7 @@ function activate(context) {
             reason: telemetry.REASONS.HOST_UNREACHABLE,
           });
         }
-        log(`gateway MAC guard fail-closed: ${gw.state}${gw.err ? ` (${gw.err})` : ""}`, "warn");
+        log(gatewayMacBlockDetail(gw), "warn");
         return;
       }
     } catch (e) {

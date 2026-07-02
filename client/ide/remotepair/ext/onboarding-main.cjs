@@ -72,6 +72,13 @@ function configuredEngine(env = readClientEnv()) {
   return SESSION_ENGINES.has(engine) ? engine : 'claude'
 }
 
+async function configuredHostEngine(host, probeBridge = bridge) {
+  if (!probeBridge || typeof probeBridge.hostEnvEngine !== 'function') return null
+  const result = await probeBridge.hostEnvEngine(host)
+  const engine = String((result && result.engine) || '').trim()
+  return SESSION_ENGINES.has(engine) ? engine : null
+}
+
 /** Historical helper: "configured" ⇔ REMOTE_HOST is set. Folder mappings are OPTIONAL (you can
  *  attach to a host for screen share / terminal with no folders mapped and add them later from the
  *  IDE), so they are intentionally not part of the launch guard. */
@@ -130,11 +137,19 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
     return START_STEP.CONNECT
   }
 
+  let hostEngine = null
   try {
-    const engine = await probeBridge.hostEngineStatus(configuredEngine(clientEnv))
-    if (!engine || engine.installed !== true || engine.authed !== true) return START_STEP.ENGINE
+    hostEngine = await configuredHostEngine(host, probeBridge)
   } catch {
-    return START_STEP.ENGINE
+    hostEngine = null
+  }
+  if (hostEngine) {
+    try {
+      const engine = await probeBridge.hostEngineStatus(hostEngine)
+      if (!engine || engine.installed !== true || engine.authed !== true) return START_STEP.ENGINE
+    } catch {
+      return START_STEP.ENGINE
+    }
   }
 
   return null
@@ -266,6 +281,7 @@ async function resolveOnboarding({ electron, onComplete, argv = process.argv, pr
 
 module.exports = {
   isOnboarded,
+  configuredHostEngine,
   firstFailingGuard,
   shouldOnboard,
   resolveOnboarding,

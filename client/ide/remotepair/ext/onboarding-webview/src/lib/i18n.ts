@@ -102,7 +102,7 @@ const EN: Dict = {
   "map.openFolder": "Open folder",
   "map.localTitle": "Choose local folder",
   "map.localPick": "Choose folder on this Mac…",
-  "map.localUnsupported": "Your browser doesn't support the folder picker. Type a path instead.",
+  "map.localUnsupported": "Type an absolute local path starting with / or ~/.",
 
 
   // Client Done
@@ -280,7 +280,7 @@ const KO: Dict = {
   "map.openFolder": "폴더 열기",
   "map.localTitle": "로컬 폴더 선택",
   "map.localPick": "이 Mac에서 폴더 선택…",
-  "map.localUnsupported": "이 브라우저는 폴더 선택을 지원하지 않습니다. 경로를 직접 입력하세요.",
+  "map.localUnsupported": "로컬 절대 경로를 / 또는 ~/로 시작해서 입력하세요.",
 
 
   "done.client.title": "모두 준비되었습니다",
