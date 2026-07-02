@@ -143,9 +143,18 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   } catch {
     hostEngine = null
   }
-  if (hostEngine) {
+  // On upgraded hosts that were configured by the old client-side engine step, host.env may not exist
+  // yet even though client.env still NAMES the engine the user expects. Fall back to that client engine
+  // so the readiness gate still runs — otherwise a missing/unreadable host.env silently skips the check
+  // and the first `xpair launch` fails when that engine isn't installed/signed in on the host. Only when
+  // client.env EXPLICITLY sets ENGINE (not the 'claude' default): if no engine is named anywhere, keep
+  // skipping the guard so a host that never used an engine isn't forced into engine recovery.
+  const clientEngineRaw = (readClientEnv().ENGINE || "").trim()
+  const clientEngine = SESSION_ENGINES.has(clientEngineRaw) ? clientEngineRaw : null
+  const engineToCheck = hostEngine || clientEngine
+  if (engineToCheck) {
     try {
-      const engine = await probeBridge.hostEngineStatus(hostEngine)
+      const engine = await probeBridge.hostEngineStatus(engineToCheck)
       if (!engine || engine.installed !== true || engine.authed !== true) return START_STEP.ENGINE
     } catch {
       return START_STEP.ENGINE

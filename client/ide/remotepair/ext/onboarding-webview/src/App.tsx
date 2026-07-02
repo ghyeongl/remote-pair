@@ -113,6 +113,12 @@ export default function App() {
   selectedRef.current = selectedHost;
 
   const setSelected = useCallback((host: DiscoveredHost | null) => {
+    // A different host must NOT inherit the previous host's FOLDER_MAPS: those client↔host paths belong
+    // to the old REMOTE_HOST, and once setHost() switches the configured host a stale hasRealMapping
+    // would let the Mappings/Done gates pass against paths that don't exist on the new host. Clear on
+    // any host-id change (including going back to Discover) so mappings are re-entered for the new host.
+    const prevId = selectedRef.current?.id ?? null;
+    if (prevId !== (host?.id ?? null)) setMappings([]);
     setSelectedHost(host);
     setUpdateState("idle");
     setUpdatePct(0);

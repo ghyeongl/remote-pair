@@ -24,7 +24,7 @@ test("Q0369 Q0421 Q0424 Q0426 onboarding is a consumed-sentinel pre-workbench Br
   assert.match(onboardingMain, /const FORCE_ONBOARDING_SENTINEL = path\.join\(os\.homedir\(\), '\.xpair\/host', '\.force-onboarding'\)/);
   assert.match(onboardingMain, /async function firstFailingGuard\(argv = process\.argv, probeBridge = bridge\)[\s\S]*forcedOnboardingRequested\(argv\)[\s\S]*return START_STEP\.WELCOME/);
   assert.match(onboardingMain, /CONNECT: 'connect'[\s\S]*GRANT: 'grant'[\s\S]*ENGINE: 'engine'/);
-  assert.match(onboardingMain, /probeBridge\.cliReady\(\)[\s\S]*probeBridge\.sshReachable\(host\)[\s\S]*probeBridge\.hostAppStatus\(host\)[\s\S]*probeBridge\.hostPermissions\(\{ host \}\)[\s\S]*configuredHostEngine\(host, probeBridge\)[\s\S]*probeBridge\.hostEngineStatus\(hostEngine\)/);
+  assert.match(onboardingMain, /probeBridge\.cliReady\(\)[\s\S]*probeBridge\.sshReachable\(host\)[\s\S]*probeBridge\.hostAppStatus\(host\)[\s\S]*probeBridge\.hostPermissions\(\{ host \}\)[\s\S]*configuredHostEngine\(host, probeBridge\)[\s\S]*probeBridge\.hostEngineStatus\(engineToCheck\)/);
   assert.doesNotMatch(onboardingMain, /configuredLocalMode|LOCAL_MODE[\s\S]*return null/);
   assert.match(onboardingMain, /async function resolveOnboarding\(\{ electron, onComplete, argv = process\.argv, probeBridge = bridge \} = \{\}\)[\s\S]*openOnboardingWindow\(\{ electron, onComplete, startStep \}\)[\s\S]*return true/);
   assert.match(onboardingMain, /function openOnboardingWindow\(\{ electron, onComplete, startStep \} = \{\}\)[\s\S]*clearForceOnboardingSentinel\(\)[\s\S]*new BrowserWindow\(/);

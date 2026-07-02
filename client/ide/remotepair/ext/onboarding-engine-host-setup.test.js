@@ -37,7 +37,7 @@ test("Q0545 client flow has no engine step, but native resume still checks host.
   assert.match(onboardingMain, /ENGINE: 'engine'/);
   assert.match(onboardingMain, /const SESSION_ENGINES = new Set\(\['claude', 'shell', 'codex', 'opencode'\]\)/);
   assert.match(onboardingMain, /configuredHostEngine\(host, probeBridge\)/);
-  assert.match(onboardingMain, /probeBridge\.hostEngineStatus\(hostEngine\)/);
+  assert.match(onboardingMain, /probeBridge\.hostEngineStatus\(engineToCheck\)/);
 });
 
 test("Q0545 host onboarding owns the 11-step engine setup gate", () => {

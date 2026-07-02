@@ -38,7 +38,7 @@ test("native guard still returns the old startStep words used by electron-main",
   assert.match(onboardingMain, /if \(!host\) return START_STEP\.WELCOME/);
   assert.match(onboardingMain, /probeBridge\.sshReachable\(host\)[\s\S]*return START_STEP\.CONNECT/);
   assert.match(onboardingMain, /probeBridge\.hostPermissions\(\{ host \}\)[\s\S]*return START_STEP\.GRANT/);
-  assert.match(onboardingMain, /configuredHostEngine\(host, probeBridge\)[\s\S]*probeBridge\.hostEngineStatus\(hostEngine\)[\s\S]*return START_STEP\.ENGINE/);
+  assert.match(onboardingMain, /configuredHostEngine\(host, probeBridge\)[\s\S]*probeBridge\.hostEngineStatus\(engineToCheck\)[\s\S]*return START_STEP\.ENGINE/);
 });
 
 test("discover selection probes host status and carries pairing transcript fields", () => {

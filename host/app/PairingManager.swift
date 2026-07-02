@@ -273,19 +273,23 @@ enum XpairAuthorizedKeys {
                                     clientID: String,
                                     fingerprint: String,
                                     created: Int64,
-                                    name: String) throws -> String {
+                                    name: String,
+                                    paired: Bool) throws -> String {
         let parsed = try PairingSecurity.parseEd25519PublicKey(publicKey)
         guard PairingSecurity.validateClientID(clientID) else { throw PairingSecurityError.invalidClientID }
         let safeName = PairingSecurity.sanitizeCommentValue(name)
         let comment = "xpair:v1 client_id=\(clientID) fp=\(fingerprint) created=\(created) name=\(safeName)"
-        // port-forwarding re-enables BOTH local (-L) and remote (-R) forwarding disabled by restrict;
-        // permitopen constrains local forwards to the RD signaling port. There is NO valid
-        // authorized_keys value that denies all -R (permitlisten only accepts "[host:]port"/*, so the
-        // former permitlisten="none" was an INVALID option that made sshd reject the whole key, leaving
-        // the client's proof login stuck at accepted-pending-proof). -R is left un-narrowed here; the
-        // real boundary is the forced xpair-ssh-gate command + fingerprint binding, which already
-        // constrains what a paired client can do far more tightly than a listen restriction would.
-        return #"restrict,pty,port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)",command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
+        // Forwarding is granted ONLY once the client is `paired` (proof completed). While
+        // accepted-pending-proof the line is bare `restrict,pty,command=…`: restrict denies BOTH -L and
+        // -R, so a forwarding-only `ssh -N -L …:8890` connection (which never triggers the forced gate
+        // command, hence never runs the proof) cannot reach the RD sidecar during the proof window.
+        // xpair-ssh-gate adds `port-forwarding,permitopen=…` to this line the instant it flips the
+        // ledger to `paired` (see add_authorized_key_forwarding). port-forwarding re-enables -L (and -R);
+        // permitopen constrains -L to the RD signaling port. There is NO valid authorized_keys value
+        // that denies all -R (permitlisten accepts only "[host:]port"/*), so -R is left un-narrowed on
+        // the paired line; the forced-command gate + fingerprint binding is the real boundary.
+        let forwarding = paired ? #"port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)","# : ""
+        return #"restrict,pty,\#(forwarding)command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
     }
 
     static func install(_ req: VerifiedPairingRequest) throws -> AuthorizedClientRecord {
@@ -294,11 +298,13 @@ enum XpairAuthorizedKeys {
             let now = Int64(Date().timeIntervalSince1970)
             let clientID = PairingSecurity.clientID(forKeyBlob: req.keyBlob)
             guard PairingSecurity.validateClientID(clientID) else { throw PairingSecurityError.invalidClientID }
+            // paired: false — install at accept time grants NO forwarding; the gate adds it on proof.
             let line = try buildRestrictedLine(publicKey: req.clientPubKey,
                                                clientID: clientID,
                                                fingerprint: req.fingerprint,
                                                created: now,
-                                               name: req.name)
+                                               name: req.name,
+                                               paired: false)
             let originalLines = readAuthorizedKeyLines()
             var lines = originalLines
             // Remove only Xpair-marked (xpair:v1) same-blob / same-client lines; unmarked same-blob
@@ -610,6 +616,37 @@ enum XpairAuthorizedKeys {
           chmod 0600, $auth_path;
         }
 
+        # Grant forwarding to the matching client line by inserting the tokens after `restrict,pty,`. Called
+        # only after the ledger is durably `paired`, so forwarding is never live while pending. Idempotent:
+        # the `!$has_fwd` guard + the anchored `\Arestrict,pty,` match (only the pending shape) make a
+        # re-run on an already-forwarding line a no-op. Atomic temp+rename+chmod, mirroring
+        # remove_authorized_key_line. 8890 is hardcoded (this gate is a literal raw string with no Swift
+        # interpolation); it MUST match remoteDesktopSignalPort — the self-test cross-checks both are 8890.
+        sub add_authorized_key_forwarding {
+          return unless -f $auth_path;
+          open(my $in, "<", $auth_path) or reject("cannot read authorized_keys", 65);
+          my @out; my $changed = 0;
+          while (my $line = <$in>) {
+            my $is_xpair  = index($line, " xpair:v1 ") >= 0;
+            my $is_client = index($line, "client_id=$id") >= 0;
+            my $has_fwd   = index($line, "port-forwarding") >= 0;
+            if ($is_xpair && $is_client && !$has_fwd
+                && $line =~ s/\Arestrict,pty,/restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",/) {
+              $changed = 1;
+            }
+            push @out, $line;
+          }
+          close($in);
+          return unless $changed;
+          my $tmp = "$auth_path.$$.tmp";
+          open(my $out, ">", $tmp) or reject("cannot write authorized_keys", 65);
+          print {$out} @out;
+          close($out) or reject("cannot close authorized_keys", 65);
+          chmod 0600, $tmp;
+          rename($tmp, $auth_path) or reject("cannot replace authorized_keys", 65);
+          chmod 0600, $auth_path;
+        }
+
         sub revoke_current {
           splice(@$clients, $idx, 1);
           write_ledger();
@@ -636,12 +673,14 @@ enum XpairAuthorizedKeys {
           $rec->{status} = "paired";
           $rec->{pairedAt} = $now;
           write_ledger();
+          add_authorized_key_forwarding();   # ledger is durably paired BEFORE forwarding is granted -> crash fails closed
           print "paired\n";
           exit 0;
         }
 
         if ($status eq "paired") {
           require_matching_login_fingerprint();
+          add_authorized_key_forwarding();   # self-heal: a prior promotion that crashed after the ledger flip
           print "exec\n";
           exit 0;
         }
@@ -1390,12 +1429,20 @@ enum PairingSecuritySelfTest {
 
         assertThrows { _ = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "bad id\"`",
                                                                        fingerprint: "SHA256:x", created: ts,
-                                                                       name: "bad\nname") }
+                                                                       name: "bad\nname", paired: false) }
         assertThrows { _ = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: "ssh-rsa AAAA", clientID: "abc",
                                                                        fingerprint: "SHA256:x", created: ts,
-                                                                       name: "ok") }
+                                                                       name: "ok", paired: false) }
+        // Pending (accepted-pending-proof): bare restrict, NO forwarding — a forwarding-only ssh -N -L
+        // cannot reach the RD port before proof completes.
+        let pendingLine = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
+                                                                      fingerprint: "SHA256:x", created: ts, name: "ok", paired: false)
+        assert(pendingLine.hasPrefix("restrict,pty,command="))
+        assert(!pendingLine.contains("port-forwarding"))
+        assert(!pendingLine.contains("permitopen"))
+        // Paired: forwarding granted, constrained to the RD signaling port.
         let line = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
-                                                               fingerprint: "SHA256:x", created: ts, name: "ok")
+                                                               fingerprint: "SHA256:x", created: ts, name: "ok", paired: true)
         assert(line.contains("restrict,pty,port-forwarding"))
         assert(line.contains(#"permitopen="127.0.0.1:8890""#))
         assert(!line.contains("permitlisten"))   // no valid "deny all -R" value exists; must NOT emit an invalid one
@@ -1406,6 +1453,7 @@ enum PairingSecuritySelfTest {
         try markPairedRequiresObservedSSHLoginFingerprint(pubLine: pubLine)
         try acceptIncomingRequiresExactNonEmptyFingerprint(pubLine: pubLine)
         try gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: pubLine)
+        try gateGrantsForwardingOnlyAfterProof(pubLine: pubLine)
         try installPreservesUnmarkedSameBlobAuthorizedKey(pubLine: pubLine)
         try installRemovesMarkedDuplicateAuthorizedKey(pubLine: pubLine)
         try installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: pubLine)
@@ -1469,6 +1517,65 @@ enum PairingSecuritySelfTest {
             let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
             assert(auth.contains(" fp=\(req.fingerprint) "))
         }
+    }
+
+    // R9-3: the gate must grant port-forwarding to a client's line ONLY when it flips the ledger to
+    // paired, and must do so idempotently (a later paired login must not double-insert). Clean setup:
+    // one pending client whose installed line is the real pending shape (restrict,pty,command=…, NO
+    // forwarding), so a forwarding-only ssh -N -L cannot reach the RD port before proof completes.
+    private static func gateGrantsForwardingOnlyAfterProof(pubLine: String) throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("xpair-fwd-selftest-\(UUID().uuidString)")
+        let sshDir = root.appendingPathComponent(".ssh")
+        let xpairDir = root.appendingPathComponent(".xpair")
+        try FileManager.default.createDirectory(at: sshDir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: xpairDir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let gate = root.appendingPathComponent("xpair-ssh-gate")
+        try XpairAuthorizedKeys.gateHelperScript().write(to: gate, atomically: true, encoding: .utf8)
+        chmod(gate.path, 0o755)
+
+        let now = Int64(Date().timeIntervalSince1970)
+        let rec = AuthorizedClientRecord(clientID: "fwd_123",
+                                         publicKey: pubLine,
+                                         keyBlob: try PairingSecurity.parseEd25519PublicKey(pubLine).keyBlob,
+                                         fingerprint: "SHA256:fwd",
+                                         name: "fwd",
+                                         created: now,
+                                         status: "accepted-pending-proof",
+                                         proofDeadline: now + 60,
+                                         pairedAt: nil)
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(AuthorizedClientsLedger(clients: [rec]))
+            .write(to: xpairDir.appendingPathComponent("authorized_clients.json"))
+        // The real pending line install() writes: bare restrict,pty,command=… — NO forwarding.
+        let pendingLine = "restrict,pty,command=\"\(gate.path) fwd_123 SHA256:fwd\",no-agent-forwarding \(pubLine) xpair:v1 client_id=fwd_123 fp=SHA256:fwd created=\(now) name=fwd\n"
+        try pendingLine.write(to: sshDir.appendingPathComponent("authorized_keys"), atomically: true, encoding: .utf8)
+
+        func auth() throws -> String {
+            try String(contentsOf: sshDir.appendingPathComponent("authorized_keys"), encoding: .utf8)
+        }
+        // Pre-proof: no forwarding on the line.
+        let preAuth = try auth()
+        assert(!preAuth.contains("port-forwarding"))
+
+        // Proof: flips to paired AND grants forwarding.
+        let proof = runGate(gate: gate.path, home: root.path, id: "fwd_123", loginFingerprint: "SHA256:fwd", originalCommand: nil)
+        assert(proof.status == 0)
+        assert(proof.stdout.contains("paired"))
+        let afterProof = try auth()
+        assert(afterProof.contains(#"restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",command="\#(gate.path) fwd_123"#))
+        assert(afterProof.components(separatedBy: "permitopen").count - 1 == 1)
+
+        // A later paired login re-runs the grant but must NOT double-insert (idempotent self-heal).
+        let again = runGate(gate: gate.path, home: root.path, id: "fwd_123", loginFingerprint: "SHA256:fwd", originalCommand: nil)
+        assert(again.status == 0)
+        let afterAgain = try auth()
+        assert(afterAgain.components(separatedBy: "permitopen").count - 1 == 1)
     }
 
     private static func gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: String) throws {
@@ -1607,7 +1714,7 @@ enum PairingSecuritySelfTest {
             let occurrences = auth.components(separatedBy: parsed.keyBlob).count - 1
             assert(occurrences == 2)
             assert(auth.contains(" xpair:v1 "))
-            assert(auth.contains(#"permitopen="127.0.0.1:8890""#))
+            assert(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
             assert(auth.contains("legacy-copy"))
         }
     }
@@ -1635,7 +1742,7 @@ enum PairingSecuritySelfTest {
             let occurrences = auth.components(separatedBy: parsed.keyBlob).count - 1
             assert(occurrences == 1)
             assert(auth.contains(" xpair:v1 "))
-            assert(auth.contains(#"permitopen="127.0.0.1:8890""#))
+            assert(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
             assert(!auth.contains("SHA256:old"))
         }
     }

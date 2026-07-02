@@ -1792,15 +1792,19 @@ cmd_install_host() {
       # lib.sh from its own dir, and config.sh sets REPO_ROOT = <stage>/shared/.. = <stage>, so build/
       # and host/ must live under <stage>. rsync over the detached-ssh wrapper needs -e plumbing; scp -r
       # is sufficient and reuses the same askpass env.
+      # -O forces LEGACY SCP mode (remote `scp -t` over SSH_ORIGINAL_COMMAND) instead of the SFTP
+      # subsystem: on a paired-only host these transfers authenticate with the restricted pairing key,
+      # whose forced xpair-ssh-gate execs SSH_ORIGINAL_COMMAND and serves NO sftp subsystem — default
+      # (SFTP) scp would fail before the update installs. -O is harmless over the normal key/password path.
       _rp_ssh "$target" "rm -rf ~/.cache/xpair/stage && mkdir -p ~/.cache/xpair/stage/shared ~/.cache/xpair/stage/host ~/.cache/xpair/stage/client ~/.cache/xpair/stage/build" 2>/dev/null || true
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" "$repo_root"/shared/*.sh "$target:~/.cache/xpair/stage/shared/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" "$repo_root"/shared/*.sh "$target:~/.cache/xpair/stage/shared/" </dev/null \
         || { err "scp of shared/ failed"; return 1; }
       # role=host also (re)installs the client CLI tools from client/cli/ — stage them too.
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" -r "$repo_root/client/cli" "$target:~/.cache/xpair/stage/client/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/client/cli" "$target:~/.cache/xpair/stage/client/" </dev/null \
         || { err "scp of client/cli failed"; return 1; }
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" -r "$repo_root/host/rules.txt" "$repo_root/host/skills" "$repo_root/host/hooks" "$target:~/.cache/xpair/stage/host/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/host/rules.txt" "$repo_root/host/skills" "$repo_root/host/hooks" "$target:~/.cache/xpair/stage/host/" </dev/null \
         || { err "scp of host resources failed"; return 1; }
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" -r "$appsrc" "$target:~/.cache/xpair/stage/build/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$appsrc" "$target:~/.cache/xpair/stage/build/" </dev/null \
         || { err "scp of signed app failed"; return 1; }
       _rp_ssh "$target" "cd ~/.cache/xpair/stage && RP_YES=1 bash shared/install.sh --role host" \
         || { err "remote install.sh failed"; return 1; }
