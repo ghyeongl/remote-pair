@@ -1819,13 +1819,15 @@ cmd_install_host() {
   # BatchMode=yes (key-only) calls below — and every later editor/desktop/notify call
   # — would fail despite a "successful" install/re-register. Idempotent (grep -qxF),
   # so re-running on an already-authorized host is a no-op.
-  # Authorize the UNRESTRICTED personal key ONLY during initial (pre-pairing) setup. Once this client is
-  # paired (~/.xpair/host/pairing_ed25519 exists), it reaches the host solely via the restricted
-  # xpair-ssh-gate pairing line; appending ~/.ssh/id_ed25519.pub on a post-pairing update (StepUpdate →
-  # install-host --force) would silently re-grant access OUTSIDE the gate and undo the dedicated
-  # pairing-key security boundary. Paired hosts already accept the client via the pairing key.
-  if [ -f "$PAIRING_KEY" ]; then
-    c "paired host: skipping personal-key authorization (restricted pairing key already grants access)"
+  # Authorize the UNRESTRICTED personal key EXCEPT on the key-auth update path to an already-paired host.
+  # Appending ~/.ssh/id_ed25519.pub on a post-pairing update (StepUpdate → install-host --force, key auth)
+  # would silently re-grant access OUTSIDE the restricted xpair-ssh-gate line and undo the dedicated
+  # pairing-key boundary — and it is unnecessary there because the pairing key already grants access.
+  # A PASSWORD bootstrap (password_stdin=1) is always a NEW host that has NOT installed the pairing key,
+  # so it must still authorize the personal key even when a pairing key exists locally for another host
+  # (the pairing key is client-wide, not per-host) — otherwise the new host fails every later key-only probe.
+  if [ -f "$PAIRING_KEY" ] && [ "$password_stdin" != 1 ]; then
+    c "paired host (key auth): skipping personal-key authorization (restricted pairing key already grants access)"
   else
     local pubpath; pubpath="$(rp_ssh_pubkey)" || { err "could not resolve client pubkey"; return 1; }
     local pubdata; pubdata="$(cat "$pubpath" 2>/dev/null)"

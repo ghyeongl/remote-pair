@@ -947,7 +947,19 @@ final class PairingManager {
             serviceInstanceID = nextServiceInstanceID
             hostNonce = nextHostNonce
             endpoint = server
-            try startMetadataServerLocked()
+            do {
+                try startMetadataServerLocked()
+            } catch {
+                // The fixed metadata port is in use: roll the window back to "closed" instead of leaving
+                // committed phase/sid/nonce/endpoint with no metadata/Bonjour advertisement (which would
+                // report "waiting" forever with nothing for clients to discover). closeEndpoint() resets
+                // the endpoint + sid/nonce + Bonjour; "closed" makes the poll loop reopen (or surface the
+                // error) instead of hanging.
+                closeEndpoint()
+                phase = "closed"
+                lastError = "pairing metadata port unavailable: \(error)"
+                throw error
+            }
             BonjourAdvertiser.setPairingInfo(PairingAdvertiseInfo(serviceInstanceID: serviceInstanceID,
                                                                   hostNonce: hostNonce,
                                                                   pairPort: server.port))
@@ -1064,7 +1076,11 @@ final class PairingManager {
                                                       serviceInstanceID: serviceInstanceID,
                                                       consumed: &consumed)
             incoming = verified
-            incomingExpiresAt = verified.timestamp + PairingSecurity.timestampSkewSec
+            // Base the host-approval TTL on RECEIPT time (now), not the client timestamp: a client clock
+            // that is behind the host but within the ±skew replay window would otherwise set a deadline
+            // only seconds after arrival, so the incoming request could vanish before the user can
+            // Accept. The timestamp is still validated for replay freshness in PairingSecurity.verify.
+            incomingExpiresAt = now + PairingSecurity.timestampSkewSec
             frozenDropLogCount = 0
             phase = "incoming"
             lastError = ""

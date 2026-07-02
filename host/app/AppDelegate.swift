@@ -87,19 +87,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Permissions.request("sr")
             let ob = OnboardingWindow(onComplete: { [weak self] in
                 self?.onboarding = nil
-                self?.startServing()
+                // Dismissing the run gate after AX/SR are granted but BEFORE a client pairs must still
+                // leave the host pairable: start serving AND (re)open a Connect/Broadcast pairing window
+                // exactly like the already-granted launch path. windowWillClose called endWindow(), so
+                // without this the host advertises presence but no live pairing metadata and every client
+                // filters it out.
+                self?.startServingAndOpenPairingIfNeeded()
             })
             onboarding = ob
             ob.show()
         } else {
-            startServing()
-            if isHostRole && !PairingManager.shared.hasPairedClient() {
-                // Ledger empty: serve+advertise first so this Connect/Broadcast flow is pairable.
-                let ob = OnboardingWindow(mode: .grantOnly, initialStep: "connect",
-                                          onComplete: { [weak self] in self?.grantWindow = nil })
-                grantWindow = ob
-                ob.show()
-            }
+            startServingAndOpenPairingIfNeeded()
+        }
+    }
+
+    /// startServing() + open a grant-only Connect/Broadcast window when the host has no paired client yet,
+    /// so it advertises a LIVE pairing window (serviceInstanceID/hostNonce/pairPort) that clients can
+    /// discover. Shared by the launch-already-granted path and the run-gate dismiss path.
+    private func startServingAndOpenPairingIfNeeded() {
+        startServing()
+        if isHostRole && !PairingManager.shared.hasPairedClient() {
+            let ob = OnboardingWindow(mode: .grantOnly, initialStep: "connect",
+                                      onComplete: { [weak self] in self?.grantWindow = nil })
+            grantWindow = ob
+            ob.show()
         }
     }
 

@@ -118,7 +118,10 @@ check("host freezes the first verified incoming request until decision or timeou
   const installIdx = manager.indexOf("incoming = verified");
   assert.ok(dropIdx > 0, "PairingManager must drop later datagrams while a request is frozen");
   assert.ok(installIdx > dropIdx, "freeze check must happen before assigning incoming = verified");
-  assert.match(manager, /incomingExpiresAt = verified\.timestamp \+ PairingSecurity\.timestampSkewSec/);
+  // R13-1: the host-approval TTL is based on RECEIPT time (now), not the client timestamp, so a valid
+  // clock-skew request doesn't expire before the user can Accept. (Replay freshness still uses the
+  // timestamp, validated in PairingSecurity.verify.)
+  assert.match(manager, /incomingExpiresAt = now \+ PairingSecurity\.timestampSkewSec/);
   assert.match(manager, /expireFrozenIncomingLocked/);
 });
 
