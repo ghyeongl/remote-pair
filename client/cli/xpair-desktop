@@ -33,6 +33,13 @@ for _f in common host client; do
 done
 REMOTE_HOST="${REMOTE_HOST:-}"
 
+# Dedicated pairing identity: once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519, so
+# offer it on the reachability probe (else a pairing-only client reports the host unreachable).
+# Empty until the key exists (pre-pairing); scalar → safe under `set -u` on bash 3.2. See xpair-launch.
+PAIRING_KEY="$RP_DIR/pairing_ed25519"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-o IdentitiesOnly=yes -i $PAIRING_KEY"
+ssh() { command ssh $SSH_ID "$@"; }
+
 # Source the shared logger; no-op fallback for partially-updated clients.
 # shellcheck disable=SC1090
 [ -f "$RP_DIR/bin/logging.sh" ] && . "$RP_DIR/bin/logging.sh"

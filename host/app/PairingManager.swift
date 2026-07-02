@@ -1136,7 +1136,11 @@ final class PairingManager {
             } else if let rec = self.accepted,
                       XpairAuthorizedKeys.pending(clientID: rec.clientID) == nil,
                       self.phase == "accepted-pending-proof" {
-                self.phase = "waiting"
+                // acceptIncoming() already closed the UDP endpoint/Bonjour advertisement, so there is
+                // nothing to broadcast on. Roll back to "closed" (NOT "waiting"): the host UI auto-calls
+                // beginPairing() only on "closed", reopening a fresh endpoint. Leaving it "waiting" would
+                // show a live broadcast while pairPort is 0 and no client could ever send a new request.
+                self.phase = "closed"
                 self.accepted = nil
                 self.incoming = nil
                 self.incomingExpiresAt = nil

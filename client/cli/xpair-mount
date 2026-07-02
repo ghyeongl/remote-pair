@@ -39,6 +39,15 @@ done
 REMOTE_HOST="${REMOTE_HOST:-}"
 MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"
 
+# Dedicated pairing identity: once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519, so
+# offer it on every SSH helper (SMB-state probe, whoami) AND on the sshfs mount — else a
+# pairing-only client reads the wrong SMB user / reports the host unreachable. Empty until the key
+# exists (pre-pairing); scalar → safe under `set -u` on bash 3.2. sshfs takes ssh opts as -o pairs.
+PAIRING_KEY="$RP_DIR/pairing_ed25519"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-o IdentitiesOnly=yes -i $PAIRING_KEY"
+SSHFS_ID=""; [ -f "$PAIRING_KEY" ] && SSHFS_ID="-o IdentityFile=$PAIRING_KEY -o IdentitiesOnly=yes"
+ssh() { command ssh $SSH_ID "$@"; }
+
 # Default mountpoint root: ~/.xpair/host/mounts/<host>/<sanitized-path>
 MOUNTS_ROOT="$RP_DIR/mounts"
 
@@ -267,6 +276,7 @@ cmd_mount() {
       local volname; volname="rp-$(basename "$hostpath")"
       info "Mounting via SSHFS: $REMOTE_HOST:$hostpath → $mountpoint"
       if ! sshfs "${REMOTE_HOST}:${hostpath}" "$mountpoint" \
+          $SSHFS_ID \
           -o reconnect \
           -o defer_permissions \
           -o noappledouble \

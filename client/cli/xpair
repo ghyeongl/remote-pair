@@ -69,6 +69,17 @@ APPROVE_TRIGGER="${APPROVE_TRIGGER:-/tmp/xpair.approve-request}"
 LOG_FILE="${LOG_FILE:-$RP_DIR/logs/xpair.log}"
 HEARTBEAT_FILE="${HEARTBEAT_FILE:-$RP_DIR/logs/xpair.heartbeat}"
 REMOTE_HOST="${REMOTE_HOST:-}"
+
+# Dedicated pairing identity: once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519
+# (never the personal id_ed25519). Offer it on EVERY ssh path so post-pairing probes/notify
+# authenticate — the wrapper below routes all `ssh …` calls through it. Until the key exists
+# (pre-pairing) SSH_ID is empty and ssh falls back to its defaults. Mirrors xpair-launch's
+# SSH_ID and heartbeat.js/extension.js sshIdentityArgs(). Scalar string (not array) → safe
+# under `set -u` on bash 3.2; ~/.xpair/host has no spaces so unquoted word-splitting is fine.
+PAIRING_KEY="$RP_DIR/pairing_ed25519"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-o IdentitiesOnly=yes -i $PAIRING_KEY"
+ssh() { command ssh $SSH_ID "$@"; }
+
 FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"     # client::host mappings (legacy SYNC_ROOTS compatible)
 FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"          # per-mapping method, keyed by clientPath: "client::mount;client2::sync"
 LAUNCHER="${LAUNCHER:-$RP_DIR/bin/xpair-launch}"
@@ -1119,7 +1130,7 @@ cmd_logs() {
   if [ "$host" = 1 ]; then
     [ -n "$REMOTE_HOST" ] || { echo "no REMOTE_HOST configured — 'xpair config set host <ssh-host>'" >&2; return 1; }
     local rl='$HOME/.xpair/host/logs'
-    if [ "$follow" = 1 ]; then exec ssh -t "$REMOTE_HOST" "tail -n $n -F $rl/*.log 2>/dev/null"
+    if [ "$follow" = 1 ]; then exec ssh $SSH_ID -t "$REMOTE_HOST" "tail -n $n -F $rl/*.log 2>/dev/null"
     else ssh "$REMOTE_HOST" "tail -n $n $rl/*.log 2>/dev/null || echo '(no host logs at ~/.xpair/host/logs)'"; fi
     return
   fi

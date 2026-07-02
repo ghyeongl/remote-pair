@@ -2037,6 +2037,23 @@ function activate(context) {
     vscode.commands.registerCommand("remotepair.runSetup", () => runSetup()),
     vscode.commands.registerCommand("remotepair.endSessionReonboard", () => endSessionReonboard()),
     vscode.commands.registerCommand("remotepair.connectHost", () => connectHost(panel)),
+    // Recovery path for a fail-closed roaming state (blueprint §6.4): when the user moves to another
+    // network the stored gateway MAC differs and auto-connect stays blocked. confirmGatewayBaseline()
+    // adopts the current network as the new baseline; re-probe so reachability re-enables immediately
+    // without editing client.env. This is the ONLY caller of confirmGatewayBaseline().
+    vscode.commands.registerCommand("remotepair.confirmGatewayBaseline", async () => {
+      const gw = onboardingBridge.confirmGatewayBaseline();
+      if (gw && gw.allowed) {
+        vscode.window.showInformationMessage(
+          `Xpair: adopted the current network as the gateway baseline${gw.current ? ` (${gw.current})` : ""}. Reconnecting…`,
+        );
+        await probeHost();
+      } else {
+        vscode.window.showWarningMessage(
+          `Xpair: could not confirm the gateway baseline${gw && gw.err ? ` (${gw.err})` : ""}.`,
+        );
+      }
+    }),
     vscode.commands.registerCommand("remotepair.launchRemoteClaude", () => launchRemoteClaude()),
     vscode.commands.registerCommand("remotepair.remoteDesktop.refresh", () => panel.refresh()),
     vscode.commands.registerCommand("remotepair.sessions.listJson", () =>

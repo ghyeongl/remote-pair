@@ -217,6 +217,14 @@ export default function App() {
     void probeSelectedHost();
   }, [w.index, selectedHost?.id, probeSelectedHost, w.goTo]);
 
+  // Re-probe once pairing is accepted. Before pairing the dedicated key is not yet authorized, so the
+  // Discover/Update hostAppStatus probes cannot SSH-authenticate and report not-installed → the Update
+  // gate auto-skips. Now that the key is authorized the probe returns the real version; the DONE-effect
+  // above then bounces a below-floor / major-mismatch host back to Update instead of reaching Done.
+  useEffect(() => {
+    if (w.index === S.WAIT_PERM && permAccepted) void probeSelectedHost();
+  }, [w.index, permAccepted, probeSelectedHost]);
+
   useEffect(() => {
     if (w.index !== S.DONE) return;
     if (!selectedHost) {
