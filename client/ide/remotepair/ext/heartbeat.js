@@ -32,11 +32,23 @@ const RP_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 const INTERVAL_MS = 30 * 1000;
 const CONNECT_TIMEOUT = "6";
-// Dedicated pairing identity — once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519, so
-// offer it explicitly (never fall back to the personal id_ed25519). Pre-pairing (no key yet) → [].
+// Dedicated pairing identity — offer it AND the personal id_ed25519 as fallback, not the pairing key
+// alone: the key can exist locally from an unproven pairing attempt (not yet authorized on the host),
+// so forcing IdentitiesOnly to it exclusively would break a client that still reaches the host via its
+// normal key. IdentitiesOnly bounds to these two. Neither present → [] (ssh defaults/agent).
 const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
+const PERSONAL_KEY = path.join(HOME, ".ssh", "id_ed25519");
 function idArgs() {
-  try { if (fs.existsSync(PAIRING_KEY)) return ["-o", "IdentitiesOnly=yes", "-i", PAIRING_KEY]; } catch { /* ignore */ }
+  try {
+    const ids = [];
+    if (fs.existsSync(PAIRING_KEY)) ids.push(PAIRING_KEY);
+    if (fs.existsSync(PERSONAL_KEY)) ids.push(PERSONAL_KEY);
+    if (ids.length) {
+      const a = ["-o", "IdentitiesOnly=yes"];
+      for (const k of ids) a.push("-i", k);
+      return a;
+    }
+  } catch { /* ignore */ }
   return [];
 }
 // REMOTE_HOST must be an ssh alias / hostname, optionally `user@host` (mirrors

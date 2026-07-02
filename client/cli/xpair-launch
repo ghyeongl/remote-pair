@@ -40,15 +40,15 @@ for _f in common host client; do
 done
 REMOTE_HOST="${REMOTE_HOST:-}"
 
-# Dedicated pairing identity: once paired, the host trusts ONLY ~/.xpair/host/pairing_ed25519
-# (installed as the restricted forced-command line), never the personal id_ed25519. Offer it
-# explicitly on every ssh/mosh so we don't fall back to the wrong key. Pre-pairing (no key yet)
-# SSH_ID is empty and ssh uses its defaults.
+# Dedicated pairing identity: offer ~/.xpair/host/pairing_ed25519 (installed as the restricted
+# forced-command line) on every ssh/mosh so a paired client authenticates. Added with -i but WITHOUT
+# IdentitiesOnly, so ssh still falls back to the user's normal key when the pairing key isn't
+# authorized yet (unproven pairing). Pre-pairing (no key yet) SSH_ID is empty and ssh uses its defaults.
 # Scalar (NOT an array): an empty array expanded as "${arr[@]}" under `set -u` is an "unbound
 # variable" error on bash 3.2 (the macOS default). A scalar is always safe, and the xpair path has
 # no spaces, so unquoted word-splitting into ssh options is fine.
 PAIRING_KEY="$RP_DIR/pairing_ed25519"
-SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-o IdentitiesOnly=yes -i $PAIRING_KEY"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
 APP_NAME="${APP_NAME:-XpairHost}"
 BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.x10lab.xpair-host}"
 REMOTE_BIN="${REMOTE_BIN:-\$HOME/.local/bin}"          # path evaluated on the remote side (preserve quoting)

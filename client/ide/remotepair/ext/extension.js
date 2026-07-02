@@ -105,12 +105,24 @@ function rdTransientRetryDelayMs(attempt) {
 const LOG_DIR = path.join(os.homedir(), ".xpair/host", "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(os.homedir(), ".xpair/host", "client.env");
-// Dedicated pairing identity — once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519, so
-// offer it explicitly on every probe/tunnel ssh (never fall back to the personal id_ed25519).
-// Pre-pairing (no key yet) → [], so ssh uses its defaults.
+// Dedicated pairing identity — offer it AND the personal id_ed25519 as fallback on every probe/tunnel
+// ssh, not the pairing key alone: the key can exist locally from an unproven pairing attempt (not yet
+// authorized on the host), so forcing IdentitiesOnly to it exclusively would break a client that still
+// reaches the host via its normal key. IdentitiesOnly bounds to these two. Neither present → [] (ssh
+// uses its defaults). The pairing PROOF login (bridge) is the only path that must force the key alone.
 const PAIRING_KEY_FILE = path.join(os.homedir(), ".xpair/host", "pairing_ed25519");
+const PERSONAL_KEY_FILE = path.join(os.homedir(), ".ssh", "id_ed25519");
 function pairingIdArgs() {
-  try { if (fs.existsSync(PAIRING_KEY_FILE)) return ["-o", "IdentitiesOnly=yes", "-i", PAIRING_KEY_FILE]; } catch { /* ignore */ }
+  try {
+    const ids = [];
+    if (fs.existsSync(PAIRING_KEY_FILE)) ids.push(PAIRING_KEY_FILE);
+    if (fs.existsSync(PERSONAL_KEY_FILE)) ids.push(PERSONAL_KEY_FILE);
+    if (ids.length) {
+      const a = ["-o", "IdentitiesOnly=yes"];
+      for (const k of ids) a.push("-i", k);
+      return a;
+    }
+  } catch { /* ignore */ }
   return [];
 }
 const LOG_COMP = "ide";

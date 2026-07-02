@@ -70,14 +70,14 @@ LOG_FILE="${LOG_FILE:-$RP_DIR/logs/xpair.log}"
 HEARTBEAT_FILE="${HEARTBEAT_FILE:-$RP_DIR/logs/xpair.heartbeat}"
 REMOTE_HOST="${REMOTE_HOST:-}"
 
-# Dedicated pairing identity: once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519
-# (never the personal id_ed25519). Offer it on EVERY ssh path so post-pairing probes/notify
-# authenticate — the wrapper below routes all `ssh …` calls through it. Until the key exists
-# (pre-pairing) SSH_ID is empty and ssh falls back to its defaults. Mirrors xpair-launch's
-# SSH_ID and heartbeat.js/extension.js sshIdentityArgs(). Scalar string (not array) → safe
-# under `set -u` on bash 3.2; ~/.xpair/host has no spaces so unquoted word-splitting is fine.
+# Dedicated pairing identity: offer ~/.xpair/host/pairing_ed25519 on EVERY ssh path (the wrapper
+# below routes all `ssh …` calls through it) so a paired client authenticates. Add it with -i but
+# WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet
+# authorized on the host), so ssh must still fall back to the user's normal keys — forcing the key
+# exclusively would break a client that already reached the host via id_ed25519. Empty until the key
+# exists. Scalar (not array) → safe under `set -u` on bash 3.2; no spaces in the path.
 PAIRING_KEY="$RP_DIR/pairing_ed25519"
-SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-o IdentitiesOnly=yes -i $PAIRING_KEY"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
 ssh() { command ssh $SSH_ID "$@"; }
 
 FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"     # client::host mappings (legacy SYNC_ROOTS compatible)
@@ -1483,12 +1483,13 @@ def host_app_present(target):
     # hanging on a stale ControlMaster socket or password/keyboard-interactive fallback, and a tight
     # ConnectTimeout + subprocess cap bound the wait. On timeout we return None (NOT False) so the
     # caller can decide; status_for treats "couldn't confirm" as 'setup' (idempotent (re)install).
-    # Offer the dedicated pairing key: a host installed host-first trusts ONLY the restricted
-    # ~/.xpair/host/pairing_ed25519, so without it this publickey-only probe is denied and the host
-    # is mis-reported absent → status 'setup' → the webview filters the already-paired host out. Raw
-    # subprocess, so the shell ssh() wrapper does not apply; inject the identity here.
+    # Offer the dedicated pairing key so a host-first / pairing-only host (trusts the restricted
+    # ~/.xpair/host/pairing_ed25519) is probed as present instead of mis-reported 'setup'. Add it with
+    # -i but WITHOUT IdentitiesOnly so ssh still falls back to the user's normal key when the pairing
+    # key isn't authorized yet (unproven pairing). Raw subprocess, so the shell ssh() wrapper does not
+    # apply; inject the identity here.
     pairing_key = os.environ.get("PAIRING_KEY", "")
-    ident = ["-o", "IdentitiesOnly=yes", "-i", pairing_key] if pairing_key and os.path.exists(pairing_key) else []
+    ident = ["-i", pairing_key] if pairing_key and os.path.exists(pairing_key) else []
     try:
         r = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "-o", "ConnectionAttempts=1",
@@ -1686,12 +1687,12 @@ cmd_install_host() {
                  -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes
                  -o BatchMode=no -o NumberOfPasswordPrompts=1)
   fi
-  # Paired update path (StepUpdate → install-host --force, key auth): once paired the host trusts ONLY
-  # the restricted ~/.xpair/host/pairing_ed25519, so offer it to every ssh AND scp over this master.
-  # Skip during the password bootstrap (pre-pairing: pubkey is off and the key isn't authorized yet).
-  # Appended (not an empty array) → safe under `set -u` on bash 3.2.
+  # Paired update path (StepUpdate → install-host --force, key auth): offer the restricted pairing key
+  # to every ssh AND scp over this master so a paired host authenticates. Added with -i but WITHOUT
+  # IdentitiesOnly, so ssh still falls back to the user's normal key if the pairing key isn't authorized
+  # yet (unproven pairing). Skip during the password bootstrap (pre-pairing). Appended → set -u safe.
   if [ "$password_stdin" != 1 ] && [ -f "$PAIRING_KEY" ]; then
-    RP_SSHOPTS+=(-o IdentitiesOnly=yes -i "$PAIRING_KEY")
+    RP_SSHOPTS+=(-i "$PAIRING_KEY")
   fi
   # ONE combined cleanup trap on RETURN — fires on every function return (normal + error) while the
   # locals it needs (RP_CM, target, …) are STILL IN SCOPE. (An EXIT trap runs after the function has

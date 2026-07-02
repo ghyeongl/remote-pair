@@ -194,7 +194,13 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
         mapping.mode,
       );
       if (added.code !== 0) throw new Error(added.err || added.out || "mapping save failed");
-      if (savedPath && changingPath) {
+      // `xpair map add` no-ops (rc 0, "already mapped …") when the new client path is a DESCENDANT of an
+      // existing mapped root — including the OLD mapping we're editing. In that case nothing new was
+      // persisted, so dropping the old entry would delete the only mapping (which still serves the new
+      // path via longest-prefix resolution) → data loss. Only remove the old entry when the add really
+      // persisted a distinct new one.
+      const addWasNoOp = /already mapped/i.test(added.out || "");
+      if (savedPath && changingPath && !addWasNoOp) {
         // The replacement is saved above, so it is now safe to drop the OLD entry. Doing the remove
         // AFTER a successful add means a bad/nonexistent new client path can never lose the old mapping.
         const removed = await window.remotepair.removeMapping(savedPath);

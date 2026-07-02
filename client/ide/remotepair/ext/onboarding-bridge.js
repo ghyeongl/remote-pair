@@ -509,11 +509,49 @@ function sshProbeOpts(host, connectTimeout = 5) {
     "-o", `UserKnownHostsFile=${sshUserKnownHostsFileOption(host)}`,
     "-o", "StrictHostKeyChecking=accept-new",
   ];
-  try {
-    const idKey = pairingIdentityKey();
-    if (fs.existsSync(idKey)) opts.push("-o", "IdentitiesOnly=yes", "-i", idKey);
-  } catch { /* key probe failed — let ssh use the agent / defaults */ }
+  pushProbeIdentities(opts);
   return opts;
+}
+
+/** Offer the pairing key AND the personal key (fallback), NOT the pairing key alone. The pairing key
+ *  may exist locally from an ATTEMPTED-but-unproven pairing (host denied / proof expired / acceptance
+ *  failed), where it is NOT yet authorized on the host — forcing IdentitiesOnly to it exclusively would
+ *  break users who already had working SSH via their normal key (host status/update/launch recovery).
+ *  IdentitiesOnly bounds auth to just these two (no agent noise); the host accepts whichever it trusts.
+ *  The pairing PROOF login is the ONLY caller that must force the pairing key alone — sshPairingProofOpts. */
+function pushProbeIdentities(opts) {
+  try {
+    const ids = [];
+    if (fs.existsSync(PAIRING_KEY)) ids.push(PAIRING_KEY);
+    if (fs.existsSync(SSH_KEY)) ids.push(SSH_KEY);
+    if (ids.length) {
+      opts.push("-o", "IdentitiesOnly=yes");
+      for (const k of ids) opts.push("-i", k);
+    }
+  } catch { /* key probe failed — let ssh use the agent / defaults */ }
+}
+
+/** Options for the pairing PROOF login: a FRESH, non-multiplexed connection that forces ONLY the
+ *  pairing key. Must NOT reuse sshProbeOpts' shared ControlMaster — an earlier probe over the same
+ *  ControlPath (authenticated with the user's normal key when the host was already reachable) would be
+ *  reused, so the forced xpair-ssh-gate would never see pairing_ed25519 and the host would stay stuck
+ *  at accepted-pending-proof. ControlMaster=no + ControlPath=none guarantees a new authentication. */
+function sshPairingProofOpts(host, connectTimeout = 5) {
+  return [
+    "-o", "BatchMode=yes",
+    "-o", `ConnectTimeout=${connectTimeout}`,
+    "-o", "ConnectionAttempts=1",
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=none",
+    "-o", "PreferredAuthentications=publickey",
+    "-o", "PubkeyAuthentication=yes",
+    "-o", "PasswordAuthentication=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "NumberOfPasswordPrompts=0",
+    "-o", `UserKnownHostsFile=${sshUserKnownHostsFileOption(host)}`,
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "IdentitiesOnly=yes", "-i", PAIRING_KEY,
+  ];
 }
 
 function sshDurablePinOpts(connectTimeout = 5) {
@@ -530,10 +568,7 @@ function sshDurablePinOpts(connectTimeout = 5) {
     "-o", "NumberOfPasswordPrompts=0",
     "-o", "HostKeyAlgorithms=ssh-ed25519",
   ];
-  try {
-    const idKey = pairingIdentityKey();
-    if (fs.existsSync(idKey)) opts.push("-o", "IdentitiesOnly=yes", "-i", idKey);
-  } catch { /* key probe failed — let ssh use the agent / defaults */ }
+  pushProbeIdentities(opts);
   return opts;
 }
 
@@ -1737,7 +1772,7 @@ const bridge = {
       'my $j=eval { JSON::PP->new->decode($raw) }; exit 3 if $@ || ref($j) ne "HASH" || ref($j->{clients}) ne "ARRAY"; ' +
       'for my $r (@{$j->{clients}}) { next unless ref($r) eq "HASH" && ($r->{clientID}//"") eq $id; if (($r->{status}//"") eq "paired") { print "paired\\n"; exit 0; } exit 4; } exit 5;' +
       "'";
-    const r = await run("ssh", [...sshProbeOpts(h, 5), h, probe]);
+    const r = await run("ssh", [...sshPairingProofOpts(h, 5), h, probe]);
     if (r.code === 0 && /\bpaired\b/.test(r.out || "")) {
       return { paired: true, pending: false, denied: false, err: "", fingerprint: pub.fingerprint };
     }
