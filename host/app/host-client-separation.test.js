@@ -10,8 +10,9 @@ const screenServer = fs.readFileSync(path.join(__dirname, "ScreenServer.swift"),
 const captureEngine = fs.readFileSync(path.join(__dirname, "CaptureEngine.swift"), "utf8");
 const captureControlTests = fs.readFileSync(path.join(__dirname, "CaptureControlTests.swift"), "utf8");
 const bonjourAdvertiser = fs.readFileSync(path.join(__dirname, "BonjourAdvertiser.swift"), "utf8");
-const stepWaiting = fs.readFileSync(
-  path.join(root, "host/onboarding/src/components/onboarding/host/StepWaiting.tsx"),
+// The redesign merged the old StepWaiting into the host StepBroadcast (the pairing/broadcast step).
+const stepBroadcast = fs.readFileSync(
+  path.join(root, "host/onboarding/src/components/onboarding/host/StepBroadcast.tsx"),
   "utf8",
 );
 const clientBridge = fs.readFileSync(
@@ -67,9 +68,10 @@ test("Q0343 host onboarding does not install, open, or operate the client workbe
   assert.match(bonjourAdvertiser, /txt\["role"\] = role\.isEmpty \? "host" : role/);
   assert.match(screenServer, /Screen sharing belongs to the host app, not the client\./);
 
-  assert.match(stepWaiting, /window\.xpair\s*\.\s*connectedClients\(\)/);
-  assert.match(stepWaiting, /On your other Mac, open Xpair/);
-  assert.doesNotMatch(stepWaiting, /installHost|openRemoteDesktop|vscode\.openFolder|xpair onboard/);
+  // The host pairing/broadcast step drives ONLY the host bridge (window.xpair) and must never invoke
+  // client-side operations — host and client responsibilities stay separated.
+  assert.match(stepBroadcast, /window\.xpair/);
+  assert.doesNotMatch(stepBroadcast, /installHost|openRemoteDesktop|vscode\.openFolder|xpair onboard/);
 
   const bridgeShim = extractFunction(onboardingWindow, "private static let bridgeShim");
   assert.doesNotMatch(bridgeShim, /installHost|openRemoteDesktop|connectHost|openFileBrowser|vscode\.openFolder/);
@@ -83,7 +85,7 @@ test("Q0343 host onboarding does not install, open, or operate the client workbe
   const finishBody = extractFunction(stripLineComments(onboardingWindow), "private func finish()");
   assert.doesNotMatch(finishBody, /NSWorkspace\.shared\.open|Process\(\)|installHost|openRemoteDesktop|vscode\.openFolder/);
 
-  assert.match(clientBridge, /async installHost\(\{ host, user, password \} = \{\}\)/);
+  assert.match(clientBridge, /async installHost\(\{ host, user, password, force \} = \{\}\)/);
   assert.match(clientExtension, /vscode\.commands\.registerCommand\("remotepair\.openRemoteDesktop"/);
   // The client (not the host) operates the workbench's folder roots. Per round-1
   // decision #3 (Xpair Sessions only — native workbench surfaces stay hidden during

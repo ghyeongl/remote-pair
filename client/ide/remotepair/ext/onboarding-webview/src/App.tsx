@@ -108,6 +108,11 @@ export default function App() {
   const [permAccepted, setPermAccepted] = useState(false);
   const [permDenied, setPermDenied] = useState(false);
   const [mappings, setMappings] = useState<Mapping[]>([]);
+  // True while the post-pairing hostAppStatus re-probe is in flight. On the first-pair path the host
+  // could not be SSH-probed before pairing, so this is the ONLY chance to learn it is below the
+  // compatibility floor / a major mismatch — block progression past WaitPerm until it resolves, or a
+  // user (esp. one with preloaded mappings) could click through to Done against an incompatible host.
+  const [postPairProbePending, setPostPairProbePending] = useState(false);
 
   const selectedRef = useRef<DiscoveredHost | null>(null);
   selectedRef.current = selectedHost;
@@ -122,9 +127,11 @@ export default function App() {
     // Mappings belong to exactly one host (client↔host FOLDER_MAPS paths). Keep them when the user
     // (re-)selects the SAME host — e.g. a returning user whose saved mappings were preloaded — but clear
     // them when switching to a DIFFERENT host, so its Mappings/Done gates never pass against another
-    // host's paths (which don't exist on it).
+    // host's paths (which don't exist on it). Clear ONLY when the new target is NON-NULL and differs:
+    // deselecting (setSelected(null) from Discover's Rescan / going back) must NOT drop mappings the user
+    // still owns, or reselecting the same host would trap them at the empty Mappings gate.
     const target = hostTarget(host);
-    if (target !== mappingsHostRef.current) {
+    if (target !== null && target !== mappingsHostRef.current) {
       setMappings([]);
       mappingsHostRef.current = target;
     }
@@ -243,7 +250,10 @@ export default function App() {
   // gate auto-skips. Now that the key is authorized the probe returns the real version; the DONE-effect
   // above then bounces a below-floor / major-mismatch host back to Update instead of reaching Done.
   useEffect(() => {
-    if (w.index === S.WAIT_PERM && permAccepted) void probeSelectedHost();
+    if (w.index === S.WAIT_PERM && permAccepted) {
+      setPostPairProbePending(true);
+      void probeSelectedHost().finally(() => setPostPairProbePending(false));
+    }
   }, [w.index, permAccepted, probeSelectedHost]);
 
   useEffect(() => {
@@ -288,6 +298,9 @@ export default function App() {
     (w.index === 4 && needsUpdate && updateState !== "done") ||
     blockedOnDeny ||
     (w.index === 5 && !permAccepted) ||
+    // Hold at WaitPerm until the post-pairing compatibility re-probe resolves, so an incompatible host
+    // routes back to Update instead of letting the user click through to Done.
+    (w.index === 5 && postPairProbePending) ||
     (w.index === 6 && !hasRealMapping);
 
   const showNext = !w.isLast && !blockedOnUpdate && !blockedOnDeny;
