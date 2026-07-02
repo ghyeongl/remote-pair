@@ -71,7 +71,13 @@ export function StepWaitPerm({
             if (!stopped) setError(pinned.err || "Could not save the confirmed host key.");
             return;
           }
-          await window.remotepair.setHost(sshTarget).catch(() => {});
+          const saved = await window.remotepair.setHost(sshTarget);
+          if (saved && saved.code !== 0) {
+            if (!stopped) {
+              setError(saved.err || saved.out || "Could not save the paired host.");
+            }
+            return;
+          }
           if (!stopped) setAccepted(true);
           return;
         }

@@ -77,7 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Events) AND Screen Recording (screen-share + approve OCR). If either is ungranted, show the
         // in-process onboarding window and DO NOT start serving until the React flow completes (both
         // granted). Dismissing the window while still ungranted terminates the app (enforced in
-        // OnboardingWindow.windowWillClose). `allGranted()` = axTrusted() && srGranted().
+        // OnboardingWindow.windowWillClose). `allGranted()` = axTrusted() && srGranted() && loginGranted()
+        // (Remote Login must be on — it's the transport every client session rides on).
         if !Permissions.allGranted() {
             log(.warn, "Accessibility/Screen Recording not granted — showing onboarding (serving gated)")
             // Pre-register the app in the Accessibility + Screen Recording TCC lists so the user only

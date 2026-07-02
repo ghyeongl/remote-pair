@@ -988,11 +988,13 @@ final class PairingManager {
             if let rec = accepted, XpairAuthorizedKeys.latestPaired()?.clientID == rec.clientID {
                 accepted = XpairAuthorizedKeys.latestPaired()
                 phase = "paired"
-            } else if accepted == nil, let paired = XpairAuthorizedKeys.latestPaired(), phase != "waiting", phase != "incoming" {
+            } else if accepted == nil, let paired = XpairAuthorizedKeys.latestPaired(), phase != "waiting", phase != "incoming", phase != "denied" {
                 // `accepted == nil` guard: promote from the ledger ONLY on a genuine resume (no in-session
                 // accepted record). Without it, while a NEW client is mid-proof on a re-advertised window
                 // (accepted=newClient, phase=accepted-pending-proof), latestPaired() still returns the OLD
                 // client and this would falsely flip the UI to "paired" with the old one and enable Next.
+                // `phase != "denied"` guard: denyIncoming() sets phase="denied" and exposes deniedFingerprint
+                // for the denial TTL; promoting the old paired client here would clobber that observable state.
                 accepted = paired
                 phase = "paired"
             } else if let rec = accepted, XpairAuthorizedKeys.pending(clientID: rec.clientID) == nil, phase == "accepted-pending-proof" {

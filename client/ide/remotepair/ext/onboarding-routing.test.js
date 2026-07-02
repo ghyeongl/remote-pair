@@ -61,7 +61,10 @@ test("pairing wait step sends the signed request and persists host only after pr
   assert.match(waitPerm, /window\.remotepair\.sendPairingRequest\(\{[\s\S]*host: pairingHost,[\s\S]*port: host\.pairPort!,[\s\S]*hostKeyFP: host\.hostKeyFP!,[\s\S]*hostNonce: host\.hostNonce!,[\s\S]*serviceInstanceID: host\.serviceInstanceID!,/);
   assert.match(waitPerm, /window\.remotepair\.pairingStatus\(\{[\s\S]*host: sshTarget,[\s\S]*pairingHost,/);
   assert.match(waitPerm, /status\.paired[\s\S]*status\.fingerprint === expectedFingerprint/);
-  assert.match(waitPerm, /await window\.remotepair\.setHost\(sshTarget\)\.catch\(\(\) => \{\}\)/);
+  // setHost failure must block acceptance and surface the error, not be swallowed (round-14).
+  assert.match(waitPerm, /const saved = await window\.remotepair\.setHost\(sshTarget\)/);
+  assert.match(waitPerm, /if \(saved && saved\.code !== 0\) \{[\s\S]*setError\(saved\.err \|\| saved\.out[\s\S]*return;/);
+  assert.doesNotMatch(waitPerm, /setHost\(sshTarget\)\.catch/);
   assert.match(waitPerm, /status\.denied[\s\S]*onDeny\(\)/);
   assert.match(waitPerm, /Host is not broadcasting pairing details/);
 });

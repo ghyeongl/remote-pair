@@ -83,7 +83,9 @@ test("US-003 widened permission bridge probes real login/sharing facts", () => {
   assert.match(onboardingWindow, /"sharing": Permissions\.sharingGranted\(\)/);
   assert.match(permissionsSwift, /static func loginGranted\(\)\s*-> Bool/);
   assert.match(permissionsSwift, /static func sharingGranted\(\)\s*-> Bool/);
-  assert.match(permissionsSwift, /static func allGranted\(\) -> Bool \{ axTrusted\(\) && srGranted\(\) \}/);
+  // The native gate must require the SAME set the React flow marks required (REQUIRED_PERMS =
+  // login, ax, sr) — Remote Login is the transport every session rides on, so allGranted() includes it.
+  assert.match(permissionsSwift, /static func allGranted\(\) -> Bool \{ axTrusted\(\) && srGranted\(\) && loginGranted\(\) \}/);
 });
 
 test("US-003 gates block required permissions only, then >=1 ready engine and persisted consent", () => {

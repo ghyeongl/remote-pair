@@ -102,14 +102,20 @@ export function StepDiscover({ selected, setSelected }: Props) {
         if (res.err) setScanError(res.err);
         const byId = new Map<string, DiscoveredHost>();
         for (const peer of res.peers || []) {
-          // Every selected host goes through WaitPerm (the signed pairing request), so a peer is
-          // selectable ONLY if it is broadcasting live pairing metadata (serviceInstanceID + hostNonce +
-          // pairPort). Drop EVERY peer that can't pair — not just "setup" ones: an older XpairHost can
-          // advertise role/fp and be classified "connect"/"reconnect" yet still lack these fields, and
-          // selecting it dead-ends WaitPerm with "not broadcasting pairing details". The empty-state
-          // "Open host onboarding" CTA guides the user to set up / update that host first.
+          // A peer is selectable if it can pair right now (live pairing window: serviceInstanceID +
+          // hostNonce + pairPort) OR it is an installed XpairHost that only needs the Update flow.
+          // Selecting a host runs hostAppStatus(), which is the ONLY place below_floor is detected and
+          // routed to StepUpdate — so dropping non-broadcasting XpairHosts (round-10's `if (!canPair)`)
+          // hid below-floor hosts and dead-ended the upgrade in an empty Discover screen. A below-floor /
+          // not-broadcasting XpairHost carries a host-key fp (Bonjour TXT fp= or tailnet pairing metadata,
+          // both emitted only by an XpairHost) and a non-"setup" status ("connect" = advertises the Xpair
+          // role, "reconnect" = ssh host with the app confirmed present); a plain reachable Mac is
+          // fp=null + status "setup" — nothing to pair or update, so drop it. A kept non-broadcasting host
+          // routes to Update (below-floor) or WaitPerm's actionable "not broadcasting — open Connect on the
+          // host, then rescan" message, never a silent dead-end.
           const canPair = !!(peer.serviceInstanceID && peer.hostNonce && peer.pairPort);
-          if (!canPair) continue;
+          const isXpairHost = !!peer.fp || peer.status !== "setup";
+          if (!canPair && !isXpairHost) continue;
           const host = peerToHost(peer);
           byId.set(host.id, host);
         }

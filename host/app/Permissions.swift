@@ -55,8 +55,11 @@ enum Permissions {
         "Permissions: Accessibility \(axTrusted() ? "✓" : "✗")  Screen Recording \(srGranted() ? "✓" : "✗")  Full Disk \(fdaGranted() ? "✓" : "✗")"
     }
 
-    /// Only checks computer-use's required gates (FDA is recommended, so it's not a gate).
-    static func allGranted() -> Bool { axTrusted() && srGranted() }
+    /// The required gates. AX + SR are computer-use's input/capture gates; Remote Login (sshd) is the
+    /// transport every client session rides on, so a host with sshd off is not actually usable even
+    /// with AX/SR granted and a key still on file — include it so completion/launch reflect reality.
+    /// (FDA is recommended, not a gate.)
+    static func allGranted() -> Bool { axTrusted() && srGranted() && loginGranted() }
 
     /// Onboarding-triggered single-permission request (the onboarding owns the surrounding UI, so no alert/panes here).
     /// AX → AXIsProcessTrustedWithOptions(prompt) shows the system prompt AND registers the app in the Accessibility list.

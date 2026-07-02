@@ -198,21 +198,32 @@ test("Q0473/Q0493/Q0494 per-launch guard parachutes to the first failing step", 
   });
 });
 
-test("Q0473/Q0493/Q0494 missing host engine setting does not force client-side claude recovery", async () => {
+test("Q0473/Q0493/Q0494 no engine named anywhere checks the launcher's claude fallback", async () => {
   await withTempHome(async (home, onboardingMain) => {
     const rpDir = path.join(home, ".xpair/host");
     fs.mkdirSync(rpDir, { recursive: true });
     fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\n");
 
-    let statusCalled = false;
+    // `xpair launch` execs `claude` when neither host.env nor client.env names an engine
+    // (CLIENT_ENGINE_FALLBACK=${ENGINE:-claude}), so the guard must check claude on the host — not skip.
+    let checked = "";
     assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
       hostEnvEngine: async () => ({ engine: "", err: "host ENGINE not set" }),
-      hostEngineStatus: async () => {
-        statusCalled = true;
-        return { installed: false, authed: false, version: "", err: "should not run" };
+      hostEngineStatus: async (engine) => {
+        checked = engine;
+        return { installed: true, authed: true, version: "ok", err: "" };
       },
-    })), null);
-    assert.equal(statusCalled, false, "unresolved host.env ENGINE must skip the engine guard");
+    })), null, "claude ready on host → guard passes");
+    assert.equal(checked, "claude", "guard must probe the launcher's claude fallback when nothing is named");
+
+    // claude missing/unauthed on the host → route to the engine step instead of dead-ending at launch.
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      hostEnvEngine: async () => ({ engine: "", err: "host ENGINE not set" }),
+      hostEngineStatus: async (engine) => {
+        assert.equal(engine, "claude");
+        return { installed: false, authed: false, version: "", err: "not found" };
+      },
+    })), "engine", "claude not ready on host → engine recovery");
   });
 });
 

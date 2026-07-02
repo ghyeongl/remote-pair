@@ -46,6 +46,16 @@ test("discovery classifies host update states before leaving Discover", () => {
   assert.match(discover, /majorMismatch: flags\.majorMismatch/);
 });
 
+test("Discover keeps non-broadcasting XpairHosts so below-floor hosts can reach the Update flow", () => {
+  // Regression for the round-10 `if (!canPair) continue` drop-everything filter: it hid below-floor
+  // XpairHosts (fp set, no live pairing metadata), so selecting them — the only way hostAppStatus()
+  // detects below_floor and routes to Update — was impossible and the upgrade dead-ended in an empty
+  // Discover screen. The keep must be gated on `!canPair && !isXpairHost`, never `!canPair` alone.
+  assert.match(discover, /const isXpairHost = !!peer\.fp \|\| peer\.status !== "setup"/);
+  assert.match(discover, /if \(!canPair && !isXpairHost\) continue/);
+  assert.doesNotMatch(discover, /if \(!canPair\) continue/);
+});
+
 test("App gates the Update step and cannot finish while update or pairing is incomplete", () => {
   assert.match(app, /UPDATE: 4,[\s\S]*WAIT_PERM: 5,[\s\S]*MAPPINGS: 6,[\s\S]*DONE: 7/);
   assert.match(app, /const needsUpdate = !!selectedHost\?\.outdated;/);

@@ -50,6 +50,10 @@ const START_STEP = Object.freeze({
 })
 const START_STEPS = new Set(Object.values(START_STEP))
 const SESSION_ENGINES = new Set(['claude', 'shell', 'codex', 'opencode'])
+// Mirrors `xpair launch`'s CLIENT_ENGINE_FALLBACK=${ENGINE:-claude}: the engine actually exec'd when
+// neither host.env nor client.env names one. The readiness guard checks this so an un-configured setup
+// doesn't skip the check and then dead-end at launch time.
+const LAUNCH_ENGINE_FALLBACK = 'claude'
 
 function readClientEnv() {
   const file = path.join(os.homedir(), '.xpair/host', 'client.env')
@@ -146,12 +150,15 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   // On upgraded hosts that were configured by the old client-side engine step, host.env may not exist
   // yet even though client.env still NAMES the engine the user expects. Fall back to that client engine
   // so the readiness gate still runs — otherwise a missing/unreadable host.env silently skips the check
-  // and the first `xpair launch` fails when that engine isn't installed/signed in on the host. Only when
-  // client.env EXPLICITLY sets ENGINE (not the 'claude' default): if no engine is named anywhere, keep
-  // skipping the guard so a host that never used an engine isn't forced into engine recovery.
+  // and the first `xpair launch` fails when that engine isn't installed/signed in on the host.
+  // When nothing is named anywhere, mirror the launcher: `xpair launch` resolves the engine to
+  // `${host ENGINE} || ${client ENGINE} || CLIENT_ENGINE_FALLBACK` where CLIENT_ENGINE_FALLBACK is
+  // `${ENGINE:-claude}` (see client/cli/xpair-launch). So an un-configured setup still execs `claude`
+  // on the host — check that same default here, or the guard skips and the first launch dead-ends with
+  // "claude not found on host".
   const clientEngineRaw = (readClientEnv().ENGINE || "").trim()
   const clientEngine = SESSION_ENGINES.has(clientEngineRaw) ? clientEngineRaw : null
-  const engineToCheck = hostEngine || clientEngine
+  const engineToCheck = hostEngine || clientEngine || LAUNCH_ENGINE_FALLBACK
   if (engineToCheck) {
     try {
       const engine = await probeBridge.hostEngineStatus(engineToCheck)
