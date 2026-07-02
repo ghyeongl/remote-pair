@@ -193,7 +193,21 @@ export default function App() {
 
       if (target >= ENGINE_IDX) {
         const readyEngines = await probeReadyEngines();
-        if (readyEngines.size === 0) target = ENGINE_IDX;
+        if (readyEngines.size === 0) {
+          target = ENGINE_IDX;
+        } else if (target > ENGINE_IDX) {
+          // Skipping the engine step because an engine is ready — but ONLY StepEngine persists ENGINE to
+          // host.env, which xpair-launch reads over SSH. Record a default (prefer a real engine over the
+          // always-available shell) so the first launch doesn't silently fall back to the client/default
+          // 'claude' on a host that never wrote an engine. Non-destructive: keeps any prior user choice.
+          const primary =
+            (["claude", "codex", "opencode"] as EngineKey[]).find((e) => readyEngines.has(e)) ?? "shell";
+          try {
+            await window.xpair.persistEngineIfUnset(primary);
+          } catch {
+            /* best-effort — a failure here just leaves the existing fallback behavior */
+          }
+        }
       }
 
       if (!active) return;

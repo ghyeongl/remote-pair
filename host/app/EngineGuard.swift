@@ -182,6 +182,18 @@ enum EngineGuard {
         }
     }
 
+    /// Write ENGINE=<id> ONLY if host.env does not already record a non-empty one. Used when onboarding
+    /// SKIPS the engine step (some engine is already installed+authed): xpair-launch reads host.env's
+    /// ENGINE, so it must find one — but we must NOT clobber a choice the user made in a previous run.
+    static func persistIfUnset(_ engine: String) -> Result {
+        if let raw = try? String(contentsOfFile: hostEnvPath, encoding: .utf8),
+           raw.split(separator: "\n", omittingEmptySubsequences: false)
+               .contains(where: { $0.hasPrefix("ENGINE=") && $0 != "ENGINE=" }) {
+            return Result(ok: true, err: "")   // already recorded — leave the user's choice intact
+        }
+        return persist(engine)
+    }
+
     // MARK: - login-shell runner
 
     private struct Run { let code: Int32; let out: String; let err: String }

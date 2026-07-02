@@ -102,13 +102,14 @@ export function StepDiscover({ selected, setSelected }: Props) {
         if (res.err) setScanError(res.err);
         const byId = new Map<string, DiscoveredHost>();
         for (const peer of res.peers || []) {
-          // Drop a "setup" peer ONLY when it lacks live pairing metadata: a plain reachable Mac with no
-          // XpairHost can't be paired (selecting it dead-ends WaitPerm), so the empty-state "Open host
-          // onboarding" CTA guides the user to set it up first. But a host that IS broadcasting (has
-          // serviceInstanceID + hostNonce + pairPort) can still receive the signed pairing request even
-          // if the SSH app probe classified it "setup" because this client isn't authorized yet — keep it.
+          // Every selected host goes through WaitPerm (the signed pairing request), so a peer is
+          // selectable ONLY if it is broadcasting live pairing metadata (serviceInstanceID + hostNonce +
+          // pairPort). Drop EVERY peer that can't pair — not just "setup" ones: an older XpairHost can
+          // advertise role/fp and be classified "connect"/"reconnect" yet still lack these fields, and
+          // selecting it dead-ends WaitPerm with "not broadcasting pairing details". The empty-state
+          // "Open host onboarding" CTA guides the user to set up / update that host first.
           const canPair = !!(peer.serviceInstanceID && peer.hostNonce && peer.pairPort);
-          if (peer.status === "setup" && !canPair) continue;
+          if (!canPair) continue;
           const host = peerToHost(peer);
           byId.set(host.id, host);
         }

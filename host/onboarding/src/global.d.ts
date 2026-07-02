@@ -66,6 +66,8 @@ declare global {
       installEngine: (engine: EngineId) => Promise<{ ok: boolean; err: string }>
       setEngineAuth: (engine: EngineId, key: string) => Promise<{ ok: boolean; err: string }>
       setEngine: (engine: EngineId) => Promise<{ ok: boolean; err: string }>
+      // Persist ENGINE only if host.env has none yet — used when onboarding skips the engine step.
+      persistEngineIfUnset: (engine: EngineId) => Promise<{ ok: boolean; err: string }>
       complete: () => Promise<void>
     }
   }

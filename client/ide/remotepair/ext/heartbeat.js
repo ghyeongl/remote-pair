@@ -32,22 +32,19 @@ const RP_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 const INTERVAL_MS = 30 * 1000;
 const CONNECT_TIMEOUT = "6";
-// Dedicated pairing identity — offer it AND the personal id_ed25519 as fallback, not the pairing key
-// alone: the key can exist locally from an unproven pairing attempt (not yet authorized on the host),
-// so forcing IdentitiesOnly to it exclusively would break a client that still reaches the host via its
-// normal key. IdentitiesOnly bounds to these two. Neither present → [] (ssh defaults/agent).
+// Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i, WITHOUT IdentitiesOnly:
+// the key can exist locally from an unproven pairing attempt (not yet authorized on the host), so
+// adding -i must still leave the ssh-agent + default identities available — IdentitiesOnly=yes would
+// restrict auth to only these files and break a client whose working host auth is agent-only. Neither
+// key present → [] (ssh defaults/agent).
 const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
 const PERSONAL_KEY = path.join(HOME, ".ssh", "id_ed25519");
 function idArgs() {
   try {
-    const ids = [];
-    if (fs.existsSync(PAIRING_KEY)) ids.push(PAIRING_KEY);
-    if (fs.existsSync(PERSONAL_KEY)) ids.push(PERSONAL_KEY);
-    if (ids.length) {
-      const a = ["-o", "IdentitiesOnly=yes"];
-      for (const k of ids) a.push("-i", k);
-      return a;
-    }
+    const a = [];
+    if (fs.existsSync(PAIRING_KEY)) a.push("-i", PAIRING_KEY);
+    if (fs.existsSync(PERSONAL_KEY)) a.push("-i", PERSONAL_KEY);
+    return a;
   } catch { /* ignore */ }
   return [];
 }

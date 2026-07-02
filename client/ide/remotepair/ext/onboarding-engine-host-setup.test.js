@@ -48,7 +48,10 @@ test("Q0545 host onboarding owns the 11-step engine setup gate", () => {
   assert.match(hostApp, /const DONE_IDX = BROADCAST_IDX \+ 1;/);
   assert.match(hostApp, /const TOTAL = DONE_IDX \+ 1;/);
   assert.match(hostApp, /w\.index === ENGINE_IDX && engines\.size === 0/);
-  assert.match(hostApp, /if \(target >= ENGINE_IDX\) \{[\s\S]*const readyEngines = await probeReadyEngines\(\);[\s\S]*if \(readyEngines\.size === 0\) target = ENGINE_IDX;/);
+  assert.match(hostApp, /if \(target >= ENGINE_IDX\) \{[\s\S]*const readyEngines = await probeReadyEngines\(\);[\s\S]*if \(readyEngines\.size === 0\) \{[\s\S]*target = ENGINE_IDX;/);
+  // R10-6: skipping the engine step must still persist a default ENGINE (non-destructively) so
+  // xpair-launch doesn't fall back to the client/default engine on a host that never wrote one.
+  assert.match(hostApp, /else if \(target > ENGINE_IDX\)[\s\S]*persistEngineIfUnset\(primary\)/);
   assert.match(hostApp, /w\.index === ENGINE_IDX && \([\s\S]*<StepEngine selected=\{engines\} setSelected=\{setEngines\} \/>/);
 });
 

@@ -513,21 +513,16 @@ function sshProbeOpts(host, connectTimeout = 5) {
   return opts;
 }
 
-/** Offer the pairing key AND the personal key (fallback), NOT the pairing key alone. The pairing key
+/** OFFER the pairing key (and the personal key) via -i, but do NOT set IdentitiesOnly. The pairing key
  *  may exist locally from an ATTEMPTED-but-unproven pairing (host denied / proof expired / acceptance
- *  failed), where it is NOT yet authorized on the host — forcing IdentitiesOnly to it exclusively would
- *  break users who already had working SSH via their normal key (host status/update/launch recovery).
- *  IdentitiesOnly bounds auth to just these two (no agent noise); the host accepts whichever it trusts.
- *  The pairing PROOF login is the ONLY caller that must force the pairing key alone — sshPairingProofOpts. */
+ *  failed), where it is NOT yet authorized on the host. Adding -i still lets ssh fall back to the
+ *  ssh-agent AND the user's default identities — IdentitiesOnly=yes would restrict auth to ONLY these
+ *  files, breaking a user whose working host auth is agent-only (no id_ed25519 on disk). The pairing
+ *  PROOF login is the ONLY caller that must force the pairing key alone — sshPairingProofOpts. */
 function pushProbeIdentities(opts) {
   try {
-    const ids = [];
-    if (fs.existsSync(PAIRING_KEY)) ids.push(PAIRING_KEY);
-    if (fs.existsSync(SSH_KEY)) ids.push(SSH_KEY);
-    if (ids.length) {
-      opts.push("-o", "IdentitiesOnly=yes");
-      for (const k of ids) opts.push("-i", k);
-    }
+    if (fs.existsSync(PAIRING_KEY)) opts.push("-i", PAIRING_KEY);
+    if (fs.existsSync(SSH_KEY)) opts.push("-i", SSH_KEY);
   } catch { /* key probe failed — let ssh use the agent / defaults */ }
 }
 

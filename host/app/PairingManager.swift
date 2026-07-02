@@ -974,7 +974,11 @@ final class PairingManager {
                 accepted = paired
                 phase = "paired"
             } else if let rec = accepted, XpairAuthorizedKeys.pending(clientID: rec.clientID) == nil, phase == "accepted-pending-proof" {
-                phase = "waiting"
+                // acceptIncoming() already closed the UDP endpoint, so roll back to "closed" (NOT
+                // "waiting") — the React poller only reopens the backend on "closed". "waiting" would
+                // report a live broadcast with pairPort 0 that no client could reach. (Mirrors the
+                // scheduleProofExpiryLocked rollback.)
+                phase = "closed"
                 accepted = nil
                 incoming = nil
                 incomingExpiresAt = nil

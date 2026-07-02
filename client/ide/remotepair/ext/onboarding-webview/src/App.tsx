@@ -112,13 +112,22 @@ export default function App() {
   const selectedRef = useRef<DiscoveredHost | null>(null);
   selectedRef.current = selectedHost;
 
+  // The ssh target the CURRENT mappings belong to. Compared by target (not host id) because a discovered
+  // host's id is its key fingerprint while a config-restored host's id is REMOTE_HOST — the target is the
+  // stable identity across both. null until we know which host the mappings are for.
+  const mappingsHostRef = useRef<string | null>(null);
+  const hostTarget = (h: DiscoveredHost | null) => h?.sshTarget ?? h?.address ?? null;
+
   const setSelected = useCallback((host: DiscoveredHost | null) => {
-    // A different host must NOT inherit the previous host's FOLDER_MAPS: those client↔host paths belong
-    // to the old REMOTE_HOST, and once setHost() switches the configured host a stale hasRealMapping
-    // would let the Mappings/Done gates pass against paths that don't exist on the new host. Clear on
-    // any host-id change (including going back to Discover) so mappings are re-entered for the new host.
-    const prevId = selectedRef.current?.id ?? null;
-    if (prevId !== (host?.id ?? null)) setMappings([]);
+    // Mappings belong to exactly one host (client↔host FOLDER_MAPS paths). Keep them when the user
+    // (re-)selects the SAME host — e.g. a returning user whose saved mappings were preloaded — but clear
+    // them when switching to a DIFFERENT host, so its Mappings/Done gates never pass against another
+    // host's paths (which don't exist on it).
+    const target = hostTarget(host);
+    if (target !== mappingsHostRef.current) {
+      setMappings([]);
+      mappingsHostRef.current = target;
+    }
     setSelectedHost(host);
     setUpdateState("idle");
     setUpdatePct(0);
@@ -127,18 +136,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (initialStep < S.UPDATE) return;
     let alive = true;
     void window.remotepair
       .getConfig()
       .then((cfg) => {
         if (!alive) return;
+        const remoteHost = cfg.remoteHost.trim();
+        // Preload saved FOLDER_MAPS on EVERY entry path (not just resume): a returning user re-running
+        // setup from Welcome must see their existing mappings, or the Mappings step (which hard-blocks
+        // Next until hasRealMapping) traps them with an empty list they'd have to recreate.
         const parsedMappings = parseFolderMaps(cfg.folderMaps, cfg.folderMapModes);
         if (parsedMappings.length) {
           setMappings((current) => (current.length ? current : parsedMappings));
+          if (!mappingsHostRef.current) mappingsHostRef.current = remoteHost || null;
         }
-        const remoteHost = cfg.remoteHost.trim();
-        if (!remoteHost) return;
+        // Resume path only: also auto-select the configured host (on the Welcome path the user picks it
+        // in Discover).
+        if (initialStep < S.UPDATE || !remoteHost) return;
         setSelectedHost((current) =>
           current ?? {
             id: remoteHost,
@@ -150,6 +164,7 @@ export default function App() {
             version: "",
           },
         );
+        if (!mappingsHostRef.current) mappingsHostRef.current = remoteHost;
       })
       .catch(() => {});
     return () => {

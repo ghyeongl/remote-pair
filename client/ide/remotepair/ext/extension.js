@@ -105,23 +105,20 @@ function rdTransientRetryDelayMs(attempt) {
 const LOG_DIR = path.join(os.homedir(), ".xpair/host", "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(os.homedir(), ".xpair/host", "client.env");
-// Dedicated pairing identity — offer it AND the personal id_ed25519 as fallback on every probe/tunnel
-// ssh, not the pairing key alone: the key can exist locally from an unproven pairing attempt (not yet
-// authorized on the host), so forcing IdentitiesOnly to it exclusively would break a client that still
-// reaches the host via its normal key. IdentitiesOnly bounds to these two. Neither present → [] (ssh
-// uses its defaults). The pairing PROOF login (bridge) is the only path that must force the key alone.
+// Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
+// WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
+// on the host), so adding -i must still leave the ssh-agent + default identities available —
+// IdentitiesOnly=yes would restrict auth to only these files and break a client whose working host auth
+// is agent-only. Neither present → [] (ssh uses its defaults). Only the pairing PROOF login (bridge)
+// forces the key alone.
 const PAIRING_KEY_FILE = path.join(os.homedir(), ".xpair/host", "pairing_ed25519");
 const PERSONAL_KEY_FILE = path.join(os.homedir(), ".ssh", "id_ed25519");
 function pairingIdArgs() {
   try {
-    const ids = [];
-    if (fs.existsSync(PAIRING_KEY_FILE)) ids.push(PAIRING_KEY_FILE);
-    if (fs.existsSync(PERSONAL_KEY_FILE)) ids.push(PERSONAL_KEY_FILE);
-    if (ids.length) {
-      const a = ["-o", "IdentitiesOnly=yes"];
-      for (const k of ids) a.push("-i", k);
-      return a;
-    }
+    const a = [];
+    if (fs.existsSync(PAIRING_KEY_FILE)) a.push("-i", PAIRING_KEY_FILE);
+    if (fs.existsSync(PERSONAL_KEY_FILE)) a.push("-i", PERSONAL_KEY_FILE);
+    return a;
   } catch { /* ignore */ }
   return [];
 }

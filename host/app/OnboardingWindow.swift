@@ -79,6 +79,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         installEngine: (engine) => post('installEngine', [engine]),
         setEngineAuth: (engine, key) => post('setEngineAuth', [engine, key]),
         setEngine: (engine) => post('setEngine', [engine]),
+        persistEngineIfUnset: (engine) => post('persistEngineIfUnset', [engine]),
         complete: () => post('complete', []),
       };
     })();
@@ -306,6 +307,14 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
                 return
             }
             let r = EngineGuard.persist(engine)
+            replyHandler(["ok": r.ok, "err": r.err], nil)
+
+        case "persistEngineIfUnset":
+            guard let engine = args.first as? String, EngineGuard.isKnown(engine) else {
+                replyHandler(["ok": false, "err": "unknown engine"], nil)
+                return
+            }
+            let r = EngineGuard.persistIfUnset(engine)
             replyHandler(["ok": r.ok, "err": r.err], nil)
 
         case "complete":
