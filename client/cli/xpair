@@ -873,7 +873,9 @@ cmd_attach() {
     local _clientarg=()
     if [ -n "${MOSH_CLIENT:-}" ]; then
       _clientarg=(--client="$MOSH_CLIENT")
-    elif [ "$(command -v mosh)" = "$LOCAL_BIN/mosh" ] && [ -x "$LOCAL_BIN/mosh-client" ]; then
+    elif [ ! -L "$LOCAL_BIN/mosh" ] && [ "$(command -v mosh)" = "$LOCAL_BIN/mosh" ] && [ -x "$LOCAL_BIN/mosh-client" ]; then
+      # ! -L: our install writes a REGULAR-FILE shim (install.sh skips/preserves user symlinks), so a
+      # symlink at $LOCAL_BIN/mosh is a user shim (e.g. Homebrew) — don't force our client onto it.
       _clientarg=(--client="$LOCAL_BIN/mosh-client")
     fi
     if mosh ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
