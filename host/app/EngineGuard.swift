@@ -25,7 +25,7 @@ enum EngineGuard {
         "export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; "
 
     static func isKnown(_ engine: String) -> Bool {
-        engine == "claude" || engine == "codex" || engine == "opencode"
+        engine == "claude" || engine == "codex" || engine == "opencode" || engine == "shell"
     }
 
     // MARK: - probe

@@ -105,6 +105,14 @@ function rdTransientRetryDelayMs(attempt) {
 const LOG_DIR = path.join(os.homedir(), ".xpair/host", "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(os.homedir(), ".xpair/host", "client.env");
+// Dedicated pairing identity — once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519, so
+// offer it explicitly on every probe/tunnel ssh (never fall back to the personal id_ed25519).
+// Pre-pairing (no key yet) → [], so ssh uses its defaults.
+const PAIRING_KEY_FILE = path.join(os.homedir(), ".xpair/host", "pairing_ed25519");
+function pairingIdArgs() {
+  try { if (fs.existsSync(PAIRING_KEY_FILE)) return ["-o", "IdentitiesOnly=yes", "-i", PAIRING_KEY_FILE]; } catch { /* ignore */ }
+  return [];
+}
 const LOG_COMP = "ide";
 const LOG_MAX_BYTES = 5 * 1024 * 1024; // rotate-on-open threshold
 const LOG_LEVELS = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
@@ -306,6 +314,7 @@ function sshRun(host, remoteCmd, opts = {}) {
   const maxBuffer = opts.maxBuffer || 16 * 1024 * 1024;
   const timeoutMs = opts.timeoutMs || 15000;
   const args = [
+    ...pairingIdArgs(),
     "-o",
     "BatchMode=yes",
     "-o",
@@ -506,6 +515,7 @@ function spawnTunnel(host, localPort, remotePort) {
   // onboarding guard authenticate once and the workbench tunnel reuse the same live master, without
   // reusing stale masters from earlier launches.
   const args = [
+    ...pairingIdArgs(),
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o", "StrictHostKeyChecking=accept-new",

@@ -149,6 +149,8 @@ const EN: Dict = {
   "engine.codex.desc": "OpenAI's coding agent with tool use.",
   "engine.opencode.name": "Opencode",
   "engine.opencode.desc": "Open-source local agent. Bring your own model.",
+  "engine.shell.name": "Shell",
+  "engine.shell.desc": "A plain login shell — no AI agent, no install or sign-in.",
 
   // Host Broadcast
   "bc.denied.title": "Request denied",
@@ -322,6 +324,8 @@ const KO: Dict = {
   "engine.codex.desc": "도구 사용을 지원하는 OpenAI 코딩 에이전트.",
   "engine.opencode.name": "Opencode",
   "engine.opencode.desc": "오픈소스 로컬 에이전트. 원하는 모델을 사용하세요.",
+  "engine.shell.name": "셸",
+  "engine.shell.desc": "일반 로그인 셸 — AI 에이전트 없음, 설치·로그인 불필요.",
 
   "bc.denied.title": "요청을 거절했습니다",
   "bc.denied.desc":

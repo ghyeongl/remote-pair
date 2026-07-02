@@ -131,6 +131,7 @@ export default function App() {
       }),
     );
     const ready = new Set(entries.filter(([, ok]) => ok).map(([engine]) => engine));
+    ready.add("shell"); // the login shell is always available — no install/auth
     setEngines((cur) => {
       const kept = new Set([...cur].filter((engine) => ready.has(engine)));
       if (kept.size > 0) return kept;

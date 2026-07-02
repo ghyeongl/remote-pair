@@ -53,7 +53,7 @@ test("Q0545 host onboarding owns the 11-step engine setup gate", () => {
 });
 
 test("Q0545 host StepEngine probes, installs, authenticates, and persists supported engines", () => {
-  assert.match(hostStepEngine, /const ORDER: EngineKey\[\] = \["claude", "codex", "opencode"\]/);
+  assert.match(hostStepEngine, /const ORDER: EngineKey\[\] = \["claude", "codex", "opencode", "shell"\]/);
   assert.match(hostStepEngine, /window\.xpair\.engineStatus\(e\)/);
   assert.match(hostStepEngine, /await window\.xpair\.setEngine\(e\)|await persistEngine\(primary\)|await persistEngine\(id\)/);
   assert.match(hostStepEngine, /window\.xpair\.installEngine\(engine\)/);
@@ -77,7 +77,7 @@ test("Q0545 bridge and host app engine guards still support host-side Codex setu
   assert.match(bridge, /const r = await runSecretStdin\("ssh", \[\.\.\.sshProbeOpts\(host, 15\), host, writer\], apiKey\)/);
   assert.match(globals, /getConfig: \(\) => Promise<\{[\s\S]*remoteHost: string[\s\S]*engine: string/);
 
-  assert.match(hostEngineGuard, /static func isKnown\(_ engine: String\) -> Bool \{\s*engine == "claude" \|\| engine == "codex" \|\| engine == "opencode"\s*\}/);
+  assert.match(hostEngineGuard, /static func isKnown\(_ engine: String\) -> Bool \{\s*engine == "claude" \|\| engine == "codex" \|\| engine == "opencode" \|\| engine == "shell"\s*\}/);
   assert.match(hostEngineGuard, /static func status\(_ engine: String\) -> Status/);
   assert.match(hostEngineGuard, /static func install\(_ engine: String\) -> Result/);
   assert.match(hostEngineGuard, /private static let pathPersistScript/);

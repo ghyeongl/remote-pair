@@ -298,10 +298,11 @@ enum XpairAuthorizedKeys {
                                                name: req.name)
             let originalLines = readAuthorizedKeyLines()
             var lines = originalLines
-            // Legacy `xpair install-host` authorized the key with an unmarked ssh-copy-id-style
-            // line, so same-blob unmarked entries are user-owned and must be preserved. Residual:
-            // if a user manually authorized the pairing key unrestricted, that access remains until
-            // Xpair moves to a dedicated pairing keypair.
+            // Remove only Xpair-marked (xpair:v1) same-blob / same-client lines; unmarked same-blob
+            // entries are the user's own key and are preserved. The client now pairs with a DEDICATED
+            // key (~/.xpair/host/pairing_ed25519, never the personal id_ed25519), so this key blob
+            // never collides with a user/legacy line — only the restricted forced-command line ends up
+            // authorizing it, and xpair-ssh-gate always runs (the proof completes).
             lines.removeAll { existing in
                 isXpairAuthorizedKeyLine(existing) &&
                     (authorizedKeyBlob(in: existing) == req.keyBlob ||

@@ -32,6 +32,13 @@ const RP_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 const INTERVAL_MS = 30 * 1000;
 const CONNECT_TIMEOUT = "6";
+// Dedicated pairing identity — once paired the host trusts ONLY ~/.xpair/host/pairing_ed25519, so
+// offer it explicitly (never fall back to the personal id_ed25519). Pre-pairing (no key yet) → [].
+const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
+function idArgs() {
+  try { if (fs.existsSync(PAIRING_KEY)) return ["-o", "IdentitiesOnly=yes", "-i", PAIRING_KEY]; } catch { /* ignore */ }
+  return [];
+}
 // REMOTE_HOST must be an ssh alias / hostname, optionally `user@host` (mirrors
 // SSH_TARGET_RE in onboarding-bridge.js).
 // The CLI/extension paths reject option-looking hosts before spawning ssh; the heartbeat read
@@ -105,6 +112,7 @@ function writeOnce() {
       [
         "-o", "BatchMode=yes",
         "-o", `ConnectTimeout=${CONNECT_TIMEOUT}`,
+        ...idArgs(),
         host,
         "mkdir -p ~/.xpair/host/clients && cat > ~/.xpair/host/clients/" + id + ".json",
       ],
@@ -142,7 +150,7 @@ function stopHeartbeat() {
     const richPath = `${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`;
     const child = cp.spawn(
       "ssh",
-      ["-o", "BatchMode=yes", host, "rm -f ~/.xpair/host/clients/" + id + ".json"],
+      ["-o", "BatchMode=yes", ...idArgs(), host, "rm -f ~/.xpair/host/clients/" + id + ".json"],
       { windowsHide: true, stdio: ["ignore", "ignore", "ignore"], env: { ...process.env, PATH: richPath } },
     );
     child.on("error", () => { /* best-effort — ignore */ });

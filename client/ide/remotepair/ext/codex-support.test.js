@@ -46,7 +46,7 @@ test("Codex is supported by the terminal/session flow and host install/auth chec
     "New Session picker/session kind model must include codex",
   );
   assert.match(hostApp, /w\.index === ENGINE_IDX && \([\s\S]*<StepEngine selected=\{engines\} setSelected=\{setEngines\} \/>/);
-  assert.match(hostStepEngine, /const ORDER: EngineKey\[\] = \["claude", "codex", "opencode"\]/);
+  assert.match(hostStepEngine, /const ORDER: EngineKey\[\] = \["claude", "codex", "opencode", "shell"\]/);
   assert.match(hostStepEngine, /codex: Bot/);
   assert.match(hostStepEngine, /window\.xpair\.engineStatus\(e\)/);
   assert.match(hostStepEngine, /window\.xpair\.installEngine\(engine\)/);

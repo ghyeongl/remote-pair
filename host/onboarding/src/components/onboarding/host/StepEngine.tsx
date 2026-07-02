@@ -9,6 +9,7 @@ import {
   Loader2,
   RotateCw,
   Sparkles,
+  SquareTerminal,
   Terminal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -32,11 +33,12 @@ type EngineStatus = {
 
 type EngineStatuses = Record<EngineKey, EngineStatus>;
 
-const ORDER: EngineKey[] = ["claude", "codex", "opencode"];
+const ORDER: EngineKey[] = ["claude", "codex", "opencode", "shell"];
 const ICONS: Record<EngineKey, ComponentType<{ className?: string }>> = {
   claude: Sparkles,
   codex: Bot,
   opencode: Terminal,
+  shell: SquareTerminal,
 };
 const BADGE: Partial<Record<EngineKey, "recommended">> = { claude: "recommended" };
 
@@ -64,6 +66,9 @@ export function StepEngine({ selected, setSelected }: Props) {
   const [actionErr, setActionErr] = useState("");
 
   const probeOne = useCallback(async (e: EngineKey): Promise<EngineStatus> => {
+    // The shell engine (login shell) is always available — no install/auth, and no backend probe
+    // (engineStatus has no shell branch). Report it ready so a shell-only host can still advance.
+    if (e === "shell") return { installed: true, authed: true, version: "shell", err: "" };
     try {
       return await window.xpair.engineStatus(e);
     } catch (err) {

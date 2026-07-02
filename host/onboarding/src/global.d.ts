@@ -1,5 +1,5 @@
 // The agent engine that runs LOCALLY on this host under `xpair launch`.
-export type EngineId = 'claude' | 'codex' | 'opencode'
+export type EngineId = 'claude' | 'codex' | 'opencode' | 'shell'
 
 export type PairingPhase =
   | 'waiting'

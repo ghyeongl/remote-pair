@@ -39,6 +39,13 @@ for _f in common host client; do
   [ -f "$RP_DIR/$_f.env" ] && { set -a; . "$RP_DIR/$_f.env"; set +a; }
 done
 REMOTE_HOST="${REMOTE_HOST:-}"
+
+# Dedicated pairing identity: once paired, the host trusts ONLY ~/.xpair/host/pairing_ed25519
+# (installed as the restricted forced-command line), never the personal id_ed25519. Offer it
+# explicitly on every ssh/mosh so we don't fall back to the wrong key. Pre-pairing (no key yet) the
+# array is empty and ssh uses its defaults.
+PAIRING_KEY="$RP_DIR/pairing_ed25519"
+SSH_ID=(); [ -f "$PAIRING_KEY" ] && SSH_ID=(-o IdentitiesOnly=yes -i "$PAIRING_KEY")
 APP_NAME="${APP_NAME:-XpairHost}"
 BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.x10lab.xpair-host}"
 REMOTE_BIN="${REMOTE_BIN:-\$HOME/.local/bin}"          # path evaluated on the remote side (preserve quoting)
@@ -405,9 +412,9 @@ REMOTE_PROJ_Q="$(sh_quote "$REMOTE_PROJ")"
 [ -n "$REMOTE_HOST" ] || die "no host configured — set up a host (local or remote) in Xpair.app, or: xpair config set host <ssh-host>" 1
 
 # Expose ssh errors verbatim — timeout/key-rejection/host-key errors must appear on screen + in log.
-reach() { ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" true; }
+reach() { ssh "${SSH_ID[@]}" -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" true; }
 read_host_engine() {
-  ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
+  ssh "${SSH_ID[@]}" -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
     'set -a; [ -f "$HOME/.xpair/host/host.env" ] && . "$HOME/.xpair/host/host.env"; printf "%s\n" "${ENGINE:-}"' \
     2>/dev/null | head -1
 }
@@ -447,7 +454,7 @@ choose_engine
 # Do not suppress stderr — ssh failure reason must appear raw on screen + in launch log for debugging.
 DIR_CHECK=""
 for i in 1 2 3; do
-  DIR_CHECK="$(ssh -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" "[ -d ${HOST_DIR_Q} ] && echo __YES__ || echo __NO__")" || DIR_CHECK=""
+  DIR_CHECK="$(ssh "${SSH_ID[@]}" -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" "[ -d ${HOST_DIR_Q} ] && echo __YES__ || echo __NO__")" || DIR_CHECK=""
   case "$DIR_CHECK" in *__YES__*|*__NO__*) break ;; esac
   printf '  (dir-check ssh attempt %s/3 failed — see error above, retrying in 1s)\n' "$i" >&2
   sleep 1
@@ -458,7 +465,7 @@ case "$DIR_CHECK" in
     printf '%s does not exist on %s (mapped host path).\n' "$HOST_DIR" "$REMOTE_HOST" >&2
     mk="$(ask 'create the directory on host? [y/N]: ')"; [ "$RP_YES" = 1 ] && mk=y
     case "${mk:-n}" in
-      [yY]*) ssh "$REMOTE_HOST" "mkdir -p ${HOST_DIR_Q}" || die "mkdir failed ($REMOTE_HOST)" 4 ;;
+      [yY]*) ssh "${SSH_ID[@]}" "$REMOTE_HOST" "mkdir -p ${HOST_DIR_Q}" || die "mkdir failed ($REMOTE_HOST)" 4 ;;
       *)     die "cancelled: directory missing on host ($HOST_DIR)" 5 ;;
     esac ;;
   *)
@@ -471,7 +478,7 @@ esac
 # Query the host's attach list and kill local clients with no matching server → tab closes + number freed.
 # On ssh failure, keep local clients intact and let host-side setup recheck before attach.
 ATT=""
-if ATT_RAW="$(ssh -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" \
+if ATT_RAW="$(ssh "${SSH_ID[@]}" -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" \
      "${REMOTE_BIN}/tmux-aqua -S ${AQUA_SOCK_Q} list-sessions -F '#S #{session_attached}' 2>/dev/null || true")"; then
   ATT="$(printf '%s\n' "$ATT_RAW" | awk '($2!="0"){print $1}')"
   { pgrep -fl mosh-client 2>/dev/null | grep -E "attach -d -t =${REMOTE_PROJ}_[0-9]+" || true; } | while IFS= read -r line; do
@@ -615,7 +622,7 @@ EOF
 # Phase 1: SSH setup (sync + create detached tmux session), capture session name.
 # Use || to capture rc rather than letting ssh failure abort at the assignment under set -e.
 SSH_RC=0
-SSH_OUT="$(ssh -o BatchMode=yes "$REMOTE_HOST" "$REMOTE_SCRIPT" 2>&1)" || SSH_RC=$?
+SSH_OUT="$(ssh "${SSH_ID[@]}" -o BatchMode=yes "$REMOTE_HOST" "$REMOTE_SCRIPT" 2>&1)" || SSH_RC=$?
 # Show setup output to user and persist it for `xpair logs --collect`; strip the session + recovery markers.
 SETUP_OUT="$(printf '%s\n' "$SSH_OUT" | grep -Ev '^(__SESSION__:|__HOME__:|__XPAIR_HOST_RECOVERY__$)' || true)"
 if [ -n "$SETUP_OUT" ]; then
@@ -648,7 +655,7 @@ remote_attach_ssh() {
   # `choose_attach_recovery ssh`. exec would replace the launcher with ssh, so a failed
   # ssh attach (e.g. preserved/detached session) would surface its raw exit instead of
   # returning to the recovery UI (retry / repair / detached-session guidance).
-  ssh -t "$REMOTE_HOST" "$REMOTE_BIN/tmux-aqua -S ${AQUA_SOCK_Q} attach -d -t $(sh_quote "=$ACTUAL_SESSION")"
+  ssh "${SSH_ID[@]}" -t "$REMOTE_HOST" "$REMOTE_BIN/tmux-aqua -S ${AQUA_SOCK_Q} attach -d -t $(sh_quote "=$ACTUAL_SESSION")"
 }
 
 resolve_xpair_cli() {
@@ -675,7 +682,7 @@ reinstall_mosh() {
     printf 'Homebrew not found locally. Install mosh manually: brew install mosh\n' >&2
     rc=1
   fi
-  if ! ssh "$REMOTE_HOST" 'if command -v brew >/dev/null 2>&1; then brew reinstall mosh || brew install mosh; else exit 127; fi'; then
+  if ! ssh "${SSH_ID[@]}" "$REMOTE_HOST" 'if command -v brew >/dev/null 2>&1; then brew reinstall mosh || brew install mosh; else exit 127; fi'; then
     printf 'host mosh reinstall failed. On %s, install mosh or run setup repair.\n' "$REMOTE_HOST" >&2
     rc=1
   fi
@@ -759,13 +766,13 @@ while :; do
     # The only case where stale state remains is a client crash where signal propagation is impossible —
     # the next attach -d recovers it (dual safety net).
     on_tab_close() {
-      ( trap '' HUP; ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
+      ( trap '' HUP; ssh "${SSH_ID[@]}" -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
           "${REMOTE_BIN}/tmux-aqua -S ${AQUA_SOCK_Q} detach-client -s $(sh_quote "=$ACTUAL_SESSION")" \
           >/dev/null 2>&1 || true ) </dev/null >/dev/null 2>&1 &
       exit 129
     }
     trap on_tab_close HUP TERM
-    mosh --server="$MOSH_SERVER" "$REMOTE_HOST" -- "$REMOTE_HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$ACTUAL_SESSION" || ATTACH_RC=$?
+    mosh --ssh="ssh ${SSH_ID[*]}" --server="$MOSH_SERVER" "$REMOTE_HOST" -- "$REMOTE_HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$ACTUAL_SESSION" || ATTACH_RC=$?
     trap - HUP TERM
     [ "$ATTACH_RC" = 0 ] && exit 0
     choose_attach_recovery mosh "$ATTACH_RC" || exit $?
