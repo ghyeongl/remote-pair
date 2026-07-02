@@ -29,8 +29,8 @@ it "install/prefers-complete-existing-mosh"
 assert_contains "$(cat "$INSTALL")" 'command -v mosh >/dev/null 2>&1 && command -v mosh-client >/dev/null 2>&1' "install.sh defers only to a COMPLETE existing mosh (wrapper + mosh-client)"
 assert_absent  "$(cat "$INSTALL")" 'rm -f "$_l"' "install.sh does not rm a user's mosh symlink"
 
-it "install/skips-user-symlink"
-assert_contains "$(cat "$INSTALL")" 'if [ -L "$_d" ]; then' "install.sh skips a user-owned symlink destination instead of cp-following it"
+it "install/skips-user-symlink-pair"
+assert_contains "$(cat "$INSTALL")" 'if [ -L "$LOCAL_BIN/mosh" ] || [ -L "$LOCAL_BIN/mosh-client" ]; then' "install.sh installs NEITHER when either mosh dest is a user symlink (no half-pair, no cp-follow)"
 
 it "attach/pins-client-only-for-our-mosh"
 assert_contains "$(cat "$XPAIR")" '[ "$(command -v mosh)" = "$LOCAL_BIN/mosh" ] && [ -x "$LOCAL_BIN/mosh-client" ]' "attach pins --client only when the mosh being invoked is our own \$LOCAL_BIN/mosh"

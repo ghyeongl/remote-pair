@@ -104,15 +104,17 @@ if command -v mosh >/dev/null 2>&1 && command -v mosh-client >/dev/null 2>&1; th
   # and install the complete bundled pair. A brew-less client has neither and also falls through.
   say "mosh present ($(command -v mosh)) — keeping it"
 elif is_client && [ -x "$CLIENT_DIR/bin/mosh" ] && [ -x "$CLIENT_DIR/bin/mosh-client" ]; then
-  say "mosh (bundled static) → $LOCAL_BIN (brew-free client attach)"
-  # Never clobber a user-owned SYMLINK at $LOCAL_BIN (e.g. a Homebrew shim that isn't on PATH):
-  # install_file's `cp` would follow it and overwrite the link target. Skip symlinked destinations;
-  # install our regular-file shim only where there's no user symlink.
-  for _p in "mosh:$CLIENT_DIR/bin/mosh" "mosh-client:$CLIENT_DIR/bin/mosh-client"; do
-    _n="${_p%%:*}"; _s="${_p#*:}"; _d="$LOCAL_BIN/$_n"
-    if [ -L "$_d" ]; then warn "$_d is a user-owned symlink — keeping it, not installing bundled $_n"
-    else install_file "$_s" "$_d" 755; fi
-  done
+  # Treat the wrapper + mosh-client as ONE unit. If EITHER $LOCAL_BIN target is a user-owned symlink
+  # (e.g. a Homebrew shim, even off-PATH), keep the user's setup and install NEITHER: installing only
+  # half the pair would mismatch (our client beside their wrapper), and install_file's `cp` would follow
+  # a symlink and overwrite the user's real binary. Only install when BOTH dests are regular-file/absent.
+  if [ -L "$LOCAL_BIN/mosh" ] || [ -L "$LOCAL_BIN/mosh-client" ]; then
+    warn "$LOCAL_BIN/mosh(-client) is a user-owned symlink — keeping the user's mosh, not installing the bundled pair"
+  else
+    say "mosh (bundled static) → $LOCAL_BIN (brew-free client attach)"
+    install_file "$CLIENT_DIR/bin/mosh"        "$LOCAL_BIN/mosh"        755
+    install_file "$CLIENT_DIR/bin/mosh-client" "$LOCAL_BIN/mosh-client" 755
+  fi
 elif is_client; then
   warn "no bundled mosh in this build and none on PATH — attach falls back to ssh (dev checkout)"
 else

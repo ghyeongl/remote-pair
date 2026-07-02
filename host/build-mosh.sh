@@ -104,6 +104,10 @@ fi
 
 BINDIR="$(dirname "$DEST")"                            # ~/.local/bin
 mkdir -p "$BINDIR"
+# rm the dests first so cp writes fresh files rather than FOLLOWING a maintainer's symlink
+# (e.g. ~/.local/bin/mosh → Homebrew) and overwriting the link target. We publish our freshly-built
+# authoritative binaries here; removing a symlink never touches its target.
+rm -f "$BINDIR/mosh-server" "$BINDIR/mosh-client" "$BINDIR/mosh"
 cp "$SRV"  "$BINDIR/mosh-server" && chmod 755 "$BINDIR/mosh-server"
 cp "$CLI"  "$BINDIR/mosh-client" && chmod 755 "$BINDIR/mosh-client"
 cp "$WRAP" "$BINDIR/mosh"        && chmod 755 "$BINDIR/mosh"

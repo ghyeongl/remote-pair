@@ -213,21 +213,27 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
     # (the client app is VSCode-darwin-arm64) AND link only system dylibs. A stale x86_64 helper, or
     # one linked against Intel Homebrew (/usr/local) or arm64 Homebrew (/opt/homebrew), passes `-x` but
     # would ship a broken/non-brew-free binary.
-    _mc_src="$HOME/.local/bin/mosh-client"
+    # An invalid helper SKIPS the mosh bundle (attach falls back to ssh) rather than aborting the whole
+    # IDE build — a maintainer's stray/Homebrew-linked ~/.local/bin/mosh-client shouldn't kill the client
+    # app build. Warn loudly so it gets noticed.
+    _mc_src="$HOME/.local/bin/mosh-client"; _mc_ok=1
     if ! lipo -archs "$_mc_src" 2>/dev/null | tr ' ' '\n' | grep -qx arm64; then
-      echo "✗ ~/.local/bin/mosh-client is not arm64 ($(lipo -archs "$_mc_src" 2>/dev/null || file -b "$_mc_src")) — client app is arm64" >&2
-      echo "  fix: rm -f ~/.local/bin/mosh ~/.local/bin/mosh-client && ./host/build-mosh.sh" >&2; exit 1
+      echo "⚠ ~/.local/bin/mosh-client is not arm64 ($(lipo -archs "$_mc_src" 2>/dev/null || file -b "$_mc_src")) — SKIPPING mosh bundle (attach uses ssh). Rebuild: rm -f ~/.local/bin/mosh ~/.local/bin/mosh-client && ./host/build-mosh.sh" >&2; _mc_ok=0
     fi
-    _mc_nonsys="$(otool -L "$_mc_src" | tail -n +2 | awk '{print $1}' | grep -vE '^/(usr/lib|System)/' || true)"
-    if [ -n "$_mc_nonsys" ]; then
-      echo "✗ ~/.local/bin/mosh-client links non-system (Homebrew) dylibs — not brew-free:" >&2
-      printf '  %s\n' "$_mc_nonsys" >&2; exit 1
+    if [ "$_mc_ok" = 1 ]; then
+      _mc_nonsys="$(otool -L "$_mc_src" | tail -n +2 | awk '{print $1}' | grep -vE '^/(usr/lib|System)/' || true)"
+      if [ -n "$_mc_nonsys" ]; then
+        echo "⚠ ~/.local/bin/mosh-client links non-system (Homebrew) dylibs — SKIPPING mosh bundle (attach uses ssh):" >&2
+        printf '  %s\n' "$_mc_nonsys" >&2; _mc_ok=0
+      fi
     fi
-    mkdir -p "$_cli/client/cli/bin"
-    cp "$_mc_src"              "$_cli/client/cli/bin/mosh-client"
-    cp "$HOME/.local/bin/mosh" "$_cli/client/cli/bin/mosh"
-    chmod +x "$_cli/client/cli/bin/mosh-client" "$_cli/client/cli/bin/mosh"
-    echo "→ bundled static mosh + mosh-client (arm64, system-only) → .../remotepair/cli/client/cli/bin/"
+    if [ "$_mc_ok" = 1 ]; then
+      mkdir -p "$_cli/client/cli/bin"
+      cp "$_mc_src"              "$_cli/client/cli/bin/mosh-client"
+      cp "$HOME/.local/bin/mosh" "$_cli/client/cli/bin/mosh"
+      chmod +x "$_cli/client/cli/bin/mosh-client" "$_cli/client/cli/bin/mosh"
+      echo "→ bundled static mosh + mosh-client (arm64, system-only) → .../remotepair/cli/client/cli/bin/"
+    fi
   else
     echo "  (no ~/.local/bin/mosh-client — skipping mosh bundle; client attach uses ssh fallback)"
   fi
