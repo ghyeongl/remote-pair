@@ -980,17 +980,22 @@ function gatewayMacStatus({ updateBaseline = false } = {}) {
     return { allowed: true, state: "unsupported-platform", current: "", stored, err: "" };
   }
   const current = currentGatewayMac();
+  // The gateway MAC is a roaming CONVENIENCE signal, NOT an auth boundary (the real boundary is the
+  // SSH host key + the restricted, fingerprint-bound authorized_keys line). So it must never
+  // permanently fail-closed: a missing reading or a network change is reported but still allowed,
+  // and a change auto-adopts the new baseline (no manual client.env edit needed to recover).
   if (!current) {
-    upsertEnv("LOCAL_MODE", "1");
-    return { allowed: false, state: "unknown", current: "", stored, err: "default gateway MAC unknown" };
+    return { allowed: true, state: "unknown", current: "", stored, err: "default gateway MAC unknown" };
   }
   if (updateBaseline || !stored) {
     upsertEnv("GATEWAY_MAC", current);
     return { allowed: true, state: "baseline", current, stored: current, err: "" };
   }
   if (stored !== current) {
-    upsertEnv("LOCAL_MODE", "1");
-    return { allowed: false, state: "changed", current, stored, err: "default gateway MAC changed" };
+    // Roamed to a different network — adopt the new gateway as the baseline and allow. The change is
+    // still surfaced (state "changed") for telemetry/UX; recovery is automatic.
+    upsertEnv("GATEWAY_MAC", current);
+    return { allowed: true, state: "changed", current, stored, err: "" };
   }
   return { allowed: true, state: "same", current, stored, err: "" };
 }
@@ -1492,9 +1497,11 @@ const bridge = {
     if (!validSshTarget(h)) {
       return { ok: false, path: "", err: invalidSshTarget(h), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
-    const remote =
-      'p=$1; case "$p" in "~") p=$HOME;; "~/"*) p=$HOME/${p#"~/"};; esac; cd "$p" 2>/dev/null && pwd';
-    const r = await run("ssh", [...sshProbeOpts(h, 5), h, remote, "_", p]);
+    // ssh appends extra argv to the remote command STRING (space-joined); it does NOT set $1. So the
+    // path must be embedded — safely quoted, leading ~ left unquoted so the remote shell expands it —
+    // directly into the command. Mirrors hostPathExists' shPathQuotePreserveHome usage. cd verifies
+    // existence; pwd returns the absolute path.
+    const r = await run("ssh", [...sshProbeOpts(h, 5), h, "cd " + shPathQuotePreserveHome(p) + " 2>/dev/null && pwd"]);
     if (r.code === 0 && String(r.out || "").trim()) {
       return { ok: true, path: String(r.out || "").trim().split("\n").pop(), err: "" };
     }

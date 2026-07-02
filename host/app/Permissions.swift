@@ -13,12 +13,22 @@ enum Permissions {
     static func axTrusted() -> Bool { AXIsProcessTrusted() }
     static func srGranted() -> Bool { CGPreflightScreenCaptureAccess() }
 
-    static func loginGranted() -> Bool {
-        runProbeStatus("/bin/launchctl", ["print", "system/com.openssh.sshd"]) == 0
-    }
+    static func loginGranted() -> Bool { serviceEnabled("com.openssh.sshd") }
 
-    static func sharingGranted() -> Bool {
-        runProbeStatus("/bin/launchctl", ["print", "system/com.apple.smbd"]) == 0
+    static func sharingGranted() -> Bool { serviceEnabled("com.apple.smbd") }
+
+    /// A launchd system service is "on" only if it is not disabled AND its target is loaded. The
+    /// target can exist while Remote Login / File Sharing is toggled OFF, so presence alone is not
+    /// proof: `launchctl print-disabled system` exposes the enable/disable override (`"<label>" =>
+    /// true` means disabled). Explicit override wins; otherwise fall back to target presence.
+    private static func serviceEnabled(_ label: String) -> Bool {
+        let disabled = runProbeOutput("/bin/launchctl", ["print-disabled", "system"])
+        if let line = disabled.split(separator: "\n").first(where: { $0.contains(label) }) {
+            let v = line.lowercased().replacingOccurrences(of: " ", with: "")
+            if v.contains("=>true") { return false }    // explicitly disabled
+            if v.contains("=>false") { return true }     // explicitly enabled
+        }
+        return runProbeStatus("/bin/launchctl", ["print", "system/\(label)"]) == 0
     }
 
     /// FDA has no public preflight API → infer it by actually reading a TCC-protected file (TCC.db) that can only be opened with FDA.
@@ -77,6 +87,24 @@ enum Permissions {
         } catch {
             log(.debug, "permission status probe failed: \(path) \(args.joined(separator: " ")) — \(error)")
             return -1
+        }
+    }
+
+    private static func runProbeOutput(_ path: String, _ args: [String]) -> String {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            log(.debug, "permission output probe failed: \(path) \(args.joined(separator: " ")) — \(error)")
+            return ""
         }
     }
 }

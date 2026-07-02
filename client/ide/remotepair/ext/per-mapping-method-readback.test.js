@@ -113,8 +113,8 @@ test("persisted mapping rows keep their saved client path and can be removed ove
   );
   assert.match(
     bridge,
-    /async resolveHostPath\(sshTarget, hostPath\)[\s\S]*run\("ssh", \[\.\.\.sshProbeOpts\(h, 5\), h, remote, "_", p\]\)/,
-    "bridge resolveHostPath must SSH with the shared probe options and pass the host path as a positional arg",
+    /async resolveHostPath\(sshTarget, hostPath\)[\s\S]*run\("ssh", \[\.\.\.sshProbeOpts\(h, 5\), h, "cd " \+ shPathQuotePreserveHome\(p\) \+ " 2>\/dev\/null && pwd"\]\)/,
+    "bridge resolveHostPath must SSH with the shared probe options and embed the host path (quoted, ~ preserved) into the remote command — ssh does not set $1 from trailing argv",
   );
   assert.match(
     stepMappings,

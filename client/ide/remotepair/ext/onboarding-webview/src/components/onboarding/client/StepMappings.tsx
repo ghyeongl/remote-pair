@@ -413,6 +413,7 @@ function HostFolderBrowser({
   const { t } = useT();
   const [path, setPath] = useState<string[]>(["~"]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [manual, setManual] = useState("");
 
   const current = nodeAt(path);
   const children = current?.children ?? [];
@@ -433,6 +434,7 @@ function HostFolderBrowser({
         if (!v) {
           setPath(["~"]);
           setSelectedName(null);
+          setManual("");
           onClose();
         }
       }}
@@ -508,9 +510,18 @@ function HostFolderBrowser({
           )}
         </div>
 
-        <div className="text-xs text-muted-foreground">
-          {t("map.selected")}{" "}
-          <span className="font-mono text-foreground">{selectedPath}</span>
+        <div className="space-y-1">
+          <div className="text-xs text-muted-foreground">
+            {t("map.selected")}{" "}
+            <span className="font-mono text-foreground">{manual.trim() || selectedPath}</span>
+          </div>
+          <input
+            value={manual}
+            onChange={(e) => setManual(e.target.value)}
+            placeholder="~/Spaces/Work or /Users/you/project"
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs outline-none focus:border-foreground/30"
+          />
+          <p className="text-[11px] text-muted-foreground">{t("map.hostManualHint")}</p>
         </div>
 
         <DialogFooter>
@@ -520,9 +531,10 @@ function HostFolderBrowser({
           <Button
             size="sm"
             onClick={() => {
-              onConfirm(selectedPath);
+              onConfirm(manual.trim() || selectedPath);
               setPath(["~"]);
               setSelectedName(null);
+              setManual("");
             }}
           >
             {t("map.chooseThis")}

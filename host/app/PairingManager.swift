@@ -278,7 +278,11 @@ enum XpairAuthorizedKeys {
         guard PairingSecurity.validateClientID(clientID) else { throw PairingSecurityError.invalidClientID }
         let safeName = PairingSecurity.sanitizeCommentValue(name)
         let comment = "xpair:v1 client_id=\(clientID) fp=\(fingerprint) created=\(created) name=\(safeName)"
-        return #"restrict,pty,port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)",command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
+        // port-forwarding re-enables BOTH local (-L) and remote (-R) forwarding disabled by restrict;
+        // permitopen constrains local forwards to the RD signaling port, and permitlisten="none"
+        // refuses ALL remote forwards (permitopen does not cover -R). So only the required local RD
+        // forward is allowed.
+        return #"restrict,pty,port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)",permitlisten="none",command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
     }
 
     static func install(_ req: VerifiedPairingRequest) throws -> AuthorizedClientRecord {
@@ -1386,6 +1390,7 @@ enum PairingSecuritySelfTest {
                                                                fingerprint: "SHA256:x", created: ts, name: "ok")
         assert(line.contains("restrict,pty,port-forwarding"))
         assert(line.contains(#"permitopen="127.0.0.1:8890""#))
+        assert(line.contains(#"permitlisten="none""#))   // remote (-R) forwarding refused
         assert(line.contains("command=\"\(XpairAuthorizedKeys.gatePath) abc_DEF-123 SHA256:x\""))
         assert(!line.contains("no-port-forwarding"))
         assert(PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:A"))
