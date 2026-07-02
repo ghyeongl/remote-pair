@@ -70,7 +70,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         getConsent: () => post('getConsent', []),
         setConsent: (c) => post('setConsent', [c]),
         connectedClients: () => post('connectedClients', []),
-        beginPairing: () => post('beginPairing', []),
+        beginPairing: (force = false) => post('beginPairing', [force]),
         pairingStatus: () => post('pairingStatus', []),
         acceptPairing: (request) => post('acceptPairing', [request]),
         denyPairing: () => post('denyPairing', []),
@@ -235,9 +235,10 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
             replyHandler(clients, nil)
 
         case "beginPairing":
+            let force = args.first as? Bool ?? false
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    replyHandler(try PairingManager.shared.beginWindow(), nil)
+                    replyHandler(try PairingManager.shared.beginWindow(force: force), nil)
                 } catch {
                     replyHandler(nil, "beginPairing failed: \(error)")
                 }

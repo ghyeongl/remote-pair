@@ -30,9 +30,15 @@ test("US-004 window close tears down pairing and backend TTL force-closes Broadc
   assert.match(manager, /private let maxBroadcastTTLSec = [1-9][0-9]*/);
   assert.match(
     manager,
-    /func beginWindow\(\) throws -> \[String: Any\] \{[\s\S]*BonjourAdvertiser\.setPairingInfo[\s\S]*scheduleBroadcastExpiryLocked\(\)/,
+    /func beginWindow\(force: Bool = false\) throws -> \[String: Any\] \{[\s\S]*BonjourAdvertiser\.setPairingInfo[\s\S]*scheduleBroadcastExpiryLocked\(\)/,
     "beginWindow must arm the backend TTL after opening the UDP endpoint",
   );
+  // R12-5: the paired short-circuit MUST be gated on !force, so an explicit re-advertise (force=true)
+  // opens a fresh window while auto-entry/resume/poll-reopen still short-circuit.
+  assert.match(manager, /if !force, let paired = XpairAuthorizedKeys\.latestPaired\(\)/);
+  // R12-5: the status reconciler must promote from the ledger only when accepted == nil (genuine
+  // resume), never while a new client is mid-proof on a re-advertised window.
+  assert.match(manager, /else if accepted == nil, let paired = XpairAuthorizedKeys\.latestPaired\(\)/);
   assert.match(
     manager,
     /timer\.schedule\(deadline: \.now\(\) \+ \.seconds\(maxBroadcastTTLSec\)\)/,

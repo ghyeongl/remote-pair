@@ -324,9 +324,12 @@ export default function App() {
     }
   }, []);
 
-  const beginBroadcast = useCallback(async () => {
+  // force=true is used ONLY by the explicit "Pair a different device" affordance (re-advertise even when
+  // a client is already paired). Auto-entry and the poll-reopen keep force=false so an already-paired
+  // host still short-circuits to "paired" and can finish onboarding.
+  const beginBroadcast = useCallback(async (force = false) => {
     try {
-      const s = await window.xpair.beginPairing();
+      const s = await window.xpair.beginPairing(force);
       applyPairingStatus(s);
     } catch (error) {
       setPairingError(error instanceof Error ? error.message : String(error));
@@ -473,7 +476,7 @@ export default function App() {
             request={request}
             setRequest={setRequest}
             error={pairingError}
-            onBroadcastAgain={beginBroadcast}
+            onBroadcastAgain={() => beginBroadcast(true)}
           />
         )}
         {w.index === DONE_IDX && <StepDone />}

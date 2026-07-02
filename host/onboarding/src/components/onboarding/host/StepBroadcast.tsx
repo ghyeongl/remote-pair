@@ -127,6 +127,20 @@ export function StepBroadcast({
             {request?.user}@{request?.ip}
           </div>
         </div>
+        {/* Re-advertise a fresh pairing window (force=true) so a replacement/additional device can pair
+            without manually editing the ledger — the documented Broadcast recovery. */}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="mt-4"
+          onClick={() => {
+            setRequest(null);
+            setState("waiting");
+            void onBroadcastAgain();
+          }}
+        >
+          {t("bc.pairAnother")}
+        </Button>
       </div>
     );
   }

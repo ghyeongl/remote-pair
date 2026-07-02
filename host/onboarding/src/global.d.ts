@@ -53,7 +53,8 @@ declare global {
       connectedClients: () => Promise<Array<{ name: string; user: string; ageSec: number }>>
       // Pairing Broadcast backend. `accepted-pending-proof` means the exact key was installed but
       // Continue stays locked; only `paired` maps to the UI's accepted state.
-      beginPairing: () => Promise<PairingStatus>
+      // force=true opens a fresh pairing window even when a client is already paired (re-advertise).
+      beginPairing: (force?: boolean) => Promise<PairingStatus>
       pairingStatus: () => Promise<PairingStatus>
       acceptPairing: (request: { id: string; keyFingerprint: string }) => Promise<PairingStatus>
       denyPairing: () => Promise<PairingStatus>

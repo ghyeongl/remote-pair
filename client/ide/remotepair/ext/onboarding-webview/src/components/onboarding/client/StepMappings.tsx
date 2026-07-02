@@ -157,7 +157,11 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
     patchInternal(mapping.id, { persisting: true, error: "" });
     try {
       let resolvedHostPath = hostPath;
-      if (needsHostResolution(hostPath)) {
+      // Resolve/validate the host folder over SSH when it needs ~-expansion OR is a sync mapping. For
+      // sync, `xpair map add` only checks the LOCAL client dir, so an absolute-but-nonexistent host path
+      // would otherwise persist a broken mapping and satisfy the completion gate. (Mount mappings are
+      // validated by the mount itself, so absolute mount paths don't need this extra round-trip.)
+      if (needsHostResolution(hostPath) || mapping.mode === "sync") {
         const target = hostTarget?.trim();
         if (!target) {
           patchInternal(mapping.id, { persisting: false, error: "Select a host first." });
@@ -206,10 +210,15 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
         const removed = await window.remotepair.removeMapping(savedPath);
         if (removed.code !== 0) throw new Error(removed.err || removed.out || "mapping remove failed");
       }
+      // When the add was a no-op (the new client path is a descendant of the existing root), the old
+      // entry is what is actually in FOLDER_MAPS — it was NOT replaced. Record savedClientPath as the
+      // REAL persisted key (savedPath), not the unpersisted child, so a later Remove/Re-save runs
+      // `map rm` on a key that exists instead of leaving the original mapping behind.
+      const persistedKey = addWasNoOp && savedPath ? savedPath : persistedClientPath;
       patchInternal(mapping.id, {
-        clientPath: persistedClientPath,
+        clientPath: persistedKey,
         hostPath: resolvedHostPath,
-        savedClientPath: persistedClientPath,
+        savedClientPath: persistedKey,
         persisted: true,
         persisting: false,
         error: "",

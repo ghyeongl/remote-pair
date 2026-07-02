@@ -160,6 +160,7 @@ const EN: Dict = {
   "bc.paired.title": "Client paired",
   "bc.paired.desc": "You can keep this Mac running — sessions stay alive 24/7.",
   "bc.pairedWith": "Paired with",
+  "bc.pairAnother": "Pair a different device",
   "bc.pending.title": "Waiting for SSH proof",
   "bc.pending.desc":
     "The exact key was installed. Keep this open while the client connects once with that key.",
@@ -334,6 +335,7 @@ const KO: Dict = {
   "bc.paired.title": "클라이언트 페어링 완료",
   "bc.paired.desc": "이 Mac을 켜두면 세션이 24시간 유지됩니다.",
   "bc.pairedWith": "페어링 완료:",
+  "bc.pairAnother": "다른 기기 페어링",
   "bc.pending.title": "SSH 증명 대기 중",
   "bc.pending.desc":
     "정확한 키를 설치했습니다. 클라이언트가 그 키로 한 번 연결할 때까지 이 창을 열어두세요.",

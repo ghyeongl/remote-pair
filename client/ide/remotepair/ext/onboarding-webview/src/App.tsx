@@ -231,9 +231,34 @@ export default function App() {
     w.goTo(3, "prev");
   };
 
-  const retryHostPrompt = () => {
+  const retryHostPrompt = async () => {
+    // After a deny the host closed its pairing endpoint; a Broadcast Again re-advertises with a FRESH
+    // serviceInstanceID/hostNonce/pairPort. Resending the stale fields stored on selectedHost can never
+    // succeed, so re-run discovery and refresh the selected host's pairing metadata before retrying. If
+    // the host is no longer broadcasting live metadata, route back to Discover.
+    const cur = selectedRef.current;
     setPermDenied(false);
     setPermAccepted(false);
+    if (!cur) return;
+    try {
+      const res = await window.remotepair.discover();
+      const match = (res.peers || []).find((p) => {
+        const addr = p.pairingAddress ?? p.addrs[0] ?? p.name;
+        const target = p.target ?? (p.hostUser ? `${p.hostUser}@${addr}` : addr);
+        return (cur.hostKeyFP && p.fp === cur.hostKeyFP) || target === cur.sshTarget;
+      });
+      if (match?.serviceInstanceID && match?.hostNonce && match?.pairPort) {
+        setSelectedHost((h) =>
+          h && h.id === cur.id
+            ? { ...h, serviceInstanceID: match.serviceInstanceID, hostNonce: match.hostNonce, pairPort: match.pairPort }
+            : h,
+        );
+      } else {
+        goBackToDiscover(); // host no longer advertising a live pairing window — pick a fresh one
+      }
+    } catch {
+      /* discovery failed — leave the user on WaitPerm; they can Pick Another */
+    }
   };
 
   useEffect(() => {

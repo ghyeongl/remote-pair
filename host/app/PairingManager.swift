@@ -903,11 +903,17 @@ final class PairingManager {
     private let maxBroadcastTTLSec = 300
     private let deniedMetadataTTLSec = 30
 
-    func beginWindow() throws -> [String: Any] {
+    func beginWindow(force: Bool = false) throws -> [String: Any] {
         try queue.sync {
             XpairAuthorizedKeys.expirePendingProofs()
             scheduleProofExpiryLocked()
-            if let paired = XpairAuthorizedKeys.latestPaired() {
+            // Auto-entry / resume / poll-reopen (force=false) short-circuit to "paired" when a client is
+            // already paired, so an already-paired host can finish onboarding (the Next gate needs
+            // broadcast==="accepted"). An EXPLICIT re-advertise (force=true — the "Pair a different
+            // device" button) skips the short-circuit and opens a fresh window (new serviceInstanceID/
+            // hostNonce/pairPort) so a replacement/additional client can pair — the documented Broadcast
+            // recovery (blueprint §Broadcast: client still paired → re-advertise).
+            if !force, let paired = XpairAuthorizedKeys.latestPaired() {
                 accepted = paired
                 incoming = nil
                 incomingExpiresAt = nil
@@ -970,7 +976,11 @@ final class PairingManager {
             if let rec = accepted, XpairAuthorizedKeys.latestPaired()?.clientID == rec.clientID {
                 accepted = XpairAuthorizedKeys.latestPaired()
                 phase = "paired"
-            } else if let paired = XpairAuthorizedKeys.latestPaired(), phase != "waiting", phase != "incoming" {
+            } else if accepted == nil, let paired = XpairAuthorizedKeys.latestPaired(), phase != "waiting", phase != "incoming" {
+                // `accepted == nil` guard: promote from the ledger ONLY on a genuine resume (no in-session
+                // accepted record). Without it, while a NEW client is mid-proof on a re-advertised window
+                // (accepted=newClient, phase=accepted-pending-proof), latestPaired() still returns the OLD
+                // client and this would falsely flip the UI to "paired" with the old one and enable Next.
                 accepted = paired
                 phase = "paired"
             } else if let rec = accepted, XpairAuthorizedKeys.pending(clientID: rec.clientID) == nil, phase == "accepted-pending-proof" {

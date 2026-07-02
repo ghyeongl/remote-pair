@@ -1819,19 +1819,28 @@ cmd_install_host() {
   # BatchMode=yes (key-only) calls below — and every later editor/desktop/notify call
   # — would fail despite a "successful" install/re-register. Idempotent (grep -qxF),
   # so re-running on an already-authorized host is a no-op.
-  local pubpath; pubpath="$(rp_ssh_pubkey)" || { err "could not resolve client pubkey"; return 1; }
-  local pubdata; pubdata="$(cat "$pubpath" 2>/dev/null)"
-  [ -n "$pubdata" ] || { err "empty client pubkey: $pubpath"; return 1; }
-  c "authorizing client key on $target (over the setup connection) …"
-  # ssh-copy-id-style append: idempotent (grep -qxF guard), correct perms. Rides the
-  # SAME multiplexed master (RP_SSHOPTS/SSHENV) the connection authenticated — so no
-  # re-auth, no separate password prompt, no host-key prompt. The pubkey is piped
-  # into ssh and read via $(cat) on the host; we do NOT use _rp_ssh (it hardcodes
-  # </dev/null, which would drop the piped key).
-  local rp_authcmd='umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; key=$(cat); grep -qxF "$key" ~/.ssh/authorized_keys || printf "%s\n" "$key" >> ~/.ssh/authorized_keys'
-  printf '%s\n' "$pubdata" | "${SSHENV[@]}" ssh "${RP_SSHOPTS[@]}" "$target" "$rp_authcmd" \
-    || { err "failed to authorize client key on $target"; return 1; }
-  ok "client key authorized on $target"
+  # Authorize the UNRESTRICTED personal key ONLY during initial (pre-pairing) setup. Once this client is
+  # paired (~/.xpair/host/pairing_ed25519 exists), it reaches the host solely via the restricted
+  # xpair-ssh-gate pairing line; appending ~/.ssh/id_ed25519.pub on a post-pairing update (StepUpdate →
+  # install-host --force) would silently re-grant access OUTSIDE the gate and undo the dedicated
+  # pairing-key security boundary. Paired hosts already accept the client via the pairing key.
+  if [ -f "$PAIRING_KEY" ]; then
+    c "paired host: skipping personal-key authorization (restricted pairing key already grants access)"
+  else
+    local pubpath; pubpath="$(rp_ssh_pubkey)" || { err "could not resolve client pubkey"; return 1; }
+    local pubdata; pubdata="$(cat "$pubpath" 2>/dev/null)"
+    [ -n "$pubdata" ] || { err "empty client pubkey: $pubpath"; return 1; }
+    c "authorizing client key on $target (over the setup connection) …"
+    # ssh-copy-id-style append: idempotent (grep -qxF guard), correct perms. Rides the
+    # SAME multiplexed master (RP_SSHOPTS/SSHENV) the connection authenticated — so no
+    # re-auth, no separate password prompt, no host-key prompt. The pubkey is piped
+    # into ssh and read via $(cat) on the host; we do NOT use _rp_ssh (it hardcodes
+    # </dev/null, which would drop the piped key).
+    local rp_authcmd='umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; key=$(cat); grep -qxF "$key" ~/.ssh/authorized_keys || printf "%s\n" "$key" >> ~/.ssh/authorized_keys'
+    printf '%s\n' "$pubdata" | "${SSHENV[@]}" ssh "${RP_SSHOPTS[@]}" "$target" "$rp_authcmd" \
+      || { err "failed to authorize client key on $target"; return 1; }
+    ok "client key authorized on $target"
+  fi
 
   # Persist a managed SSH config block for future key-auth connections. This is deliberately after
   # authorization: a written config should mean the host accepts the pinned client key.
