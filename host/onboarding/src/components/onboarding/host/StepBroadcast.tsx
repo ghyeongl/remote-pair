@@ -37,6 +37,21 @@ export function StepBroadcast({
 }: Props) {
   const { t } = useT();
   const [dots, setDots] = useState(1);
+  // Real machine name for the "this Mac" label — the pairing approval screen must identify THIS host,
+  // not a hardcoded mockup value, or the user approves a client against the wrong machine.
+  const [hostname, setHostname] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void window.xpair
+      .getHostInfo()
+      .then((info) => {
+        if (alive) setHostname(info?.hostname || "");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (state !== "waiting") return;
@@ -185,7 +200,7 @@ export function StepBroadcast({
         <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
           {t("bc.thisMac")}
         </div>
-        <div className="mt-1 font-mono text-sm text-foreground">gh-mac-m1.local</div>
+        <div className="mt-1 font-mono text-sm text-foreground">{hostname || "…"}</div>
       </div>
 
       {error ? <p className="mt-4 max-w-sm text-xs text-destructive">{error}</p> : null}
