@@ -142,6 +142,9 @@ for p in \
   "$HOME/.local/bin/xpair-launch"; do
   run rm -f "$p"
 done
+# mosh / mosh-client are installed via install_file (manifest-recorded, backup-aware): the shared
+# manifest reverter above already removes our copies and RESTORES any pre-existing user-owned binary
+# from backup. Do NOT rm them unconditionally here — that would clobber a user's own mosh.
 remove_xpair_app_symlink "$HOME/.local/bin/tmux-aqua"
 remove_xpair_app_symlink "$HOME/.local/bin/mosh-server"
 

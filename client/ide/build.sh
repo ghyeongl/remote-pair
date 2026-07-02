@@ -200,6 +200,43 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
   cp -R "$CLI_SRC/Launch Xpair.workflow" "$_cli/client/cli/Launch Xpair.workflow"
   chmod -R u+w "$_cli"
   echo "→ bundled Xpair client CLI → $(basename "$app")/Contents/Resources/app/extensions/remotepair/cli"
+  # Static mosh + mosh-client (brew-free client attach). build-mosh.sh emits both to ~/.local/bin
+  # (static protobuf 3.21.12, pre-abseil → 0 brew dylib). Bundle into the repo-shaped tree so
+  # `install.sh --role client` copies them to ~/.local/bin exactly like the xpair CLI. Missing/failed
+  # build → skip (attach falls back to ssh); never hard-fail the IDE build.
+  if [ ! -x "$HOME/.local/bin/mosh-client" ] || [ ! -x "$HOME/.local/bin/mosh" ]; then
+    echo "  mosh-client/mosh missing (~/.local/bin) → auto-running ./host/build-mosh.sh ..."
+    ( cd "$HERE/../.." && ./host/build-mosh.sh ) || echo "⚠ build-mosh.sh failed — bundling without mosh (attach falls back to ssh)" >&2
+  fi
+  if [ -x "$HOME/.local/bin/mosh-client" ] && [ -x "$HOME/.local/bin/mosh" ]; then
+    # Validate the helper we're about to REUSE, BEFORE copying it into the bundle: it must be arm64
+    # (the client app is VSCode-darwin-arm64) AND link only system dylibs. A stale x86_64 helper, or
+    # one linked against Intel Homebrew (/usr/local) or arm64 Homebrew (/opt/homebrew), passes `-x` but
+    # would ship a broken/non-brew-free binary.
+    # An invalid helper SKIPS the mosh bundle (attach falls back to ssh) rather than aborting the whole
+    # IDE build — a maintainer's stray/Homebrew-linked ~/.local/bin/mosh-client shouldn't kill the client
+    # app build. Warn loudly so it gets noticed.
+    _mc_src="$HOME/.local/bin/mosh-client"; _mc_ok=1
+    if ! lipo -archs "$_mc_src" 2>/dev/null | tr ' ' '\n' | grep -qx arm64; then
+      echo "⚠ ~/.local/bin/mosh-client is not arm64 ($(lipo -archs "$_mc_src" 2>/dev/null || file -b "$_mc_src")) — SKIPPING mosh bundle (attach uses ssh). Rebuild: rm -f ~/.local/bin/mosh ~/.local/bin/mosh-client && ./host/build-mosh.sh" >&2; _mc_ok=0
+    fi
+    if [ "$_mc_ok" = 1 ]; then
+      _mc_nonsys="$(otool -L "$_mc_src" | tail -n +2 | awk '{print $1}' | grep -vE '^/(usr/lib|System)/' || true)"
+      if [ -n "$_mc_nonsys" ]; then
+        echo "⚠ ~/.local/bin/mosh-client links non-system (Homebrew) dylibs — SKIPPING mosh bundle (attach uses ssh):" >&2
+        printf '  %s\n' "$_mc_nonsys" >&2; _mc_ok=0
+      fi
+    fi
+    if [ "$_mc_ok" = 1 ]; then
+      mkdir -p "$_cli/client/cli/bin"
+      cp "$_mc_src"              "$_cli/client/cli/bin/mosh-client"
+      cp "$HOME/.local/bin/mosh" "$_cli/client/cli/bin/mosh"
+      chmod +x "$_cli/client/cli/bin/mosh-client" "$_cli/client/cli/bin/mosh"
+      echo "→ bundled static mosh + mosh-client (arm64, system-only) → .../remotepair/cli/client/cli/bin/"
+    fi
+  else
+    echo "  (no ~/.local/bin/mosh-client — skipping mosh bundle; client attach uses ssh fallback)"
+  fi
   # Also bundle the SIGNED host app so the onboarding's `xpair install-host` (default scp mode) finds a
   # local .app to ship to the host. The installed CLI (~/.local/bin/xpair) runs install-host with
   # RP_REPO_ROOT=<this cli dir> (config.sh derives REPO_ROOT=<cli>; install.sh persists it to
