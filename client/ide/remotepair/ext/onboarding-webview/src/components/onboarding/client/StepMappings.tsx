@@ -180,11 +180,12 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
         persistedClientPath =
           mounted.mountpoint || (await window.remotepair.defaultMountpoint(resolvedHostPath));
       }
-      if (
-        mapping.savedClientPath &&
-        (!mapping.persisted || mapping.savedClientPath !== persistedClientPath)
-      ) {
-        const removed = await window.remotepair.removeMapping(mapping.savedClientPath);
+      const savedPath = mapping.savedClientPath;
+      const changingPath = !!savedPath && savedPath !== persistedClientPath;
+      if (savedPath && !changingPath) {
+        // Same client path re-save: `xpair map add` appends, so drop the prior entry first to avoid a
+        // duplicate. Safe because the path is unchanged (already known to exist).
+        const removed = await window.remotepair.removeMapping(savedPath);
         if (removed.code !== 0) throw new Error(removed.err || removed.out || "mapping remove failed");
       }
       const added = await window.remotepair.addMapping(
@@ -193,6 +194,12 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
         mapping.mode,
       );
       if (added.code !== 0) throw new Error(added.err || added.out || "mapping save failed");
+      if (savedPath && changingPath) {
+        // The replacement is saved above, so it is now safe to drop the OLD entry. Doing the remove
+        // AFTER a successful add means a bad/nonexistent new client path can never lose the old mapping.
+        const removed = await window.remotepair.removeMapping(savedPath);
+        if (removed.code !== 0) throw new Error(removed.err || removed.out || "mapping remove failed");
+      }
       patchInternal(mapping.id, {
         clientPath: persistedClientPath,
         hostPath: resolvedHostPath,

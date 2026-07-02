@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WizardShell } from "@/components/onboarding/WizardShell";
 import { AnimatedStep } from "@/components/onboarding/AnimatedStep";
 import { useWizard } from "@/components/onboarding/useWizard";
@@ -319,6 +319,7 @@ export default function App() {
     }
   }, [applyPairingStatus]);
 
+  const rebroadcastingRef = useRef(false);
   useEffect(() => {
     if (!hydrated || w.index !== BROADCAST_IDX) return;
     let active = true;
@@ -327,7 +328,19 @@ export default function App() {
       window.xpair
         .pairingStatus()
         .then((s) => {
-          if (active) applyPairingStatus(s);
+          if (!active) return;
+          if (s.phase === "closed") {
+            // The broadcast/endpoint TTL expired (or a denied window rolled to closed). Reopen so the
+            // host stays pairable, instead of showing "waiting" while no endpoint/metadata is live.
+            if (!rebroadcastingRef.current) {
+              rebroadcastingRef.current = true;
+              void beginBroadcast().finally(() => {
+                rebroadcastingRef.current = false;
+              });
+            }
+            return;
+          }
+          applyPairingStatus(s);
         })
         .catch((error) => {
           if (active) setPairingError(error instanceof Error ? error.message : String(error));

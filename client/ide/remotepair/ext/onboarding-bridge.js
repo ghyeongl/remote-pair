@@ -470,6 +470,17 @@ function shPathQuotePreserveHome(p) {
   return shSingleQuote(s);
 }
 
+/** Expand a leading ~ / ~/… in a CLIENT (local) path to the absolute home dir. The CLI's
+ *  `xpair map add` runs `cd "$2"` on the client path, and a quoted argument is NOT tilde-expanded by
+ *  the shell, so ~ paths would fail with "client path not found". Host paths are resolved separately
+ *  over SSH (resolveHostPath) — this is the local side only. */
+function expandClientHome(p) {
+  const s = String(p || "");
+  if (s === "~") return os.homedir();
+  if (s.startsWith("~/")) return path.join(os.homedir(), s.slice(2));
+  return s;
+}
+
 /** Non-interactive ssh options for reachability/read probes: name the key explicitly, force
  *  publickey-only auth, and BatchMode so ssh NEVER drops to a password/passphrase prompt (which
  *  would hang or spawn an out-of-band GUI prompt). Used by every read/probe ssh call and by the
@@ -980,22 +991,20 @@ function gatewayMacStatus({ updateBaseline = false } = {}) {
     return { allowed: true, state: "unsupported-platform", current: "", stored, err: "" };
   }
   const current = currentGatewayMac();
-  // The gateway MAC is a roaming CONVENIENCE signal, NOT an auth boundary (the real boundary is the
-  // SSH host key + the restricted, fingerprint-bound authorized_keys line). So it must never
-  // permanently fail-closed: a missing reading or a network change is reported but still allowed,
-  // and a change auto-adopts the new baseline (no manual client.env edit needed to recover).
+  // Roaming safety (blueprint §6.4): the gateway MAC is NOT auth, but auto-connect must FAIL CLOSED on
+  // an unknown/changed network (a moved-network signal). It is never the security boundary (SSH host
+  // key + the restricted, fingerprint-bound key is), so recovery is a user-confirmed re-baseline:
+  // gatewayMacStatus({ updateBaseline: true }) (exposed as confirmGatewayBaseline) adopts the new
+  // network on an explicit reconnect — no manual client.env edit needed.
   if (!current) {
-    return { allowed: true, state: "unknown", current: "", stored, err: "default gateway MAC unknown" };
+    return { allowed: false, state: "unknown", current: "", stored, err: "default gateway MAC unknown" };
   }
   if (updateBaseline || !stored) {
     upsertEnv("GATEWAY_MAC", current);
     return { allowed: true, state: "baseline", current, stored: current, err: "" };
   }
   if (stored !== current) {
-    // Roamed to a different network — adopt the new gateway as the baseline and allow. The change is
-    // still surfaced (state "changed") for telemetry/UX; recovery is automatic.
-    upsertEnv("GATEWAY_MAC", current);
-    return { allowed: true, state: "changed", current, stored, err: "" };
+    return { allowed: false, state: "changed", current, stored, err: "default gateway MAC changed" };
   }
   return { allowed: true, state: "same", current, stored, err: "" };
 }
@@ -1557,13 +1566,14 @@ const bridge = {
   // method (mount|sync) is persisted per-mapping (FOLDER_MAP_MODES); omitted ⇒ the CLI infers
   // it by path convention, preserving legacy callers.
   async addMapping(clientPath, hostPath, method) {
-    const args = ["map", "add", clientPath, hostPath];
+    const args = ["map", "add", expandClientHome(clientPath), hostPath];
     if (method === "mount" || method === "sync") args.push(method);
     return cli(args);
   },
 
   async removeMapping(clientPath) {
-    const c = String(clientPath || "").trim();
+    // Expand ~ the same way addMapping does, so the stored (absolute) client path is matched on rm.
+    const c = expandClientHome(String(clientPath || "").trim());
     if (!c) return { code: -1, out: "", err: "removeMapping requires a client path" };
     return cli(["map", "rm", c]);
   },
@@ -1893,9 +1903,14 @@ const bridge = {
     }
   },
 
-  // Gateway-MAC roaming is a convenience guard only. Unknown/changed network state fails closed by
-  // setting LOCAL_MODE=1; auth remains SSH host-key TOFU + the approved client key.
+  // Gateway-MAC roaming is a convenience guard only (blueprint §6.4). Unknown/changed network state
+  // fails CLOSED for auto-connect; auth remains SSH host-key TOFU + the approved client key.
   gatewayMacStatus,
+  // Recovery for a fail-closed roaming state: an explicit user reconnect re-confirms the current
+  // network by adopting it as the new baseline (so auto-connect is re-enabled without editing client.env).
+  confirmGatewayBaseline() {
+    return gatewayMacStatus({ updateBaseline: true });
+  },
   // TOFU confirm — pin the exact ed25519 host key fingerprint the user confirmed into the effective
   // durable UserKnownHostsFile. Probes learn first-seen keys in an app-launch ephemeral known_hosts
   // file; this asks ssh to bridge the confirmed key into the durable store so later CLI/RD SSH flows
