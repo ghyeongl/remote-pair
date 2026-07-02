@@ -86,8 +86,18 @@ test("US-003 widened permission bridge probes real login/sharing facts", () => {
   assert.match(permissionsSwift, /static func allGranted\(\) -> Bool \{ axTrusted\(\) && srGranted\(\) \}/);
 });
 
-test("US-003 gates remain hard: current permission, >=1 ready engine, persisted consent", () => {
-  assert.match(app, /inPerms && !currentPermGranted/);
+test("US-003 gates block required permissions only, then >=1 ready engine and persisted consent", () => {
+  assert.match(singlePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr"\]/);
+  assert.match(singlePerm, /export function isRequiredPerm/);
+  assert.match(app, /inPerms && isRequiredPerm\(currentPermKey\) && !currentPermGranted/);
+  assert.match(
+    app,
+    /const i = REQUIRED_PERMS\.findIndex\(\(k\) => state\[k\] !== "granted"\)/,
+    "resume/hydration must only bounce back to required permissions",
+  );
+  assert.match(singlePerm, /!required && !granted[\s\S]*perm\.recommendedContinue/);
+  assert.match(i18n, /"perm\.recommendedContinue": "Recommended — you can continue"/);
+  assert.match(i18n, /"perm\.recommendedContinue": "권장 항목입니다 — 계속 진행할 수 있습니다"/);
   assert.match(app, /w\.index === ENGINE_IDX && engines\.size === 0/);
   assert.match(app, /const \[crashReports, setCrashReports\] = useState\(true\)/);
   assert.match(app, /const \[analytics, setAnalytics\] = useState\(false\)/);

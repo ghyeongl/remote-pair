@@ -18,6 +18,11 @@ export type PermStatus = "pending" | "opening" | "granted";
 export type PermState = Record<PermKey, PermStatus>;
 
 export const PERM_ORDER: PermKey[] = ["login", "ax", "sr", "fda", "sharing"];
+export const REQUIRED_PERMS: PermKey[] = ["login", "ax", "sr"];
+
+export function isRequiredPerm(k: PermKey | null): k is PermKey {
+  return k !== null && REQUIRED_PERMS.includes(k);
+}
 
 export const ICONS: Record<PermKey, ComponentType<{ className?: string }>> = {
   login: Terminal,
@@ -39,6 +44,7 @@ export function StepSinglePerm({ permKey, status, onOpen }: Props) {
   const granted = status === "granted";
   const opening = status === "opening";
   const stepNum = PERM_ORDER.indexOf(permKey) + 1;
+  const required = isRequiredPerm(permKey);
 
   const name = t(`perm.${permKey}.name`);
   const desc = t(`perm.${permKey}.desc`);
@@ -75,6 +81,11 @@ export function StepSinglePerm({ permKey, status, onOpen }: Props) {
           </div>
 
           <div className="mt-4 font-mono text-xs text-muted-foreground">{pane}</div>
+          {!required && !granted ? (
+            <div className="mt-2 text-xs font-medium text-muted-foreground">
+              {t("perm.recommendedContinue")}
+            </div>
+          ) : null}
 
           <div className="mt-5">
             {granted ? (

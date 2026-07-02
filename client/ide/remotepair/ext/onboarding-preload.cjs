@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('remotepair', {
   installHostEngine: (engine) => rp('installHostEngine', [engine]),
   setHostEngineAuth: (engine, apiKey) => rp('setHostEngineAuth', [engine, apiKey]),
   addMapping: (clientPath, hostPath, method) => rp('addMapping', [clientPath, hostPath, method]),
+  removeMapping: (clientPath) => rp('removeMapping', [clientPath]),
+  resolveHostPath: (target, hostPath) => rp('resolveHostPath', [target, hostPath]),
   hostSmbStatus: () => rp('hostSmbStatus', []),
   setBackend: (sync, mount) => rp('setBackend', [sync, mount]),
   mount: (hostPath, mountpoint) => rp('mount', [hostPath, mountpoint]),

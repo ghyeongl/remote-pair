@@ -90,8 +90,46 @@ test("preload bridges the method arg and hostSmbStatus to window.remotepair", ()
   );
   assert.match(
     preload,
+    /removeMapping: \(clientPath\) => rp\('removeMapping', \[clientPath\]\)/,
+    "preload removeMapping must expose xpair map rm for persisted row edits/removals",
+  );
+  assert.match(
+    preload,
+    /resolveHostPath: \(target, hostPath\) => rp\('resolveHostPath', \[target, hostPath\]\)/,
+    "preload resolveHostPath must expose SSH host-path expansion before saving mappings",
+  );
+  assert.match(
+    preload,
     /hostSmbStatus: \(\) => rp\('hostSmbStatus', \[\]\)/,
     "preload must expose hostSmbStatus (else Gate 1's call is undefined at runtime)",
+  );
+});
+
+test("persisted mapping rows keep their saved client path and can be removed over the bridge", () => {
+  assert.match(
+    bridge,
+    /async removeMapping\(clientPath\)[\s\S]*cli\(\["map", "rm", c\]\)/,
+    "bridge removeMapping must run xpair map rm <clientPath>",
+  );
+  assert.match(
+    bridge,
+    /async resolveHostPath\(sshTarget, hostPath\)[\s\S]*run\("ssh", \[\.\.\.sshProbeOpts\(h, 5\), h, remote, "_", p\]\)/,
+    "bridge resolveHostPath must SSH with the shared probe options and pass the host path as a positional arg",
+  );
+  assert.match(
+    stepMappings,
+    /savedClientPath: clientPath/,
+    "parseFolderMaps must remember the persisted client path used by xpair map rm",
+  );
+  assert.match(
+    stepMappings,
+    /window\.remotepair\.removeMapping\(mapping\.savedClientPath\)/,
+    "remove() must delete persisted mappings from the CLI before dropping the row",
+  );
+  assert.match(
+    stepMappings,
+    /window\.remotepair\.resolveHostPath\(target, hostPath\)/,
+    "persist() must resolve host picker paths over SSH before mount/addMapping",
   );
 });
 

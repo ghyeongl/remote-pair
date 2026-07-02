@@ -36,6 +36,7 @@ export interface PairingStatus {
 declare global {
   interface Window {
     __rp_initialStep?: 'permissions' | 'engine' | 'connect'
+    __rp_mode?: 'runGate' | 'grantOnly'
     xpair: {
       openPermissionPane: (key: 'login' | 'ax' | 'sr' | 'fda' | 'sharing') => Promise<void>
       requestPermission: (key: 'login' | 'ax' | 'sr' | 'fda' | 'sharing') => Promise<void>

@@ -93,6 +93,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ob.show()
         } else {
             startServing()
+            if isHostRole && !PairingManager.shared.hasPairedClient() {
+                // Ledger empty: serve+advertise first so this Connect/Broadcast flow is pairable.
+                let ob = OnboardingWindow(mode: .grantOnly, initialStep: "connect",
+                                          onComplete: { [weak self] in self?.grantWindow = nil })
+                grantWindow = ob
+                ob.show()
+            }
         }
     }
 

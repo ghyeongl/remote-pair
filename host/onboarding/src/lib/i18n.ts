@@ -120,6 +120,7 @@ const EN: Dict = {
   // Host Perm
   "perm.of": "Permission {n} of {total}",
   "perm.granted": "Granted — you can continue",
+  "perm.recommendedContinue": "Recommended — you can continue",
   "perm.openSettings": "Open Settings",
   "perm.waiting": "Waiting for you in Settings…",
   "perm.login.name": "Remote Login (SSH)",
@@ -293,6 +294,7 @@ const KO: Dict = {
 
   "perm.of": "권한 {n} / {total}",
   "perm.granted": "허용됨 — 계속 진행할 수 있습니다",
+  "perm.recommendedContinue": "권장 항목입니다 — 계속 진행할 수 있습니다",
   "perm.openSettings": "설정 열기",
   "perm.waiting": "설정에서 조작을 기다리는 중…",
   "perm.login.name": "원격 로그인 (SSH)",

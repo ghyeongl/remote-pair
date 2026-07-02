@@ -271,7 +271,7 @@ enum XpairAuthorizedKeys {
         guard PairingSecurity.validateClientID(clientID) else { throw PairingSecurityError.invalidClientID }
         let safeName = PairingSecurity.sanitizeCommentValue(name)
         let comment = "xpair:v1 client_id=\(clientID) fp=\(fingerprint) created=\(created) name=\(safeName)"
-        return #"restrict,port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)",command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
+        return #"restrict,pty,port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)",command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
     }
 
     static func install(_ req: VerifiedPairingRequest) throws -> AuthorizedClientRecord {
@@ -1352,7 +1352,7 @@ enum PairingSecuritySelfTest {
                                                                        name: "ok") }
         let line = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
                                                                fingerprint: "SHA256:x", created: ts, name: "ok")
-        assert(line.contains("restrict,port-forwarding"))
+        assert(line.contains("restrict,pty,port-forwarding"))
         assert(line.contains(#"permitopen="127.0.0.1:8890""#))
         assert(line.contains("command=\"\(XpairAuthorizedKeys.gatePath) abc_DEF-123 SHA256:x\""))
         assert(!line.contains("no-port-forwarding"))

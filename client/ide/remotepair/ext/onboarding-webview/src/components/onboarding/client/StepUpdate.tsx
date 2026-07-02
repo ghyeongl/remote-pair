@@ -29,7 +29,8 @@ export function StepUpdate({ host, state, setState, pct, setPct, onBackToDiscove
     setPct(8);
     setState("updating");
     try {
-      const installed = await window.remotepair.installHost({ host: host.address, force: true });
+      const target = host.sshTarget ?? host.address;
+      const installed = await window.remotepair.installHost({ host: target, force: true });
       setPct(65);
       if (!installed.ok) {
         setError(installed.err || t("update.error"));
@@ -38,7 +39,7 @@ export function StepUpdate({ host, state, setState, pct, setPct, onBackToDiscove
         return;
       }
 
-      const status = await window.remotepair.hostAppStatus(host.address);
+      const status = await window.remotepair.hostAppStatus(target);
       setPct(90);
       if (status.compatible) {
         setPct(100);

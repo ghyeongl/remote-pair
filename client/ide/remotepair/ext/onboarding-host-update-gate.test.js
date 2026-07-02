@@ -62,8 +62,9 @@ test("StepUpdate force-installs below-floor hosts, re-probes, and blocks major m
   assert.match(update, /const needsUpdate = !!host\?\.outdated && !host\.majorMismatch;/);
   assert.match(update, /const majorMismatch = !!host\?\.majorMismatch;/);
   assert.match(update, /if \(majorMismatch\) \{[\s\S]*<StepDeadEnd[\s\S]*title=\{t\("update\.tooNew\.title"\)\}[\s\S]*update\.checkClientUpdates[\s\S]*update\.pickAnother/);
-  assert.match(update, /window\.remotepair\.installHost\(\{ host: host\.address, force: true \}\)/);
-  assert.match(update, /const status = await window\.remotepair\.hostAppStatus\(host\.address\)/);
+  assert.match(update, /const target = host\.sshTarget \?\? host\.address/);
+  assert.match(update, /window\.remotepair\.installHost\(\{ host: target, force: true \}\)/);
+  assert.match(update, /const status = await window\.remotepair\.hostAppStatus\(target\)/);
   assert.match(update, /if \(status\.compatible\) \{[\s\S]*setPct\(100\);[\s\S]*setState\("done"\);[\s\S]*return;/);
   assert.match(update, /setError\(status\.err \|\| t\("update\.error"\)\)/);
   assert.doesNotMatch(app, /StepInstalling/);

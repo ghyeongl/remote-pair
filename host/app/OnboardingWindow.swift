@@ -36,6 +36,13 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
     private static let onboardingStepPath = "\(RP_DIR)/onboarding-step.json"
     private static let onboardingStepMax = 10
 
+    private var modeName: String {
+        switch mode {
+        case .runGate: return "runGate"
+        case .grantOnly: return "grantOnly"
+        }
+    }
+
     /// onComplete is invoked on the main thread when the React onboarding signals completion.
     /// `initialStep` deep-links the flow (e.g. "permissions"); nil starts at Welcome.
     init(mode: Mode = .runGate, initialStep: String? = nil, onComplete: @escaping () -> Void) {
@@ -87,6 +94,10 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
                                   injectionTime: .atDocumentStart,
                                   forMainFrameOnly: true)
         controller.addUserScript(script)
+        let modeScript = WKUserScript(source: "window.__rp_mode = '\(modeName)';",
+                                      injectionTime: .atDocumentStart,
+                                      forMainFrameOnly: true)
+        controller.addUserScript(modeScript)
         // Deep-link the React onboarding straight to a specific step (e.g. "permissions" / "connect").
         // Injected atDocumentStart (before the app bundle runs) so App.tsx reads it on first render.
         // nil = start at Welcome (the whole flow from scratch), so inject nothing.

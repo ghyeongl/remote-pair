@@ -4,6 +4,7 @@ const path = require("node:path");
 
 const root = __dirname;
 const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
+const appDelegate = fs.readFileSync(path.join(root, "../app/AppDelegate.swift"), "utf8");
 const stepBroadcast = fs.readFileSync(
   path.join(root, "src/components/onboarding/host/StepBroadcast.tsx"),
   "utf8",
@@ -53,6 +54,14 @@ test("US-004 host Broadcast holds until the backend reports a proven paired stat
   );
   assert.match(stepBroadcast, /setState\("waiting"\)/, "Deny recovery must rebroadcast in-body");
   assert.doesNotMatch(stepBroadcast, /setState\("accepted"\)/, "Accept belongs in the WizardShell footerSlot");
+});
+
+test("launch gate opens Connect when permissions are granted but no client is paired", () => {
+  assert.match(
+    appDelegate,
+    /\} else \{[\s\S]*startServing\(\)[\s\S]*isHostRole && !PairingManager\.shared\.hasPairedClient\(\)[\s\S]*OnboardingWindow\(mode: \.grantOnly, initialStep: "connect"/,
+    "permissions-complete launch with an empty pairing ledger must serve first, then open grant-only Connect",
+  );
 });
 
 console.log(`REDGREEN ${passed} ${failed}`);

@@ -16,6 +16,7 @@ export type Mapping = {
   mode: MappingMode;
   hostPath?: string;
   clientPath?: string;
+  savedClientPath?: string;
   persisted?: boolean;
   persisting?: boolean;
   error?: string;
@@ -61,6 +62,7 @@ export function parseFolderMaps(raw: string, modes?: string): Mapping[] {
         mode: modeOf.get(clientPath) ?? inferMethod(clientPath),
         hostPath,
         clientPath,
+        savedClientPath: clientPath,
         persisted: !!clientPath && !!hostPath,
       };
     });
@@ -103,13 +105,36 @@ const HOST_FS: FsNode = {
 type Props = {
   mappings: Mapping[];
   setMappings: Dispatch<SetStateAction<Mapping[]>>;
+  hostTarget?: string;
 };
 
-export function StepMappings({ mappings, setMappings }: Props) {
+function needsHostResolution(hostPath: string) {
+  return hostPath.startsWith("~") || !hostPath.startsWith("/");
+}
+
+function mappingError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
   const { t } = useT();
   const add = () =>
     setMappings((current) => [...current, { id: crypto.randomUUID(), mode: "mount" }]);
-  const remove = (id: string) => setMappings((current) => current.filter((m) => m.id !== id));
+  const remove = async (id: string) => {
+    const mapping = mappings.find((m) => m.id === id);
+    if (!mapping?.savedClientPath) {
+      setMappings((current) => current.filter((m) => m.id !== id));
+      return;
+    }
+    patchInternal(id, { persisting: true, error: "" });
+    try {
+      const removed = await window.remotepair.removeMapping(mapping.savedClientPath);
+      if (removed.code !== 0) throw new Error(removed.err || removed.out || "mapping remove failed");
+      setMappings((current) => current.filter((m) => m.id !== id));
+    } catch (error) {
+      patchInternal(id, { persisting: false, error: mappingError(error) });
+    }
+  };
   const patch = (id: string, p: Partial<Mapping>) =>
     setMappings((current) =>
       current.map((m) =>
@@ -131,21 +156,47 @@ export function StepMappings({ mappings, setMappings }: Props) {
     }
     patchInternal(mapping.id, { persisting: true, error: "" });
     try {
+      let resolvedHostPath = hostPath;
+      if (needsHostResolution(hostPath)) {
+        const target = hostTarget?.trim();
+        if (!target) {
+          patchInternal(mapping.id, { persisting: false, error: "Select a host first." });
+          return;
+        }
+        const resolved = await window.remotepair.resolveHostPath(target, hostPath);
+        if (!resolved.ok) {
+          patchInternal(mapping.id, {
+            persisting: false,
+            error: `Host folder not found: ${hostPath}`,
+          });
+          return;
+        }
+        resolvedHostPath = resolved.path;
+      }
       let persistedClientPath = clientPath;
       if (mapping.mode === "mount") {
-        const mounted = await window.remotepair.mount(hostPath);
+        const mounted = await window.remotepair.mount(resolvedHostPath);
         if (mounted.code !== 0) throw new Error(mounted.err || mounted.out || "mount failed");
         persistedClientPath =
-          mounted.mountpoint || (await window.remotepair.defaultMountpoint(hostPath));
+          mounted.mountpoint || (await window.remotepair.defaultMountpoint(resolvedHostPath));
+      }
+      if (
+        mapping.savedClientPath &&
+        (!mapping.persisted || mapping.savedClientPath !== persistedClientPath)
+      ) {
+        const removed = await window.remotepair.removeMapping(mapping.savedClientPath);
+        if (removed.code !== 0) throw new Error(removed.err || removed.out || "mapping remove failed");
       }
       const added = await window.remotepair.addMapping(
         persistedClientPath,
-        hostPath,
+        resolvedHostPath,
         mapping.mode,
       );
       if (added.code !== 0) throw new Error(added.err || added.out || "mapping save failed");
       patchInternal(mapping.id, {
         clientPath: persistedClientPath,
+        hostPath: resolvedHostPath,
+        savedClientPath: persistedClientPath,
         persisted: true,
         persisting: false,
         error: "",
@@ -154,7 +205,7 @@ export function StepMappings({ mappings, setMappings }: Props) {
       patchInternal(mapping.id, {
         persisted: false,
         persisting: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: mappingError(error),
       });
     }
   };
@@ -181,7 +232,7 @@ export function StepMappings({ mappings, setMappings }: Props) {
             mapping={m}
             onChange={(p) => patch(m.id, p)}
             onPersist={() => void persist(m)}
-            onRemove={() => remove(m.id)}
+            onRemove={() => void remove(m.id)}
           />
         ))}
 
@@ -221,6 +272,7 @@ function MappingRow({
         <button
           type="button"
           onClick={onRemove}
+          disabled={mapping.persisting}
           className="text-muted-foreground hover:text-destructive"
           aria-label={t("map.remove")}
         >

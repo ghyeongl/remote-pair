@@ -76,6 +76,8 @@ declare global {
       // pipe (NEVER argv/log/disk) and persisted engine-specifically. Re-probe afterwards.
       setHostEngineAuth: (engine: EngineId, apiKey: string) => Promise<{ ok: boolean; err: string }>
       addMapping: (clientPath: string, hostPath: string, method?: "mount" | "sync") => Promise<any>
+      removeMapping: (clientPath: string) => Promise<{ code: number; out: string; err: string }>
+      resolveHostPath: (target: string, hostPath: string) => Promise<{ ok: boolean; path: string; err: string }>
       hostSmbStatus: () => Promise<"on" | "off" | "unknown">
       setBackend: (sync: string, mount?: string) => Promise<any>
       mount: (hostPath: string, mountpoint?: string) => Promise<{ code: number; out: string; err: string; mountpoint: string }>

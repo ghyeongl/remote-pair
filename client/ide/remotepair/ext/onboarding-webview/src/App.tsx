@@ -42,7 +42,8 @@ const S = {
 const START_STEPS: Record<string, number> = {
   welcome: S.WELCOME,
   connect: S.DISCOVER,
-  grant: S.WAIT_PERM,
+  // Client cannot repair host AX/SR; re-discovery surfaces fresh pairing metadata plus the host-onboarding recovery CTA.
+  grant: S.DISCOVER,
   engine: S.DISCOVER,
 };
 
@@ -319,7 +320,11 @@ export default function App() {
             />
           )}
           {w.index === 6 && (
-            <StepMappings mappings={mappings} setMappings={setMappings} />
+            <StepMappings
+              mappings={mappings}
+              setMappings={setMappings}
+              hostTarget={selectedHost?.sshTarget ?? selectedHost?.address}
+            />
           )}
           {w.index === 7 && <StepDone host={selectedHost} mappings={mappings} />}
         </AnimatedStep>

@@ -19,11 +19,11 @@ function test(name, fn) {
   }
 }
 
-test("single permission steps gate Next on the current real probe (US-003)", () => {
+test("single permission steps gate Next only on required real probes (US-003)", () => {
   assert.match(app, /const inPerms = w\.index >= PERM_START && w\.index <= PERM_END/);
   assert.match(app, /const currentPermKey = inPerms \? PERM_ORDER\[w\.index - PERM_START\] : null/);
   assert.match(app, /currentPermKey !== null && perm\[currentPermKey\] === "granted"/);
-  assert.match(app, /inPerms && !currentPermGranted/);
+  assert.match(app, /inPerms && isRequiredPerm\(currentPermKey\) && !currentPermGranted/);
   assert.match(app, /await window\.xpair\.getStatus\(\)/);
 });
 
@@ -51,6 +51,17 @@ test("cross-restart resume uses onboarding-step sidecar, not status/version SSoT
   assert.match(onboardingWindow, /case "setOnboardingStep":[\s\S]*writeOnboardingStep\(n\)/);
   assert.doesNotMatch(onboardingWindow, /onboardingStepPath[\s\S]{0,300}STATUS_FILE/);
   assert.doesNotMatch(onboardingWindow, /onboardingStepPath[\s\S]{0,300}APP_VERSION/);
+});
+
+test("grantOnly Set up starts at Welcome while runGate can resume persisted step", () => {
+  assert.match(globalTypes, /__rp_mode\?: 'runGate' \| 'grantOnly'/);
+  assert.match(onboardingWindow, /window\.__rp_mode = '\\\(modeName\)'/);
+  assert.match(app, /const resumeAllowed = injectedMode\(\) === "runGate"/);
+  assert.match(
+    app,
+    /const requested = requestedDeepLink > 0 \? requestedDeepLink : \(resumeAllowed \? persisted : 0\)/,
+    "grantOnly without a deep link must ignore persisted DONE_IDX and open Welcome",
+  );
 });
 
 console.log(failed ? `\n${failed} test(s) failed` : "\nall host onboarding gate tests passed");

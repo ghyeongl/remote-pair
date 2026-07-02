@@ -1461,6 +1461,29 @@ const bridge = {
     return { exists: false, err: s.err, state: s.state, action: s.action };
   },
 
+  // Mappings — resolve a host folder over SSH before saving it. The webview's sample host
+  // browser emits "~" paths, but FOLDER_MAPS must store an absolute path that exists on the host.
+  async resolveHostPath(sshTarget, hostPath) {
+    const h = String(sshTarget || "").trim();
+    const p = String(hostPath || "").trim();
+    if (!h) return { ok: false, path: "", err: "no host" };
+    if (!p) return { ok: false, path: "", err: "no path" };
+    if (!validSshTarget(h)) {
+      return { ok: false, path: "", err: invalidSshTarget(h), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    }
+    const remote =
+      'p=$1; case "$p" in "~") p=$HOME;; "~/"*) p=$HOME/${p#"~/"};; esac; cd "$p" 2>/dev/null && pwd';
+    const r = await run("ssh", [...sshProbeOpts(h, 5), h, remote, "_", p]);
+    if (r.code === 0 && String(r.out || "").trim()) {
+      return { ok: true, path: String(r.out || "").trim().split("\n").pop(), err: "" };
+    }
+    if (r.code === 255 || r.err) {
+      const s = sshResult(r, "could not resolve host folder");
+      return { ok: false, path: "", err: s.err, state: s.state, action: s.action };
+    }
+    return { ok: false, path: "", err: "folder not found" };
+  },
+
   // Mappings — compute the default mountpoint the same way xpair-mount does, so the UI
   // can pre-fill the field before the user clicks Mount.
   //
@@ -1509,6 +1532,12 @@ const bridge = {
     const args = ["map", "add", clientPath, hostPath];
     if (method === "mount" || method === "sync") args.push(method);
     return cli(args);
+  },
+
+  async removeMapping(clientPath) {
+    const c = String(clientPath || "").trim();
+    if (!c) return { code: -1, out: "", err: "removeMapping requires a client path" };
+    return cli(["map", "rm", c]);
   },
 
   // Host File Sharing (SMB) readiness probe → "on" | "off" | "unknown" (best-effort over SSH).

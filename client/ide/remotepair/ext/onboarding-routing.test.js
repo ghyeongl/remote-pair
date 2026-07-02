@@ -27,7 +27,7 @@ function test(name, fn) {
 test("resume vocabulary maps to the new 8-step client flow", () => {
   assert.match(app, /const TOTAL = 8;/);
   assert.match(app, /WELCOME: 0,[\s\S]*CONSENT_CRASH: 1,[\s\S]*CONSENT_ANALYTICS: 2,[\s\S]*DISCOVER: 3,[\s\S]*UPDATE: 4,[\s\S]*WAIT_PERM: 5,[\s\S]*MAPPINGS: 6,[\s\S]*DONE: 7,/);
-  assert.match(app, /welcome: S\.WELCOME,[\s\S]*connect: S\.DISCOVER,[\s\S]*grant: S\.WAIT_PERM,[\s\S]*engine: S\.DISCOVER,/);
+  assert.match(app, /welcome: S\.WELCOME,[\s\S]*connect: S\.DISCOVER,[\s\S]*grant: S\.DISCOVER,[\s\S]*engine: S\.DISCOVER,/);
   assert.match(app, /new URLSearchParams\(window\.location\.search\)\.get\("startStep"\)/);
 });
 

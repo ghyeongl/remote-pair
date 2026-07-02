@@ -83,8 +83,9 @@ test("US-004 SSH proof requires observed fingerprint and has no filesystem marke
 	    /static var defaultGatePath: String \{ "\\\(home\)\/\.xpair\/host\/bin\/xpair-ssh-gate" \}/,
 	    "production gate path must live under the user-writable Xpair host bin dir",
 	  );
-	  assert.match(manager, /permitopen="127\.0\.0\.1:\\#\(remoteDesktopSignalPort\)"/);
-	  assert.match(manager, /static let remoteDesktopSignalPort = 8890/);
+		  assert.match(manager, /permitopen="127\.0\.0\.1:\\#\(remoteDesktopSignalPort\)"/);
+		  assert.match(manager, /restrict,pty,port-forwarding/);
+		  assert.match(manager, /static let remoteDesktopSignalPort = 8890/);
 	  assert.match(manager, /assert\(!line\.contains\("no-port-forwarding"\)\)/);
 	  assert.match(
 	    manager,

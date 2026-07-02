@@ -8,6 +8,8 @@ import { StepConsent } from "@/components/onboarding/host/StepConsent";
 import {
   StepSinglePerm,
   PERM_ORDER,
+  REQUIRED_PERMS,
+  isRequiredPerm,
   type PermKey,
   type PermState,
   type PermStatus,
@@ -49,19 +51,25 @@ function deepLinkIndex() {
   return 0;
 }
 
+function injectedMode() {
+  if (typeof window === "undefined") return "runGate";
+  return (window as unknown as { __rp_mode?: "runGate" | "grantOnly" }).__rp_mode ?? "runGate";
+}
+
 function clampStep(n: number) {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(TOTAL - 1, Math.trunc(n)));
 }
 
 function firstUnmetPermIndex(state: PermState) {
-  const i = PERM_ORDER.findIndex((k) => state[k] !== "granted");
+  const i = REQUIRED_PERMS.findIndex((k) => state[k] !== "granted");
   return i === -1 ? null : PERM_START + i;
 }
 
 export default function App() {
   const { t } = useT();
   const requestedDeepLink = deepLinkIndex();
+  const resumeAllowed = injectedMode() === "runGate";
   const w = useWizard(TOTAL, requestedDeepLink);
   const [hydrated, setHydrated] = useState(false);
   const [crashReports, setCrashReports] = useState(true);
@@ -80,7 +88,7 @@ export default function App() {
     currentPermKey !== null && perm[currentPermKey] === "granted";
 
   const nextDisabled =
-    (inPerms && !currentPermGranted) ||
+    (inPerms && isRequiredPerm(currentPermKey) && !currentPermGranted) ||
     (w.index === ENGINE_IDX && engines.size === 0);
 
   const statusToPerm = useCallback((granted: boolean, current: PermStatus): PermStatus => {
@@ -169,7 +177,7 @@ export default function App() {
         persisted = 0;
       }
 
-      const requested = requestedDeepLink > 0 ? requestedDeepLink : persisted;
+      const requested = requestedDeepLink > 0 ? requestedDeepLink : (resumeAllowed ? persisted : 0);
       let target = requested;
 
       if (requested >= PERM_START) {
