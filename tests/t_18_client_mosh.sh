@@ -23,17 +23,20 @@ it "build-mosh/emits-client"
 assert_contains "$(cat "$MOSH_BUILD")" "mosh-client" "build-mosh.sh emits mosh-client"
 
 # ── hardening guards (Codex review) ──
-it "install/prefers-existing-mosh"
-# command -v mosh is checked BEFORE installing the bundle → never overwrites/rm a user-owned mosh
-# (e.g. a Homebrew symlink). No unconditional symlink removal.
-assert_contains "$(cat "$INSTALL")" 'command -v mosh >/dev/null 2>&1; then' "install.sh respects an existing mosh before installing the bundle"
+it "install/prefers-complete-existing-mosh"
+# Defer to an existing mosh only when BOTH the wrapper and its mosh-client helper are on PATH
+# (a wrapper without its helper is broken → install the complete bundle). Never rm a user symlink.
+assert_contains "$(cat "$INSTALL")" 'command -v mosh >/dev/null 2>&1 && command -v mosh-client >/dev/null 2>&1' "install.sh defers only to a COMPLETE existing mosh (wrapper + mosh-client)"
 assert_absent  "$(cat "$INSTALL")" 'rm -f "$_l"' "install.sh does not rm a user's mosh symlink"
 
-it "attach/conditional-client-when-present"
-assert_contains "$(cat "$XPAIR")" '[ -x "$_mc" ] && _clientarg=(--client=' "attach pins --client only when the bundled mosh-client exists"
+it "install/skips-user-symlink"
+assert_contains "$(cat "$INSTALL")" 'if [ -L "$_d" ]; then' "install.sh skips a user-owned symlink destination instead of cp-following it"
+
+it "attach/pins-client-only-for-our-mosh"
+assert_contains "$(cat "$XPAIR")" '[ "$(command -v mosh)" = "$LOCAL_BIN/mosh" ] && [ -x "$LOCAL_BIN/mosh-client" ]' "attach pins --client only when the mosh being invoked is our own \$LOCAL_BIN/mosh"
 
 it "attach/client-uses-local-bin"
-assert_contains "$(cat "$XPAIR")" '${MOSH_CLIENT:-$LOCAL_BIN/mosh-client}' "attach probes LOCAL_BIN (matches where install.sh writes it), not a hardcoded ~/.local/bin"
+assert_contains "$(cat "$XPAIR")" '_clientarg=(--client="$LOCAL_BIN/mosh-client")' "attach probes LOCAL_BIN (matches where install.sh writes it), not a hardcoded ~/.local/bin"
 
 it "build-mosh/validates-before-install"
 # the system-only check runs over the BUILD outputs ($SRV/$CLI) before cp to ~/.local/bin

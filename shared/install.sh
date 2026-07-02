@@ -97,16 +97,22 @@ mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
 # so a client install is fully brew-free. A dev checkout (no client build → no bundle) falls back to any
 # system mosh on PATH, else to `ssh -t` at attach time. HOST: needs only mosh-server, shipped INSIDE
 # XpairHost.app and symlinked to ~/.local/bin by the app's self-installer — so a host install is brew-free too.
-if command -v mosh >/dev/null 2>&1; then
-  # A mosh is already on PATH (system/Homebrew, or ours from a prior install). RESPECT it — never
-  # overwrite or rm a user-owned binary or symlink (e.g. a Homebrew shim), which would corrupt their
-  # install. Still brew-free: this branch invokes no brew. A brew-less client has no mosh here and
-  # falls through to install the bundled static one below.
+if command -v mosh >/dev/null 2>&1 && command -v mosh-client >/dev/null 2>&1; then
+  # A COMPLETE mosh (the wrapper AND its mosh-client helper) is already on PATH. RESPECT it — never
+  # overwrite/rm a user-owned binary or symlink (would corrupt e.g. a Homebrew install). Brew-free:
+  # this branch invokes no brew. A mosh wrapper WITHOUT its mosh-client is broken, so we fall through
+  # and install the complete bundled pair. A brew-less client has neither and also falls through.
   say "mosh present ($(command -v mosh)) — keeping it"
 elif is_client && [ -x "$CLIENT_DIR/bin/mosh" ] && [ -x "$CLIENT_DIR/bin/mosh-client" ]; then
   say "mosh (bundled static) → $LOCAL_BIN (brew-free client attach)"
-  install_file "$CLIENT_DIR/bin/mosh"        "$LOCAL_BIN/mosh"        755
-  install_file "$CLIENT_DIR/bin/mosh-client" "$LOCAL_BIN/mosh-client" 755
+  # Never clobber a user-owned SYMLINK at $LOCAL_BIN (e.g. a Homebrew shim that isn't on PATH):
+  # install_file's `cp` would follow it and overwrite the link target. Skip symlinked destinations;
+  # install our regular-file shim only where there's no user symlink.
+  for _p in "mosh:$CLIENT_DIR/bin/mosh" "mosh-client:$CLIENT_DIR/bin/mosh-client"; do
+    _n="${_p%%:*}"; _s="${_p#*:}"; _d="$LOCAL_BIN/$_n"
+    if [ -L "$_d" ]; then warn "$_d is a user-owned symlink — keeping it, not installing bundled $_n"
+    else install_file "$_s" "$_d" 755; fi
+  done
 elif is_client; then
   warn "no bundled mosh in this build and none on PATH — attach falls back to ssh (dev checkout)"
 else
