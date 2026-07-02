@@ -97,17 +97,16 @@ mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
 # so a client install is fully brew-free. A dev checkout (no client build → no bundle) falls back to any
 # system mosh on PATH, else to `ssh -t` at attach time. HOST: needs only mosh-server, shipped INSIDE
 # XpairHost.app and symlinked to ~/.local/bin by the app's self-installer — so a host install is brew-free too.
-if is_client && [ -x "$CLIENT_DIR/bin/mosh" ] && [ -x "$CLIENT_DIR/bin/mosh-client" ]; then
+if command -v mosh >/dev/null 2>&1; then
+  # A mosh is already on PATH (system/Homebrew, or ours from a prior install). RESPECT it — never
+  # overwrite or rm a user-owned binary or symlink (e.g. a Homebrew shim), which would corrupt their
+  # install. Still brew-free: this branch invokes no brew. A brew-less client has no mosh here and
+  # falls through to install the bundled static one below.
+  say "mosh present ($(command -v mosh)) — keeping it"
+elif is_client && [ -x "$CLIENT_DIR/bin/mosh" ] && [ -x "$CLIENT_DIR/bin/mosh-client" ]; then
   say "mosh (bundled static) → $LOCAL_BIN (brew-free client attach)"
-  # If mosh/mosh-client is a SYMLINK (e.g. into a Homebrew install), remove the LINK first — otherwise
-  # install_file's `cp "$src" "$dst"` follows the link and overwrites the user's real mosh binary
-  # (corrupting their Homebrew install). Removing a symlink never touches its target; we replace only
-  # Xpair's own shim. A regular-file dest is left to install_file's backup-and-overwrite.
-  for _l in "$LOCAL_BIN/mosh" "$LOCAL_BIN/mosh-client"; do [ -L "$_l" ] && rm -f "$_l"; done
   install_file "$CLIENT_DIR/bin/mosh"        "$LOCAL_BIN/mosh"        755
   install_file "$CLIENT_DIR/bin/mosh-client" "$LOCAL_BIN/mosh-client" 755
-elif command -v mosh >/dev/null 2>&1; then
-  say "mosh present ($(command -v mosh))"
 elif is_client; then
   warn "no bundled mosh in this build and none on PATH — attach falls back to ssh (dev checkout)"
 else

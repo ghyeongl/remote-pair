@@ -84,6 +84,24 @@ WRAP="$BUILD/mosh-$MOSH_VER/scripts/mosh"              # perl wrapper (execs mos
 [ -x "$CLI" ]  || { echo "✗ mosh-client not built ($CLI)"; exit 1; }
 [ -f "$WRAP" ] || { echo "✗ mosh wrapper not built ($WRAP)"; exit 1; }
 
+# ── 3. self-containment assertion — VALIDATE BEFORE INSTALLING ──
+# Check the freshly-BUILT Mach-O binaries ($SRV/$CLI in the build dir) BEFORE publishing to ~/.local/bin,
+# so a non-self-contained STATIC build never leaves a bad helper that client/ide/build.sh would then reuse.
+# The `mosh` wrapper is a perl script → no dylib deps. "self-contained" = links ONLY system dylibs
+# (/usr/lib, /System) — reject ANY non-system prefix, not just /opt/homebrew (arm64 brew); /usr/local
+# (Intel brew) and others would also break brew-less Macs.
+echo "=== dynamic dependency check (system-only dylibs = self-contained) ==="
+_brewfree=1
+for _b in "$SRV" "$CLI"; do
+  _ns="$(otool -L "$_b" | tail -n +2 | awk '{print $1}' | grep -vE '^/(usr/lib|System)/' || true)"
+  if [ -n "$_ns" ]; then
+    echo "⚠ non-system dylib links in $_b:"; printf '  %s\n' "$_ns"; _brewfree=0
+  fi
+done
+if [ "$_brewfree" != 1 ] && [ "$STATIC" = 1 ]; then
+  echo "✗ STATIC=1 must be self-contained — refusing to install a non-self-contained helper"; exit 1
+fi
+
 BINDIR="$(dirname "$DEST")"                            # ~/.local/bin
 mkdir -p "$BINDIR"
 cp "$SRV"  "$BINDIR/mosh-server" && chmod 755 "$BINDIR/mosh-server"
@@ -91,21 +109,4 @@ cp "$CLI"  "$BINDIR/mosh-client" && chmod 755 "$BINDIR/mosh-client"
 cp "$WRAP" "$BINDIR/mosh"        && chmod 755 "$BINDIR/mosh"
 echo "installed: $BINDIR/mosh-server ($("$BINDIR/mosh-server" --version 2>&1 | head -1 || echo '?'))"
 echo "installed: $BINDIR/mosh-client + $BINDIR/mosh (perl wrapper)"
-
-# ── 3. self-containment assertion (no brew dylib = embeddable) ──
-# Check both Mach-O binaries (server + client). The `mosh` wrapper is a perl script → no dylib deps.
-# "self-contained" = links ONLY system dylibs (/usr/lib, /System) — reject ANY non-system prefix,
-# not just /opt/homebrew (arm64 brew): /usr/local (Intel brew) and others would also break brew-less Macs.
-echo "=== dynamic dependency check (system-only dylibs = self-contained) ==="
-_brewfree=1
-for _b in "$BINDIR/mosh-server" "$BINDIR/mosh-client"; do
-  _ns="$(otool -L "$_b" | tail -n +2 | awk '{print $1}' | grep -vE '^/(usr/lib|System)/' || true)"
-  if [ -n "$_ns" ]; then
-    echo "⚠ non-system dylib links remain in $_b:"; printf '  %s\n' "$_ns"; _brewfree=0
-  fi
-done
-if [ "$_brewfree" = 1 ]; then
-  echo "✓ 0 brew dylib dependencies — self-contained (ready to embed in Xpair apps)"
-elif [ "$STATIC" = 1 ]; then
-  echo "✗ STATIC=1 must be self-contained — failing"; exit 1
-fi
+[ "$_brewfree" = 1 ] && echo "✓ 0 non-system dylib dependencies — self-contained (ready to embed in Xpair apps)"

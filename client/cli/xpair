@@ -869,7 +869,7 @@ cmd_attach() {
     # Prefer our bundled static mosh-client, but only pin --client when it actually exists.
     # A system-mosh install (the `command -v mosh` path) has no ~/.local/bin/mosh-client; pinning a
     # missing one makes mosh exec a nonexistent helper instead of its normal mosh-client PATH lookup.
-    local _mc="${MOSH_CLIENT:-$HOME/.local/bin/mosh-client}" _clientarg=()
+    local _mc="${MOSH_CLIENT:-$LOCAL_BIN/mosh-client}" _clientarg=()
     [ -x "$_mc" ] && _clientarg=(--client="$_mc")
     if mosh ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
       trap - HUP TERM
