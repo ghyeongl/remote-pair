@@ -109,6 +109,7 @@ final class CaptureEngine {
             lastPixelBuffer = nil
             firstFrameSubmitted = false
             forceKeyframeFlag = false
+            bitrateOverridden = false
         }
         startKeyframeTimer()
 
