@@ -6,8 +6,9 @@
 #   client  Machine you sit at. Service "Launch Xpair" + launcher + xpair CLI. (No app/permissions/build needed.)
 #   both    Both roles on one machine (default).
 #
-# All runtime state lives under ~/.xpair/host (self-contained). ~/.claude only receives the
-# Claude harness (approve skill) — Xpair behavior does not depend on ~/.claude being synced.
+# Host runtime stays in ~/.xpair/host; client runtime lives in ~/.xpair/client.
+# ~/.claude only receives the Claude harness (approve skill) — Xpair behavior does not
+# depend on ~/.claude being synced.
 #
 # Sync is OFF by default (opt-in). ~/.claude git backbone is set up only with --with-sync or SYNC_URL set.
 # Every action is recorded in the manifest so uninstall.sh can precisely reverse it.
@@ -35,12 +36,29 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown arg: $1" >&2; exit 2 ;;
 esac; done
 case "$ROLE" in host|client|both) : ;; *) echo "invalid --role: $ROLE (host|client|both)" >&2; exit 2 ;; esac
-MANIFEST="$RP_DIR/.manifest-$ROLE"
+HOST_MANIFEST="$RP_HOST_DIR/.manifest-host"
+CLIENT_MANIFEST="$RP_CLIENT_DIR/.manifest-client"
 
 say()  { printf '\033[1;36m▸ %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m⚠ %s\033[0m\n' "$*" >&2; }
 is_host()   { [ "$ROLE" = host ] || [ "$ROLE" = both ]; }
 is_client() { [ "$ROLE" = client ] || [ "$ROLE" = both ]; }
+use_host_manifest() { MANIFEST="$HOST_MANIFEST"; BACKUP_DIR="$RP_HOST_DIR/backups"; }
+use_client_manifest() { MANIFEST="$CLIENT_MANIFEST"; BACKUP_DIR="$RP_CLIENT_DIR/backups"; }
+use_shared_manifest() { if is_client; then use_client_manifest; else use_host_manifest; fi; }
+
+manifest_init_used() {
+  if is_host; then use_host_manifest; manifest_init; fi
+  if is_client; then use_client_manifest; manifest_init; fi
+}
+
+revert_manifest_if_present() {
+  local m="$1"
+  [ -f "$m" ] || return 0
+  say "Existing install detected — reverting $(basename "$m") before reinstall"
+  MANIFEST="$m"; manifest_revert >/dev/null 2>&1 || true
+  rm -f "$m"
+}
 
 _write_env() {
   local f="$1"; shift
@@ -50,13 +68,25 @@ _write_env() {
   } > "$f"
 }
 write_config() {
-  mk_dir "$RP_DIR"; chmod 700 "$RP_DIR"
-  _write_env "$COMMON_ENV" "${COMMON_KEYS[@]}"
-  if is_host;   then _write_env "$HOST_ENV"   "${HOST_KEYS[@]}"; fi
-  if is_client; then _write_env "$CLIENT_ENV" "${CLIENT_KEYS[@]}"; fi
-  # role marker — read as the SSOT when the app Installer refuses host self-install on a client machine.
-  [ -e "$RP_DIR/role" ] || record FILE "$RP_DIR/role"
-  printf '%s\n' "$ROLE" > "$RP_DIR/role"
+  if is_host; then
+    use_host_manifest; mk_dir "$RP_HOST_DIR"; chmod 700 "$RP_HOST_DIR"
+  fi
+  if is_client; then
+    use_client_manifest; mk_dir "$RP_CLIENT_DIR"; chmod 700 "$RP_CLIENT_DIR"
+  fi
+  if is_host; then
+    use_shared_manifest; _write_env "$HOST_COMMON_ENV" "${COMMON_KEYS[@]}"
+    use_host_manifest; _write_env "$HOST_ENV" "${HOST_KEYS[@]}"
+    # role marker — Swift reads ~/.xpair/host/role on host/both machines.
+    use_shared_manifest; [ -e "$RP_HOST_DIR/role" ] || record FILE "$RP_HOST_DIR/role"
+    printf '%s\n' "$ROLE" > "$RP_HOST_DIR/role"
+  fi
+  if is_client; then
+    use_shared_manifest; _write_env "$CLIENT_COMMON_ENV" "${COMMON_KEYS[@]}"
+    use_client_manifest; _write_env "$CLIENT_ENV" "${CLIENT_KEYS[@]}"
+    use_shared_manifest; [ -e "$RP_CLIENT_DIR/role" ] || record FILE "$RP_CLIENT_DIR/role"
+    printf '%s\n' "$ROLE" > "$RP_CLIENT_DIR/role"
+  fi
 }
 
 # ── 0. Input ──
@@ -66,29 +96,47 @@ if is_client && [ -z "${REMOTE_HOST:-}" ] && [ -t 0 ] && [ "${RP_YES:-0}" != 1 ]
 fi
 [ -n "${REMOTE_HOST:-}" ] && say "Remote host = $REMOTE_HOST" || say "REMOTE_HOST not set (local-only mode)"
 
+migrate_layout || warn "layout migration skipped some steps; continuing"
+
 # ── Revert existing install before re-installing (idempotent) ──
 # notify.conf is a config file that may hold user edits (ENABLED_TYPES). Since we recorded it as
 # FILE on first install, a revert would delete it and reinstall would reset to defaults → user edits lost.
 # Stash it just before revert and restore it right after, so the "create only if absent" guard below sees the preserved copy.
 _RP_NOTIFY_STASH=""
-if [ -f "$MANIFEST" ]; then
-  say "Existing install detected — reverting before reinstall"
-  if [ -f "$RP_DIR/notify.conf" ]; then _RP_NOTIFY_STASH="$(mktemp)" && cp -p "$RP_DIR/notify.conf" "$_RP_NOTIFY_STASH"; fi
-  manifest_revert >/dev/null 2>&1 || true
-  if [ -n "$_RP_NOTIFY_STASH" ] && [ ! -e "$RP_DIR/notify.conf" ]; then
-    mkdir -p "$RP_DIR" && cp -p "$_RP_NOTIFY_STASH" "$RP_DIR/notify.conf"
-  fi
-  [ -n "$_RP_NOTIFY_STASH" ] && rm -f "$_RP_NOTIFY_STASH"
+if is_host && [ -f "$RP_HOST_DIR/notify.conf" ]; then
+  _RP_NOTIFY_STASH="$(mktemp)" && cp -p "$RP_HOST_DIR/notify.conf" "$_RP_NOTIFY_STASH"
 fi
-manifest_init
+if is_host; then
+  revert_manifest_if_present "$HOST_MANIFEST"
+fi
+if is_client; then
+  revert_manifest_if_present "$CLIENT_MANIFEST"
+fi
+if is_host && [ -f "$RP_HOST_DIR/.manifest-both" ]; then
+  revert_manifest_if_present "$RP_HOST_DIR/.manifest-both"
+fi
+if is_client && [ -f "$RP_CLIENT_DIR/.manifest-both" ]; then
+  revert_manifest_if_present "$RP_CLIENT_DIR/.manifest-both"
+fi
+if [ -n "$_RP_NOTIFY_STASH" ] && [ ! -e "$RP_HOST_DIR/notify.conf" ]; then
+  mkdir -p "$RP_HOST_DIR" && cp -p "$_RP_NOTIFY_STASH" "$RP_HOST_DIR/notify.conf"
+fi
+[ -n "$_RP_NOTIFY_STASH" ] && rm -f "$_RP_NOTIFY_STASH"
+manifest_init_used
 write_config
+use_shared_manifest
 record NOTE "installed role=$ROLE at $(date '+%F %T') on $(hostname -s)"
 
 # ── Common: umbrella CLI → PATH + log directory ──
+use_shared_manifest
 say "xpair CLI → $LOCAL_BIN"
 install_file "$CLIENT_DIR/xpair" "$LOCAL_BIN/xpair" 755
 case ":$PATH:" in *":$LOCAL_BIN:"*) : ;; *) warn "$LOCAL_BIN is not in PATH — add it to your shell rc" ;; esac
-mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
+if is_client; then
+  mk_dir "$CLIENT_LOG_DIR"; chmod 700 "$CLIENT_LOG_DIR"
+else
+  mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
+fi
 
 # ── Common: ensure mosh (resilient UDP attach; ssh fallback if absent) ──
 # CLIENT: ship a self-contained STATIC mosh + mosh-client inside Xpair.app (built against protobuf
@@ -123,6 +171,8 @@ fi
 
 # ── HOST: app + approve (skill/rules) + watchdog + LaunchAgent ──
 if is_host; then
+  use_host_manifest
+  mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
   say "[host] approve rules → $RULES_FILE"
   install_file "$HOST_DIR/rules.txt" "$RULES_FILE"
   if [ -d "$HOST_DIR/skills" ]; then
@@ -251,11 +301,12 @@ fi
 
 # ── CLIENT: launcher + Service "Launch Xpair" ──
 if is_client; then
+  use_client_manifest
   say "[client] launcher + Service"
-  install -d "$RP_DIR/bin" 2>/dev/null || mkdir -p "$RP_DIR/bin"
-  [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_DIR/bin/hangul-romanize" 755
-  say "[client] shared logger → $RP_DIR/bin/logging.sh"
-  install_file "$HERE/logging.sh" "$RP_DIR/bin/logging.sh" 644
+  install -d "$RP_CLIENT_DIR/bin" 2>/dev/null || mkdir -p "$RP_CLIENT_DIR/bin"
+  [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize" 755
+  say "[client] shared logger → $RP_CLIENT_DIR/bin/logging.sh"
+  install_file "$HERE/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" 644
   install_file "$CLIENT_DIR/xpair-launch" "$LAUNCHER" 755
 
   # ── Web-tab launchers: editor (M4 code-server) + desktop (M5 Screen Sharing). manifest-recorded → reversible. ──

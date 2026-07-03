@@ -6,8 +6,8 @@
 # empty state with this script, then launch the app, which will behave exactly as a clean install.
 #
 # What it does (client-side only — never touches the host):
-#   1. Unmounts any Xpair mounts under ~/.xpair/host/mounts and removes the leftover dirs.
-#   2. Clears the onboarding-produced keys in ~/.xpair/host/client.env (REMOTE_HOST, FOLDER_MAPS,
+#   1. Unmounts any Xpair mounts under ~/.xpair/client/mounts and removes the leftover dirs.
+#   2. Clears the onboarding-produced keys in ~/.xpair/client/client.env (REMOTE_HOST, FOLDER_MAPS,
 #      SYNC_BACKEND, MOUNT_BACKEND) while preserving install-level keys (LAUNCHER, TERMINAL_APP).
 #   3. Leaves the SSH key (~/.ssh/id_ed25519) in place by default — onboarding reuses it. Pass
 #      --keys to also remove it for a truly bare state.
@@ -15,7 +15,7 @@
 # Usage: reset-onboarding.sh [-y|--yes] [--keys]
 set -euo pipefail
 
-RP_DIR="$HOME/.xpair/host"
+RP_DIR="$HOME/.xpair/client"
 CLIENT_ENV="$RP_DIR/client.env"
 MOUNTS_ROOT="$RP_DIR/mounts"
 SSH_KEY="$HOME/.ssh/id_ed25519"

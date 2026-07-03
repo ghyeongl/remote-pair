@@ -20,6 +20,7 @@ YES=0
 DRY_RUN=0
 FORCE=0
 APP_NAME="XpairHost"
+LEGACY_APP_NAME="RemotePairHost"
 
 usage() { awk 'NR == 1 { next } /^set -euo pipefail$/ { exit } { print }' "$0"; }
 
@@ -212,22 +213,24 @@ APP_PATH=""
 VER=""
 PROTECTED_APP_PATH=""
 PROTECTED_VER=""
-for p in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"; do
-  [ -d "$p" ] || continue
-  v="$(app_version "$p")"
-  [ -n "$v" ] || continue
-  if [ -z "$VER" ]; then
-    APP_PATH="$p"
-    VER="$v"
-  fi
-  case "$v" in
-    0.4*)
-      if [ -z "$PROTECTED_VER" ]; then
-        PROTECTED_APP_PATH="$p"
-        PROTECTED_VER="$v"
-      fi
-      ;;
-  esac
+for app_name in "$APP_NAME" "$LEGACY_APP_NAME"; do
+  for p in "/Applications/$app_name.app" "$HOME/Applications/$app_name.app"; do
+    [ -d "$p" ] || continue
+    v="$(app_version "$p")"
+    [ -n "$v" ] || continue
+    if [ -z "$VER" ]; then
+      APP_PATH="$p"
+      VER="$v"
+    fi
+    case "$v" in
+      0.4*)
+        if [ -z "$PROTECTED_VER" ]; then
+          PROTECTED_APP_PATH="$p"
+          PROTECTED_VER="$v"
+        fi
+        ;;
+    esac
+  done
 done
 
 if [ -z "$VER" ]; then
@@ -275,13 +278,13 @@ done
 UNINSTALLER="$(find_shared_uninstaller || true)"
 if [ -n "$UNINSTALLER" ]; then
   say "Reverting manifest-recorded install actions"
-  run bash "$UNINSTALLER"
+  run bash "$UNINSTALLER" --role host
 else
   # No shared reverter on disk — replay every manifest we have inline (best-effort). The
   # role installer writes .manifest-host; the self-installer writes .install-manifest. The
   # shared uninstaller globs both, so we must too, or rm -rf ~/.xpair drops the only record.
   shopt -s nullglob
-  inline_mans=("$HOME"/.xpair/host/.manifest-* "$HOME/.xpair/host/.install-manifest")
+  inline_mans=("$HOME"/.xpair/host/.manifest-host "$HOME/.xpair/host/.install-manifest")
   shopt -u nullglob
   if [ "${#inline_mans[@]}" -gt 0 ]; then
     say "No shared manifest reverter found; using inline manifest revert (${#inline_mans[@]} manifest(s))."
@@ -298,7 +301,7 @@ run_quiet pkill -f XpairHost
 run_quiet pkill -f tmux-aqua
 
 say "Removing xpair state"
-run rm -rf "$HOME/.xpair"
+run rm -rf "$HOME/.xpair/host"
 
 say "Removing installed CLIs"
 for p in \
@@ -320,5 +323,7 @@ run_quiet brew uninstall --cask --force xpair-host
 
 remove_app "/Applications/$APP_NAME.app"
 remove_app "$HOME/Applications/$APP_NAME.app"
+remove_app "/Applications/$LEGACY_APP_NAME.app"
+remove_app "$HOME/Applications/$LEGACY_APP_NAME.app"
 
 say 'host wiped — re-run `xpair install-host` (or onboarding) to reinstall.'

@@ -121,16 +121,26 @@ remove_client_app() {
 
 confirm "Wipe xpair client state, binaries, Quick Action, and cask from this Mac?"
 
+legacy_client_only=0
+if [ ! -d "$HOME/.xpair/client" ] && { [ -e "$HOME/.xpair/host/client.env" ] || [ -e "$HOME/.xpair/host/.manifest-client" ]; } \
+  && [ ! -e "$HOME/.xpair/host/host.env" ] && [ ! -e "$HOME/.xpair/host/.manifest-host" ]; then
+  legacy_client_only=1
+fi
+
 UNINSTALLER="$(find_shared_uninstaller || true)"
 if [ -n "$UNINSTALLER" ]; then
   say "Reverting manifest-recorded install actions"
-  run bash "$UNINSTALLER"
+  run bash "$UNINSTALLER" --role client
 else
   say "No shared manifest reverter found; continuing with known paths."
 fi
 
 say "Removing xpair state"
-run rm -rf "$HOME/.xpair"
+run rm -rf "$HOME/.xpair/client" "$HOME/.xpair/ide" "$HOME/.xpair/ide-server"
+if [ "$legacy_client_only" = 1 ]; then
+  say "Removing legacy pre-split client-only state"
+  run rm -rf "$HOME/.xpair/host"
+fi
 
 say "Removing installed CLIs"
 for p in \

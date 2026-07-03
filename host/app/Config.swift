@@ -8,9 +8,10 @@ import Darwin
 
 let HOME = NSHomeDirectory()
 let RP_DIR = "\(HOME)/.xpair/host"
+let CLIENT_DIR = "\(HOME)/.xpair/client"
 let LOG_DIR = "\(RP_DIR)/logs"
 let ROLE_FILE = "\(RP_DIR)/role"            // host|client|both — written by install.sh. Used to block host self-install on a client.
-let CLIENT_ENV_FILE = "\(RP_DIR)/client.env" // present = client installed on this machine
+let CLIENT_ENV_FILE = "\(CLIENT_DIR)/client.env" // present = client installed on this machine
 let RD_SESSION_TOKEN_FILE = "\(RP_DIR)/rd-session-token" // 0600 token read by the authenticated SSH client before RD signaling.
 
 /// This machine's role. ROLE_FILE trimmed and used as-is (host|client|both); "" if absent or empty (= default host).
@@ -187,10 +188,10 @@ func rotateIfNeeded(_ path: String, _ maxBytes: Int) {
     catch { diag("move live \(path) → \(path).1 failed: \(error)") }
 }
 
-/// §6 REMOTE_HOST for redaction — env wins, else parsed once from ~/.xpair/host/client.env (KEY=VALUE).
+/// §6 REMOTE_HOST for redaction — env wins, else parsed once from ~/.xpair/client/client.env (KEY=VALUE).
 private let logRemoteHost: String? = {
     if let h = ProcessInfo.processInfo.environment["REMOTE_HOST"], !h.isEmpty { return h }
-    if let raw = try? String(contentsOfFile: "\(RP_DIR)/client.env", encoding: .utf8) {
+    if let raw = try? String(contentsOfFile: CLIENT_ENV_FILE, encoding: .utf8) {
         for line in raw.split(separator: "\n") {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("REMOTE_HOST=") {

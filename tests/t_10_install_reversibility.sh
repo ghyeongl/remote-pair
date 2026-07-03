@@ -6,7 +6,7 @@
 #                                manifest (.manifest-client) as FILE/BACKUP.
 #   uninstall.sh              →  removes all of it precisely by replaying the manifest in reverse (no --purge needed).
 #
-# Isolation: HOME is a tempdir. All config.sh-derived paths (RP_DIR/LOCAL_BIN/LOG_DIR/...) land
+# Isolation: HOME is a tempdir. All config.sh-derived paths (RP_HOST_DIR/RP_CLIENT_DIR/LOCAL_BIN/...) land
 #   inside the sandbox. External commands (ssh/mosh/pbs/brew/osascript/launchctl) are dropped into MOCKBIN
 #   (on PATH) so the real system is never touched. SERVICES_DIR is overridden to the sandbox to skip the
 #   pbs(-flush) branch entirely. REMOTE_HOST=dummy + RP_YES=1 + non-tty → no onboard prompt / real connection
@@ -41,7 +41,8 @@ run_uninstall() {
   RP_ERR="$(cat "$RP_ERRFILE" 2>/dev/null)"
 }
 
-MANIFEST_CLIENT() { printf '%s' "$RP_DIR/.manifest-client"; }
+CLIENT_RUNTIME_DIR() { printf '%s' "$HOME/.xpair/client"; }
+MANIFEST_CLIENT() { printf '%s' "$(CLIENT_RUNTIME_DIR)/.manifest-client"; }
 
 # ────────────────────────────────────────────────────────────────────────────
 # INSTALL (role=client)
@@ -58,8 +59,8 @@ it "install/cli-installed"
   || _fail "xpair CLI missing: $HOME/.local/bin/xpair"
 
 it "install/launcher-installed"
-[ -x "$RP_DIR/bin/xpair-launch" ] && _pass "launcher installed" \
-  || _fail "launcher missing: $RP_DIR/bin/xpair-launch"
+[ -x "$(CLIENT_RUNTIME_DIR)/bin/xpair-launch" ] && _pass "launcher installed" \
+  || _fail "launcher missing: $(CLIENT_RUNTIME_DIR)/bin/xpair-launch"
 
 it "install/manifest-records-cli"
 MAN="$(MANIFEST_CLIENT)"
@@ -79,7 +80,7 @@ assert_rc "$RP_RC" 0 "uninstall.sh rc=0 :: stderr=[$RP_ERR]"
 
 it "uninstall/cli-and-launcher-removed"
 [ -e "$HOME/.local/bin/xpair" ] && _fail "CLI remaining" || _pass "CLI removed"
-[ -e "$RP_DIR/bin/xpair-launch" ] && _fail "launcher remaining" || _pass "launcher removed"
+[ -e "$(CLIENT_RUNTIME_DIR)/bin/xpair-launch" ] && _fail "launcher remaining" || _pass "launcher removed"
 
 it "uninstall/manifest-consumed"
 # uninstall rm's the manifest file itself after restoring
