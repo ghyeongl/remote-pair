@@ -107,6 +107,7 @@ const RP_HOST_DIR = path.join(os.homedir(), ".xpair/host");
 const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
+const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
 // WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
 // on the host), so adding -i must still leave the ssh-agent + default identities available —
@@ -245,7 +246,7 @@ function stripEnvQuotes(val) {
 function readClientEnvValue(keyName) {
   let raw;
   try {
-    raw = fs.readFileSync(CLIENT_ENV_FILE, "utf8");
+    raw = fs.readFileSync(fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV_FILE, "utf8");
   } catch (_e) {
     return null;
   }
@@ -1493,7 +1494,7 @@ function unquoteShellWord(s) {
 }
 
 function readFolderMaps() {
-  const envPath = CLIENT_ENV_FILE;
+  const envPath = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV_FILE;
   let raw;
   try {
     raw = fs.readFileSync(envPath, "utf8");

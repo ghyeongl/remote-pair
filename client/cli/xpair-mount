@@ -86,8 +86,13 @@ done
 SUBCMD="${SUBCMD:-help}"
 
 if [ "$BACKEND" != "smb" ]; then
-  err "unsupported backend: $BACKEND (SMB is the only supported mount backend; use --backend smb)"
-  exit 2
+  case "$SUBCMD:$BACKEND" in
+    unmount:sshfs|status:sshfs) BACKEND=smb ;;
+    *)
+      err "unsupported backend: $BACKEND (SMB is the only supported mount backend; use --backend smb)"
+      exit 2
+      ;;
+  esac
 fi
 
 # ── helpers ──

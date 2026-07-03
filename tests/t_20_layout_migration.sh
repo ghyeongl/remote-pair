@@ -54,4 +54,12 @@ it "migration/host-files-untouched"
   || _fail ".manifest-host missing from host runtime dir"
 
 cleanup_sandbox
+
+CONFIG_SWIFT="$(cat "$_REPO_ROOT/host/app/Config.swift")"
+INSTALLER_SWIFT="$(cat "$_REPO_ROOT/host/app/Installer.swift")"
+it "config/legacy-client-env-fallback"
+assert_contains "$CONFIG_SWIFT" 'let LEGACY_CLIENT_ENV_FILE = "\(RP_DIR)/client.env"' "Config defines legacy pre-split client.env path"
+assert_contains "$CONFIG_SWIFT" 'func clientEnvFileExists() -> Bool' "Config exposes split+legacy client env existence helper"
+assert_contains "$INSTALLER_SWIFT" 'clientEnvFileExists() && !fm.fileExists(atPath: HOST_ENV)' "self-install guard checks split+legacy client.env"
+
 finish

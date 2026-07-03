@@ -57,13 +57,30 @@ assert_absent "$MLOG" "mkdir" "xpair-mount does not mkdir under /Volumes"
 assert_contains "$RP_OUT" "Mountpoint: /Volumes/foo-1" "system-suffixed mountpoint is discovered and printed"
 cleanup_sandbox
 
-# ── sshfs backend is rejected everywhere ──
+# ── sshfs backend is rejected for new mounts, but tolerated for legacy cleanup/status ──
 new_sandbox
 printf 'REMOTE_HOST=test-host\n' > "$RP_CLIENT_DIR/client.env"
+run_mount --backend sshfs mount /Users/alice/proj
+it "mount/sshfs-rejected-for-mount"
+assert_rc "$RP_RC" 2 "sshfs backend rejected for mount"
+assert_contains "$RP_ERR" "SMB is the only supported mount backend" "clear smb-only error for mount"
+cat > "$MOCKBIN/mount" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$MOCKBIN/mount"
 run_mount --backend sshfs status
-it "mount/sshfs-rejected"
-assert_rc "$RP_RC" 2 "sshfs backend rejected"
-assert_contains "$RP_ERR" "SMB is the only supported mount backend" "clear smb-only error"
+it "mount/sshfs-status-tolerated"
+assert_rc "$RP_RC" 0 "legacy sshfs backend tolerated for status"
+assert_contains "$RP_OUT" "(none)" "status still reports SMB table"
+run_mount --backend sshfs unmount /Volumes/proj
+it "mount/sshfs-unmount-tolerated"
+assert_rc "$RP_RC" 0 "legacy sshfs backend tolerated for unmount"
+assert_contains "$RP_ERR" "Nothing appears to be mounted at /Volumes/proj" "unmount reaches cleanup path"
+printf 'REMOTE_HOST=test-host\nMOUNT_BACKEND=sshfs\n' > "$RP_CLIENT_DIR/client.env"
+run_mount status
+it "mount/persisted-sshfs-status-tolerated"
+assert_rc "$RP_RC" 0 "persisted MOUNT_BACKEND=sshfs tolerated for status"
 cleanup_sandbox
 
 # ── custom mountpoints are rejected; NetFS chooses the /Volumes path ──
@@ -80,6 +97,26 @@ load_launch_guard() {
   # shellcheck disable=SC1090
   . "$SBX/launch-guard.sh"
 }
+
+# ── launch guard inference also excludes non-SMB /Volumes paths ──
+new_sandbox
+REMOTE_HOST=test-host
+FOLDER_MAPS=""
+FOLDER_MAP_MODES=""
+PATH="$MOCKBIN:$PATH"
+export REMOTE_HOST FOLDER_MAPS FOLDER_MAP_MODES PATH
+cat > "$MOCKBIN/mount" <<'EOF'
+#!/bin/bash
+echo '/dev/disk4s1 on /Volumes/ExternalSSD (apfs, local, nodev)'
+echo '//alice@test-host/proj on /Volumes/proj (smbfs, nodev, nosuid, mounted by alice)'
+EOF
+chmod +x "$MOCKBIN/mount"
+load_launch_guard
+it "launch/infer-non-smb-volumes-sync"
+assert_eq "$(map_mode_infer /Volumes/ExternalSSD/work)" "sync" "xpair-launch treats external disks under /Volumes as sync"
+it "launch/infer-remote-smb-volumes-mount"
+assert_eq "$(map_mode_infer /Volumes/proj/subdir)" "mount" "xpair-launch treats REMOTE_HOST smbfs /Volumes paths as mount"
+cleanup_sandbox
 
 # ── launch guard calls xpair-mount for missing mount-method mappings, but failures do not block attach ──
 new_sandbox

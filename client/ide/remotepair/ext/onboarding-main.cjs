@@ -27,6 +27,30 @@ try { heartbeat = require('./heartbeat.js') } catch { /* heartbeat optional */ }
 const WEBVIEW_INDEX = path.join(__dirname, 'onboarding-webview', 'dist', 'index.html')
 const PRELOAD = path.join(__dirname, 'onboarding-preload.cjs')
 const RP_CLIENT_DIR = path.join(os.homedir(), '.xpair/client')
+const RP_HOST_DIR = path.join(os.homedir(), '.xpair/host')
+const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, 'client.env')
+const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, 'client.env')
+
+function selfHealIdeDataDirs() {
+  const base = path.join(os.homedir(), '.xpair')
+  const oldIde = path.join(base, 'client')
+  const ide = path.join(base, 'ide')
+  const oldServer = path.join(base, 'client-server')
+  const ideServer = path.join(base, 'ide-server')
+  try {
+    if (fs.existsSync(oldIde) && fs.statSync(oldIde).isDirectory() &&
+        !fs.existsSync(path.join(oldIde, 'client.env')) && !fs.existsSync(ide)) {
+      fs.renameSync(oldIde, ide)
+    }
+  } catch { /* best effort */ }
+  try {
+    if (fs.existsSync(oldServer) && fs.statSync(oldServer).isDirectory() && !fs.existsSync(ideServer)) {
+      fs.renameSync(oldServer, ideServer)
+    }
+  } catch { /* best effort */ }
+}
+
+selfHealIdeDataDirs()
 
 /** Sentinel that forces onboarding on the next launch (written by the IDE's "Re-run setup"
  *  command, which can't pass an env var across an app quit+relaunch). Deleted once onboarding
@@ -57,7 +81,7 @@ const SESSION_ENGINES = new Set(['claude', 'shell', 'codex', 'opencode'])
 const LAUNCH_ENGINE_FALLBACK = 'claude'
 
 function readClientEnv() {
-  const file = path.join(RP_CLIENT_DIR, 'client.env')
+  const file = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV_FILE
   let txt = ''
   try { txt = fs.readFileSync(file, 'utf8') } catch { return {} }
   const env = {}

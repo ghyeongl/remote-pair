@@ -203,7 +203,24 @@ map_to_host() { # $1=clientDir → echo hostDir
 }
 
 # ── mount-method attach guard: remount missing SMB mounts best-effort before attach ──
-map_mode_infer() { case "$1" in /Volumes/*) printf 'mount' ;; *) printf 'sync' ;; esac; }
+map_mode_infer() {
+  local d="$1" host="${REMOTE_HOST:-}" inferred=""
+  case "$d" in /Volumes/*) : ;; *) printf 'sync'; return ;; esac
+  [ -n "$host" ] || { printf 'sync'; return; }
+  host="${host#*@}"
+  inferred="$(mount 2>/dev/null | awk -v d="$d" -v h="$host" '
+    index($0, " (smbfs") {
+      start = index($0, " on "); if (!start) next
+      src = substr($0, 1, start - 1)
+      rest = substr($0, start + 4)
+      idx = index(rest, " (smbfs"); if (!idx) next
+      mp = substr(rest, 1, idx - 1)
+      if (!(index(src, "@" h "/") || index(src, "//" h "/") == 1)) next
+      if (d == mp || index(d, mp "/") == 1) { print "mount"; exit }
+    }
+  ' || true)"
+  [ "$inferred" = mount ] && printf 'mount' || printf 'sync'
+}
 map_mode_of() {
   local d="$1" e c IFS=';'
   for e in ${FOLDER_MAP_MODES:-}; do [ -n "$e" ] || continue

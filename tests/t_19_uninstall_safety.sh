@@ -46,12 +46,28 @@ mkdir -p "$HOME/.xpair/client" "$HOME/.xpair/host" "$HOME/.local/bin"
 printf 'REMOTE_HOST=test-host\n' > "$HOME/.xpair/client/client.env"
 printf 'HOST_ONLY=1\n' > "$HOME/.xpair/host/host.env"
 printf 'NOTE\thost remains\t\n' > "$HOME/.xpair/host/.manifest-host"
+printf 'key\n' > "$HOME/.xpair/host/pairing_ed25519"
 printf 'cli\n' > "$HOME/.local/bin/xpair"
 run_client_uninstall
 it "client/keeps-shared-cli-when-host-remains"
 assert_rc "$RP_RC" 0 "client uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
 assert_contains "$RP_OUT" "Keeping shared CLIs (host install remains)" "client wipe detects remaining host install"
 assert_absent "$RP_OUT" "rm -f $HOME/.local/bin/xpair" "client wipe does not remove shared xpair CLI"
+assert_absent "$RP_OUT" "rm -f $HOME/.xpair/host/pairing_ed25519" "client wipe leaves pairing key when host remains"
+cleanup_sandbox
+
+new_sandbox
+rm -rf "$HOME/.xpair/host"
+mkdir -p "$HOME/.xpair/client" "$HOME/.xpair/host"
+rm -f "$HOME/.xpair/host/host.env"
+printf 'REMOTE_HOST=test-host\n' > "$HOME/.xpair/client/client.env"
+printf 'key\n' > "$HOME/.xpair/host/pairing_ed25519"
+run_client_uninstall
+it "client/removes-orphaned-pairing-key"
+assert_rc "$RP_RC" 0 "client uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$RP_OUT" "Removing client pairing key" "client-only wipe detects orphaned pairing key"
+assert_contains "$RP_OUT" "rm -f $HOME/.xpair/host/pairing_ed25519" "client-only wipe removes pairing key"
+assert_contains "$RP_OUT" "rmdir $HOME/.xpair/host" "client-only wipe cleans host dir when it only held the key"
 cleanup_sandbox
 
 new_sandbox

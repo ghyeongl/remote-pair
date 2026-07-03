@@ -63,7 +63,7 @@ enum Installer {
             log(.info, "role=client marker — skipping host self-install")
             return true
         }
-        if role.isEmpty && fm.fileExists(atPath: CLIENT_ENV_FILE) && !fm.fileExists(atPath: HOST_ENV) {
+        if role.isEmpty && clientEnvFileExists() && !fm.fileExists(atPath: HOST_ENV) {
             log(.info, "client.env present + no host.env — treating as client, skipping host self-install")
             return true
         }

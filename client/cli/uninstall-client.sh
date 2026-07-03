@@ -125,6 +125,19 @@ host_install_remains() {
   return 1
 }
 
+remove_orphaned_pairing_key() {
+  host_install_remains && return 0
+  local host_dir key other
+  host_dir="$HOME/.xpair/host"
+  key="$host_dir/pairing_ed25519"
+  [ -e "$key" ] || return 0
+  other="$(find "$host_dir" -mindepth 1 ! -name pairing_ed25519 -print -quit 2>/dev/null || true)"
+  say "Removing client pairing key"
+  run rm -f "$key"
+  [ -z "$other" ] && run rmdir "$host_dir"
+  return 0
+}
+
 confirm "Wipe xpair client state, binaries, Quick Action, and cask from this Mac?"
 
 legacy_client_only=0
@@ -147,6 +160,7 @@ if [ "$legacy_client_only" = 1 ]; then
   say "Removing legacy pre-split client-only state"
   run rm -rf "$HOME/.xpair/host"
 fi
+remove_orphaned_pairing_key
 
 if host_install_remains; then
   say "Keeping shared CLIs (host install remains)"
