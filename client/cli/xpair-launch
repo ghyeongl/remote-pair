@@ -183,15 +183,83 @@ PROJECT_DIR="$(cd "${DIR_ARG:-$PWD}" 2>/dev/null && pwd)" || die "directory not 
 LOCAL_HOST="$(hostname -s)"
 
 # ── path mapping: client path → host path (longest-prefix). Assumes same path if no mapping. ──
+map_client_of() { printf '%s' "${1%%::*}"; }
+map_host_of()   { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '%s' "$h"; }
+
 map_to_host() { # $1=clientDir → echo hostDir
   local d="$1" best_c="" best_h="" c h pair IFS=';'
   for pair in $FOLDER_MAPS; do
     [ -n "$pair" ] || continue
-    c="${pair%%::*}"; h="${pair#*::}"
-    [ "$c" = "$pair" ] && h="$c"            # no '::' → identity mapping
+    c="$(map_client_of "$pair")"; h="$(map_host_of "$pair")"
     case "$d" in "$c"|"$c"/*) if [ "${#c}" -gt "${#best_c}" ]; then best_c="$c"; best_h="$h"; fi ;; esac
   done
   if [ -n "$best_c" ]; then printf '%s%s' "$best_h" "${d#"$best_c"}"; else printf '%s' "$d"; fi
+}
+
+# ── mount-method attach guard: remount missing SMB mounts best-effort before attach ──
+map_mode_infer() { case "$1" in /Volumes/*) printf 'mount' ;; *) printf 'sync' ;; esac; }
+map_mode_of() {
+  local d="$1" e c IFS=';'
+  for e in ${FOLDER_MAP_MODES:-}; do [ -n "$e" ] || continue
+    c="$(map_client_of "$e")"
+    [ "$c" = "$d" ] && { map_host_of "$e"; return; }
+  done
+  map_mode_infer "$d"
+}
+
+sanitize_mount_component() {
+  printf '%s' "$1" | LC_ALL=C sed 's|^/||; s|/|_|g; s|[^A-Za-z0-9._-]|_|g'
+}
+default_mountpoint_for_hostpath() {
+  local hostpath="$1"
+  printf '/Volumes/%s/%s' "$(sanitize_mount_component "$REMOTE_HOST")" "$(sanitize_mount_component "$(basename "$hostpath")")"
+}
+is_mounted_path() {
+  local mp="$1"
+  mp="${mp%/}"
+  mount 2>/dev/null | grep -qF " on ${mp} " || mount 2>/dev/null | grep -qF " on ${mp}("
+}
+resolve_xpair_mount_tool() {
+  if [ -x "$LOCAL_BIN/xpair-mount" ]; then
+    printf '%s\n' "$LOCAL_BIN/xpair-mount"
+  elif [ -x "$RP_CLIENT_DIR/bin/xpair-mount" ]; then
+    printf '%s\n' "$RP_CLIENT_DIR/bin/xpair-mount"
+  elif command -v xpair-mount >/dev/null 2>&1; then
+    command -v xpair-mount
+  else
+    return 1
+  fi
+}
+ensure_mount_mappings_best_effort() {
+  [ -n "${FOLDER_MAPS:-}" ] || return 0
+  [ -n "${REMOTE_HOST:-}" ] || return 0
+
+  local tool pair client_path host_path mode mountpoint out IFS=';'
+  tool="$(resolve_xpair_mount_tool 2>/dev/null)" || {
+    for pair in $FOLDER_MAPS; do [ -n "$pair" ] || continue
+      client_path="$(map_client_of "$pair")"
+      [ "$(map_mode_of "$client_path")" = mount ] || continue
+      printf 'warning: xpair-mount not found; cannot ensure mount-method folder maps before attach\n' >&2
+      return 0
+    done
+    return 0
+  }
+
+  for pair in $FOLDER_MAPS; do
+    [ -n "$pair" ] || continue
+    client_path="$(map_client_of "$pair")"
+    mode="$(map_mode_of "$client_path")"
+    [ "$mode" = mount ] || continue
+    host_path="$(map_host_of "$pair")"
+    mountpoint="$(default_mountpoint_for_hostpath "$host_path")"
+    is_mounted_path "$mountpoint" && continue
+    if out="$("$tool" --backend smb mount "$host_path" 2>&1)"; then
+      printf '%s\n' "$out"
+    else
+      printf 'warning: could not mount %s at %s before attach; continuing with attach\n' "$host_path" "$mountpoint" >&2
+      [ -n "$out" ] && printf '%s\n' "$out" >&2
+    fi
+  done
 }
 
 # ── human-readable deterministic session name ──
@@ -420,6 +488,7 @@ REMOTE_PROJ_Q="$(sh_quote "$REMOTE_PROJ")"
 
 # Single uniform target: the configured host (may be localhost). No local/remote branch.
 [ -n "$REMOTE_HOST" ] || die "no host configured — set up a host (local or remote) in Xpair.app, or: xpair config set host <ssh-host>" 1
+ensure_mount_mappings_best_effort
 
 # Expose ssh errors verbatim — timeout/key-rejection/host-key errors must appear on screen + in log.
 reach() { ssh $SSH_ID -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" true; }

@@ -23,7 +23,7 @@
 #   xpair status         Host server, app, heartbeat status
 #   xpair editor [start|status|stop] [<dir>]   Launch/inspect the code-server editor (loopback EDITOR_PORT, default 8080)
 #   xpair desktop [open|check]    Open the host screen via macOS Screen Sharing (vnc://REMOTE_HOST), or check reachability
-#   xpair mount [mount|unmount|status|help] ...   Mount a host folder directly (Syncthing alternative; backends smb|sshfs — see docs/m-mount.md)
+#   xpair mount [mount|unmount|status|help] ...   Mount a host folder directly (Syncthing alternative; SMB-only — see docs/m-mount.md)
 #   xpair notify [-n N]  Pull recent host notifications (Stop/Notification/SubagentStop/approve), filtered by ~/.xpair/host/notify.conf
 #   xpair logs [--host] [-f] [-n N]   Tail logs (local launcher/app; --host = host logs over ssh; -f = follow)
 #   xpair self-update    Update client (launcher/CLI/romanize) to latest from GitHub (keep in sync with host)
@@ -215,8 +215,8 @@ map_host_of()   { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '
 
 # ── per-mapping access method (FOLDER_MAP_MODES, keyed by clientPath) ──
 # Same path-convention inference the onboarding webview uses (StepFileAccess.inferMethod):
-# a clientPath under ~/.xpair/client/mounts/ was created by the mount backend ⇒ mount, else sync.
-map_mode_infer() { case "$1" in */.xpair/client/mounts/*) printf 'mount' ;; *) printf 'sync' ;; esac; }
+# a clientPath under /Volumes/ is a native SMB mount ⇒ mount, else sync.
+map_mode_infer() { case "$1" in /Volumes/*) printf 'mount' ;; *) printf 'sync' ;; esac; }
 # Stored method for a clientPath, or the inferred fallback when not explicitly recorded.
 map_mode_of() {
   local d="$1" e c IFS=';'
@@ -988,14 +988,15 @@ cmd_doctor() {
   # (b) file-access backend: mount → check active mount; syncthing → best-effort local daemon probe.
   local _sync_backend="${SYNC_BACKEND:-syncthing}"
   if [ "$_sync_backend" = mount ]; then
-    local _mount_tool _mounted="not mounted"
+    local _mount_tool _mount_status _mounted="not mounted"
     if _mount_tool="$(_resolve_client_tool xpair-mount 2>/dev/null)"; then
-      if "$_mount_tool" status 2>/dev/null | grep -qvE '^\s*\(none\)\s*$' \
-         && "$_mount_tool" status 2>/dev/null | grep -qE '(smbfs|sshfs|macfuse|osxfuse|mounts)'; then
+      _mount_status="$(MOUNT_BACKEND=smb "$_mount_tool" --backend smb status 2>/dev/null || true)"
+      if printf '%s\n' "$_mount_status" | grep -qvE '^\s*\(none\)\s*$' \
+         && printf '%s\n' "$_mount_status" | grep -qE 'smbfs'; then
         _mounted="mounted"
       fi
     fi
-    printf '%-22s %s\n' "file access (mount)" "backend=${MOUNT_BACKEND:-smb} — $_mounted"
+    printf '%-22s %s\n' "file access (mount)" "backend=smb — $_mounted"
   else
     # syncthing is optional/external — never hard-fail; just report reachability of the local GUI/API.
     local _st="not detected (optional — only needed if you use Syncthing sync)"
@@ -1010,7 +1011,7 @@ cmd_doctor() {
   # per-mapping truth (has_mount_mapping), NOT the global SYNC_BACKEND: removing the last mount
   # mapping leaves SYNC_BACKEND=mount stale, which would otherwise warn with no mount mapping in play.
   # Best-effort over SSH; we detect + guide only (never enable File Sharing for the user).
-  if [ -n "$REMOTE_HOST" ] && has_mount_mapping && [ "${MOUNT_BACKEND:-smb}" = smb ]; then
+  if [ -n "$REMOTE_HOST" ] && has_mount_mapping; then
     case "$(host_smb_status)" in
       on)  printf '%-22s %s\n' "host File Sharing" "on (SMB mounts can connect)" ;;
       off) printf '%-22s %s\n' "host File Sharing" "OFF — a mount mapping needs it ON: System Settings > General > Sharing > File Sharing, then share the mapped folder(s)" ;;
@@ -1932,7 +1933,7 @@ cmd_desktop() {
 }
 
 # xpair mount — host-folder mount (Syncthing alternative; see docs/m-mount.md).
-# Thin pass-through to xpair-mount (mount/unmount/status/help; backends smb|sshfs).
+# Thin pass-through to xpair-mount (mount/unmount/status/help; SMB-only).
 cmd_mount() {
   local tool; tool="$(_resolve_client_tool xpair-mount)" \
     || { echo "xpair-mount not found (install client, or run from the repo)" >&2; return 1; }

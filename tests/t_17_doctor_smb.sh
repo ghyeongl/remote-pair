@@ -23,6 +23,13 @@ assert_contains "$RP_OUT" "OFF" "File Sharing OFF is surfaced as the cause"
 run_doctor on
 it "doctor_smb/on-reported"
 assert_contains "$RP_OUT" "on (SMB mounts can connect)" "File Sharing ON reported"
+
+# ── stale MOUNT_BACKEND=sshfs is ignored; SMB is still the only mount backend ──
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/proj\nFOLDER_MAP_MODES=%s::mount\nSYNC_BACKEND=mount\nMOUNT_BACKEND=sshfs\n' "$SBX/proj" "$SBX/proj" > "$RP_CLIENT_DIR/client.env"
+run_doctor on
+it "doctor_smb/stale-sshfs-backend-ignored"
+assert_contains "$RP_OUT" "backend=smb" "doctor reports smb despite stale sshfs config"
+assert_contains "$RP_OUT" "on (SMB mounts can connect)" "stale sshfs config does not skip SMB readiness"
 cleanup_sandbox
 
 # ── sync-only setup (no mount mapping) → NO SMB gate/line at all ──

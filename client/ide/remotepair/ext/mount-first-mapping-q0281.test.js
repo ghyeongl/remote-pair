@@ -33,7 +33,7 @@ test("§1.7 Q0281 Add Root mounts first, then maps the returned mountpoint", () 
 
   assert.match(
     mountCli,
-    /xpair-mount \[--backend smb\|sshfs\] mount\s+<hostPath> \[mountpoint\]/,
+    /xpair-mount \[--backend smb\] mount\s+<hostPath>/,
     "the real xpair-mount CLI requires the mount action before the host path",
   );
   assert.match(

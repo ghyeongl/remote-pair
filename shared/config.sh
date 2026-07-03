@@ -3,7 +3,7 @@
 #
 # Xpair runtime state is split by role:
 #   ~/.xpair/host    HOST runtime — host app, approve router, rules, host logs.
-#   ~/.xpair/client  CLIENT runtime — launcher, client.env, mounts, client logs.
+#   ~/.xpair/client  CLIENT runtime — launcher, client.env, client logs.
 #   ~/.xpair/ide     IDE user-data.
 #   ~/.xpair/ide-server  IDE remote-server data.
 #
@@ -61,7 +61,7 @@ REMOTE_HOST="${REMOTE_HOST:-}"          # Empty = no host configured (onboarding
 FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"
 # Per-mapping access method, keyed by clientPath: "clientPath::mount;clientPath2::sync".
 # FOLDER_MAPS itself stays client::host (no method), so an entry missing here falls back to
-# path-convention inference (a clientPath under ~/.xpair/client/mounts/ ⇒ mount, else sync).
+# path-convention inference (a clientPath under /Volumes/ ⇒ mount, else sync).
 # method ∈ {mount, sync}; mount transport is SMB-only.
 FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"
 LAUNCHER="${LAUNCHER:-$RP_CLIENT_DIR/bin/xpair-launch}"
@@ -76,8 +76,8 @@ EDITOR_PORT="${EDITOR_PORT:-8080}"       # code-server (xpair editor / M4) loopb
 # How the client sees host files: syncthing (local synced copy, default) or mount (single
 # source of truth on the host, no sync daemon). Wired into xpair doctor + the wizard.
 SYNC_BACKEND="${SYNC_BACKEND:-syncthing}"   # syncthing | mount
-# Mount transport when SYNC_BACKEND=mount: smb (macOS-native, no kext, default) or sshfs (needs macFUSE).
-MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"        # smb | sshfs
+# Mount transport when SYNC_BACKEND=mount: SMB (macOS-native, no kext).
+MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"
 
 # ── Common ──
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"

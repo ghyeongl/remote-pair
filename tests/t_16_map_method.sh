@@ -50,13 +50,13 @@ assert_absent "$(cat "$RP_CLIENT_DIR/client.env")" "$MNT::mount" "method record 
 cleanup_sandbox
 
 # ── inference fallback when FOLDER_MAP_MODES has no record for the entry ──
-# A clientPath under ~/.xpair/client/mounts/ ⇒ mount; any other path ⇒ sync.
+# A clientPath under /Volumes/ ⇒ mount; any other path ⇒ sync.
 new_sandbox
-MOUNTSPATH="$SBX/.xpair/client/mounts/vol"; PLAIN="$SBX/plainproj"; mkdir -p "$MOUNTSPATH" "$PLAIN"
+MOUNTSPATH="/Volumes/test-host/proj"; PLAIN="$SBX/plainproj"; mkdir -p "$PLAIN"
 printf 'REMOTE_HOST=test-host\nFOLDER_MAPS="%s::/host/v;%s::/host/p"\nFOLDER_MAP_MODES=\n' "$MOUNTSPATH" "$PLAIN" > "$RP_CLIENT_DIR/client.env"
 run_cli map list --json
 it "map_method/infer-mountspath"
-assert_eq "$(json_method "$MOUNTSPATH")" "mount" "path under .xpair/client/mounts/ infers mount"
+assert_eq "$(json_method "$MOUNTSPATH")" "mount" "path under /Volumes/ infers mount"
 it "map_method/infer-plain"
 assert_eq "$(json_method "$PLAIN")" "sync" "plain path infers sync"
 
