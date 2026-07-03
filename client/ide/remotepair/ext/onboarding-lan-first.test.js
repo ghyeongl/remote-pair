@@ -31,32 +31,23 @@ function assertPatternBefore(source, first, second, message) {
 }
 
 test("first connection scans Bonjour LAN first and offers discovered host rows (Q0382/Q0384)", () => {
-  assert.match(app, /WELCOME: 0,[\s\S]*CONSENT: 1,[\s\S]*DISCOVER: 2,[\s\S]*CONNECT: 3,/);
-  assert.match(app, /const onSelectPeer = useCallback\([\s\S]*setPeer\(p\);[\s\S]*w\.goTo\(S\.CONNECT, "next"\);/);
-  assert.match(app, /w\.index === S\.DISCOVER &&[\s\S]*<StepDiscover onSelect=\{onSelectPeer\} onManual=\{onManual\} \/>/);
+  assert.match(app, /WELCOME: 0,[\s\S]*CONSENT_CRASH: 1,[\s\S]*CONSENT_ANALYTICS: 2,[\s\S]*DISCOVER: 3,[\s\S]*UPDATE: 4,[\s\S]*WAIT_PERM: 5,/);
+  assert.match(app, /const \[selectedHost, setSelectedHost\] = useState<DiscoveredHost \| null>\(null\);/);
+  assert.match(app, /const setSelected = useCallback\(\(host: DiscoveredHost \| null\) => \{/);
+  assert.match(app, /w\.index === 3 && \([\s\S]*<StepDiscover[\s\S]*selected=\{selectedHost\}[\s\S]*setSelected=\{setSelected\}/);
 
   assert.match(stepDiscover, /window\.remotepair\.discover\(\)/);
-  assertPatternBefore(
-    stepDiscover,
-    /Scanline label="Bonjour .*same Wi-Fi"/,
-    /Scanline label="Tailscale .*your tailnet"/,
-    "Bonjour LAN scan must be presented before Tailscale fallback scan",
-  );
-  assertPatternBefore(
-    stepDiscover,
-    /if \(!scannedOnce\) return <Scanning \/>;/,
-    /if \(peers\.length === 0\) return <EmptyDiagnose onManual=\{onManual\} \/>;/,
-    "fallback UI must wait until the LAN scan has completed once",
-  );
-  assert.match(stepDiscover, /connect: "Connect"/);
-  assert.match(stepDiscover, /reconnect: "Reconnect"/);
-  assert.match(stepDiscover, /onClick=\{\(\) => onSelect\(peer\)\}/);
+  assert.match(stepDiscover, /for \(const peer of res\.peers \|\| \[\]\)/);
+  assert.match(stepDiscover, /byId\.set\(host\.id, host\)/);
+  assert.match(stepDiscover, /transport: peer\.source === "tailscale" \? "Tailscale" : "LAN"/);
+  assert.match(stepDiscover, /onClick=\{onSelect\}/);
+  assert.match(stepDiscover, /selected=\{selected\?\.id === h\.id\}/);
 
   assert.match(xpair, /RP_BONJOUR_TYPE="_xpair\._tcp"/);
   assert.match(xpair, /dns-sd -t "\$timeout" -B "\$RP_BONJOUR_TYPE"/);
   assertPatternBefore(
     xpair,
-    /LAN: Bonjour browse/,
+    /for bonjour_type in "\$RP_BONJOUR_TYPE" "\$RP_LEGACY_BONJOUR_TYPE"/,
     /Tailscale: parse `tailscale status --json` peers/,
     "xpair discover must collect Bonjour LAN candidates before Tailscale candidates",
   );

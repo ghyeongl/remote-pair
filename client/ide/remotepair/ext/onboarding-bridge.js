@@ -10,6 +10,10 @@ const cp = require("child_process");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const dgram = require("dgram");
+const net = require("net");
+const http = require("http");
 
 // Zero-dep telemetry (PostHog capture + consent). Shared with the extension host. Consent is
 // opt-in (default OFF) → all capture() calls below are no-ops until the user opts in.
@@ -19,6 +23,12 @@ const HOME = os.homedir();
 const RP_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 const SSH_KEY = path.join(HOME, ".ssh", "id_ed25519");
+// Dedicated xpair pairing key — used ONLY for pairing (request signature), the SSH proof, and the
+// paired runtime (launch/heartbeat/RD). Kept OUTSIDE ~/.ssh so it never collides with the user's
+// personal id_ed25519: the host installs ONLY this key as the restricted, fingerprint-bound
+// forced-command line, so the xpair-ssh-gate always runs and the proof completes. Generated
+// unencrypted (owned by us) → signed raw, no ssh-agent needed.
+const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
 const SSH_KNOWN_HOSTS = path.join(HOME, ".ssh", "known_hosts");
 const SSH_KNOWN_HOSTS_DEFAULTS = [
   SSH_KNOWN_HOSTS,
@@ -28,6 +38,9 @@ const SSH_KNOWN_HOSTS_DEFAULTS = [
 ];
 const HOST_RE = /^(?!-)[A-Za-z0-9._-]+$/;
 const ACCOUNT_RE = /^(?!-)[A-Za-z0-9._-]+$/;
+const SSH_TARGET_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
+const TAILNET_PAIRING_METADATA_PORT = 8891;
+const HOST_SETUP_URL = "https://github.com/x10lab/xpair#host-setup";
 const EFFECTIVE_KNOWN_HOSTS_FILES = new Map();
 let sshEphemeralKnownHostsDir;
 
@@ -37,6 +50,14 @@ function validHost(host) {
 
 function invalidHost(host) {
   return `invalid host: ${String(host || "").trim()}`;
+}
+
+function validSshTarget(target) {
+  return SSH_TARGET_RE.test(String(target || "").trim());
+}
+
+function invalidSshTarget(target) {
+  return invalidHost(target);
 }
 
 function validAccount(account) {
@@ -455,6 +476,17 @@ function shPathQuotePreserveHome(p) {
   return shSingleQuote(s);
 }
 
+/** Expand a leading ~ / ~/… in a CLIENT (local) path to the absolute home dir. The CLI's
+ *  `xpair map add` runs `cd "$2"` on the client path, and a quoted argument is NOT tilde-expanded by
+ *  the shell, so ~ paths would fail with "client path not found". Host paths are resolved separately
+ *  over SSH (resolveHostPath) — this is the local side only. */
+function expandClientHome(p) {
+  const s = String(p || "");
+  if (s === "~") return os.homedir();
+  if (s.startsWith("~/")) return path.join(os.homedir(), s.slice(2));
+  return s;
+}
+
 /** Non-interactive ssh options for reachability/read probes: name the key explicitly, force
  *  publickey-only auth, and BatchMode so ssh NEVER drops to a password/passphrase prompt (which
  *  would hang or spawn an out-of-band GUI prompt). Used by every read/probe ssh call and by the
@@ -477,10 +509,44 @@ function sshProbeOpts(host, connectTimeout = 5) {
     "-o", `UserKnownHostsFile=${sshUserKnownHostsFileOption(host)}`,
     "-o", "StrictHostKeyChecking=accept-new",
   ];
-  try {
-    if (fs.existsSync(SSH_KEY)) opts.push("-o", "IdentitiesOnly=yes", "-i", SSH_KEY);
-  } catch { /* key probe failed — let ssh use the agent / defaults */ }
+  pushProbeIdentities(opts);
   return opts;
+}
+
+/** OFFER the pairing key (and the personal key) via -i, but do NOT set IdentitiesOnly. The pairing key
+ *  may exist locally from an ATTEMPTED-but-unproven pairing (host denied / proof expired / acceptance
+ *  failed), where it is NOT yet authorized on the host. Adding -i still lets ssh fall back to the
+ *  ssh-agent AND the user's default identities — IdentitiesOnly=yes would restrict auth to ONLY these
+ *  files, breaking a user whose working host auth is agent-only (no id_ed25519 on disk). The pairing
+ *  PROOF login is the ONLY caller that must force the pairing key alone — sshPairingProofOpts. */
+function pushProbeIdentities(opts) {
+  try {
+    if (fs.existsSync(PAIRING_KEY)) opts.push("-i", PAIRING_KEY);
+    if (fs.existsSync(SSH_KEY)) opts.push("-i", SSH_KEY);
+  } catch { /* key probe failed — let ssh use the agent / defaults */ }
+}
+
+/** Options for the pairing PROOF login: a FRESH, non-multiplexed connection that forces ONLY the
+ *  pairing key. Must NOT reuse sshProbeOpts' shared ControlMaster — an earlier probe over the same
+ *  ControlPath (authenticated with the user's normal key when the host was already reachable) would be
+ *  reused, so the forced xpair-ssh-gate would never see pairing_ed25519 and the host would stay stuck
+ *  at accepted-pending-proof. ControlMaster=no + ControlPath=none guarantees a new authentication. */
+function sshPairingProofOpts(host, connectTimeout = 5) {
+  return [
+    "-o", "BatchMode=yes",
+    "-o", `ConnectTimeout=${connectTimeout}`,
+    "-o", "ConnectionAttempts=1",
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=none",
+    "-o", "PreferredAuthentications=publickey",
+    "-o", "PubkeyAuthentication=yes",
+    "-o", "PasswordAuthentication=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "NumberOfPasswordPrompts=0",
+    "-o", `UserKnownHostsFile=${sshUserKnownHostsFileOption(host)}`,
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "IdentitiesOnly=yes", "-i", PAIRING_KEY,
+  ];
 }
 
 function sshDurablePinOpts(connectTimeout = 5) {
@@ -497,9 +563,7 @@ function sshDurablePinOpts(connectTimeout = 5) {
     "-o", "NumberOfPasswordPrompts=0",
     "-o", "HostKeyAlgorithms=ssh-ed25519",
   ];
-  try {
-    if (fs.existsSync(SSH_KEY)) opts.push("-o", "IdentitiesOnly=yes", "-i", SSH_KEY);
-  } catch { /* key probe failed — let ssh use the agent / defaults */ }
+  pushProbeIdentities(opts);
   return opts;
 }
 
@@ -669,6 +733,326 @@ function runSecretStdin(cmd, args, secret) {
 
 function cliWithPasswordStdin(args, secret) {
   return runSecretStdin(rpBin(), [...args, "--password-stdin"], secret);
+}
+
+function b64url(buf) {
+  return Buffer.from(buf)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function readU32(buf, off) {
+  if (off + 4 > buf.length) throw new Error("truncated uint32");
+  return [buf.readUInt32BE(off), off + 4];
+}
+
+function readSSHString(buf, off) {
+  const [len, next] = readU32(buf, off);
+  if (next + len > buf.length) throw new Error("truncated ssh string");
+  return [buf.subarray(next, next + len), next + len];
+}
+
+function sshString(buf) {
+  const b = Buffer.from(buf);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(b.length, 0);
+  return Buffer.concat([len, b]);
+}
+
+function canonicalPairingTranscript(hostKeyFP, hostNonce, serviceInstanceID, clientPubKey, timestamp) {
+  return Buffer.concat(
+    [hostKeyFP, hostNonce, serviceInstanceID, clientPubKey, String(timestamp)].map((field) =>
+      sshString(Buffer.from(String(field), "utf8"))
+    )
+  );
+}
+
+function sanitizeEd25519PublicKey(pubkey) {
+  const parts = String(pubkey || "").trim().split(/\s+/);
+  if (parts.length < 2 || parts[0] !== "ssh-ed25519") {
+    throw new Error("expected ssh-ed25519 public key");
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(parts[1])) {
+    throw new Error("invalid ed25519 public key blob");
+  }
+  // Drop comments/options before sending. The host accepts exactly "ssh-ed25519 <base64>".
+  return `ssh-ed25519 ${parts[1]}`;
+}
+
+function parseEd25519PublicKey(pubkey) {
+  const clean = sanitizeEd25519PublicKey(pubkey);
+  const [, b64] = clean.split(/\s+/);
+  const blob = Buffer.from(b64, "base64");
+  let off = 0;
+  let field;
+  [field, off] = readSSHString(blob, off);
+  if (field.toString("utf8") !== "ssh-ed25519") throw new Error("public key type is not ssh-ed25519");
+  let raw;
+  [raw, off] = readSSHString(blob, off);
+  if (raw.length !== 32 || off !== blob.length) throw new Error("bad ed25519 public key blob");
+  const fp = "SHA256:" + crypto.createHash("sha256").update(blob).digest("base64").replace(/=/g, "");
+  return { clean, blob, raw, fingerprint: fp };
+}
+
+function clientIDForKeyBlob(keyBlob) {
+  return b64url(crypto.createHash("sha256").update(String(keyBlob), "utf8").digest()).slice(0, 24);
+}
+
+function parseOpenSSHEd25519PrivateKey(pem) {
+  const b64 = String(pem || "")
+    .replace(/-----BEGIN OPENSSH PRIVATE KEY-----|-----END OPENSSH PRIVATE KEY-----|\s/g, "");
+  const buf = Buffer.from(b64, "base64");
+  const magic = Buffer.from("openssh-key-v1\0", "utf8");
+  if (buf.length < magic.length || !buf.subarray(0, magic.length).equals(magic)) {
+    throw new Error("not an OpenSSH private key");
+  }
+  let off = magic.length;
+  let cipher, kdf, kdfOptions;
+  [cipher, off] = readSSHString(buf, off);
+  [kdf, off] = readSSHString(buf, off);
+  [kdfOptions, off] = readSSHString(buf, off);
+  void kdfOptions;
+  if (cipher.toString("utf8") !== "none" || kdf.toString("utf8") !== "none") {
+    throw new Error("encrypted OpenSSH private keys are not supported for pairing signatures");
+  }
+  const [nkeys, afterN] = readU32(buf, off);
+  off = afterN;
+  if (nkeys !== 1) throw new Error("expected one OpenSSH private key");
+  let pubBlob, privateBlob;
+  [pubBlob, off] = readSSHString(buf, off);
+  [privateBlob, off] = readSSHString(buf, off);
+  void pubBlob;
+  let poff = 0;
+  const [check1, poff1] = readU32(privateBlob, poff);
+  const [check2, poff2] = readU32(privateBlob, poff1);
+  poff = poff2;
+  if (check1 !== check2) throw new Error("OpenSSH private key checkints differ");
+  let type, pubRaw, privRaw;
+  [type, poff] = readSSHString(privateBlob, poff);
+  if (type.toString("utf8") !== "ssh-ed25519") throw new Error("private key is not ssh-ed25519");
+  [pubRaw, poff] = readSSHString(privateBlob, poff);
+  [privRaw, poff] = readSSHString(privateBlob, poff);
+  if (pubRaw.length !== 32 || privRaw.length !== 64 || !privRaw.subarray(32, 64).equals(pubRaw)) {
+    throw new Error("bad ed25519 private key shape");
+  }
+  const jwk = {
+    kty: "OKP",
+    crv: "Ed25519",
+    d: b64url(privRaw.subarray(0, 32)),
+    x: b64url(pubRaw),
+  };
+  return { keyObject: crypto.createPrivateKey({ key: jwk, format: "jwk" }), publicRaw: pubRaw };
+}
+
+function sshAgentRequest(payload, timeoutMs = 5000) {
+  const sockPath = sshAuthSock();
+  if (!sockPath) return Promise.reject(new Error("ssh-agent socket not found"));
+  const body = Buffer.from(payload);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(body.length, 0);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let chunks = [];
+    let total = 0;
+    let expected = null;
+    const socket = net.createConnection(sockPath);
+    const finish = (err, result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (err) reject(err);
+      else resolve(result);
+    };
+    const timer = setTimeout(() => finish(new Error("ssh-agent request timed out")), timeoutMs);
+    socket.on("connect", () => socket.write(Buffer.concat([len, body])));
+    socket.on("error", (err) => finish(err));
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      total += chunk.length;
+      const buf = Buffer.concat(chunks, total);
+      if (expected === null && buf.length >= 4) expected = buf.readUInt32BE(0);
+      if (expected !== null && buf.length >= expected + 4) {
+        finish(null, buf.subarray(4, 4 + expected));
+      }
+    });
+    socket.on("end", () => {
+      if (!done) finish(new Error("ssh-agent closed before responding"));
+    });
+  });
+}
+
+async function sshAgentIdentities() {
+  const SSH_AGENTC_REQUEST_IDENTITIES = 11;
+  const SSH_AGENT_IDENTITIES_ANSWER = 12;
+  const response = await sshAgentRequest(Buffer.from([SSH_AGENTC_REQUEST_IDENTITIES]));
+  if (!response.length || response[0] !== SSH_AGENT_IDENTITIES_ANSWER) {
+    throw new Error("ssh-agent did not return identities");
+  }
+  let [count, off] = readU32(response, 1);
+  const identities = [];
+  for (let i = 0; i < count; i++) {
+    let blob, comment;
+    [blob, off] = readSSHString(response, off);
+    [comment, off] = readSSHString(response, off);
+    identities.push({ blob, comment: comment.toString("utf8") });
+  }
+  return identities;
+}
+
+async function signWithAgent(pubBlob, transcript) {
+  const SSH_AGENTC_SIGN_REQUEST = 13;
+  const SSH_AGENT_SIGN_RESPONSE = 14;
+  const SSH_AGENT_FAILURE = 5;
+  const identities = await sshAgentIdentities();
+  const match = identities.find((identity) => identity.blob.equals(pubBlob));
+  if (!match) throw new Error("client key is not loaded in ssh-agent");
+  const flags = Buffer.alloc(4);
+  flags.writeUInt32BE(0, 0);
+  const payload = Buffer.concat([
+    Buffer.from([SSH_AGENTC_SIGN_REQUEST]),
+    sshString(match.blob),
+    sshString(transcript),
+    flags,
+  ]);
+  const response = await sshAgentRequest(payload);
+  if (!response.length || response[0] === SSH_AGENT_FAILURE) {
+    throw new Error("ssh-agent refused to sign with the client key");
+  }
+  if (response[0] !== SSH_AGENT_SIGN_RESPONSE) {
+    throw new Error("ssh-agent returned an unexpected signing response");
+  }
+  let sigBlob;
+  [sigBlob] = readSSHString(response, 1);
+  let off = 0;
+  let sigType, rawSig;
+  [sigType, off] = readSSHString(sigBlob, off);
+  [rawSig, off] = readSSHString(sigBlob, off);
+  if (sigType.toString("utf8") !== "ssh-ed25519" || rawSig.length !== 64 || off !== sigBlob.length) {
+    throw new Error("ssh-agent returned a non-ed25519 signature");
+  }
+  return rawSig;
+}
+
+async function ensurePairingKey() {
+  try {
+    fs.mkdirSync(RP_DIR, { recursive: true });
+    fs.chmodSync(RP_DIR, 0o700);
+  } catch { /* best-effort dir perms */ }
+  if (!fs.existsSync(PAIRING_KEY)) {
+    await run("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", PAIRING_KEY, "-C", "xpair-pairing", "-q"]);
+  }
+  try { fs.chmodSync(PAIRING_KEY, 0o600); } catch { /* ssh-keygen already sets 600 */ }
+  return fs.existsSync(PAIRING_KEY);
+}
+
+/** The SSH identity for ALL client→host xpair connections: the dedicated pairing key once it exists
+ *  (installed on the host as the restricted, fingerprint-bound authorized_keys line), else the
+ *  personal id_ed25519 as a pre-pairing fallback. id_ed25519 is NEVER installed by pairing. */
+function pairingIdentityKey() {
+  try { if (fs.existsSync(PAIRING_KEY)) return PAIRING_KEY; } catch { /* fall through to default key */ }
+  return SSH_KEY;
+}
+
+/** Sign the pairing transcript with the DEDICATED pairing key. It is generated unencrypted and owned
+ *  by us, so it signs directly (no ssh-agent, no encrypted-key handling). */
+function signPairingTranscript(transcript) {
+  const privateKey = parseOpenSSHEd25519PrivateKey(fs.readFileSync(PAIRING_KEY, "utf8"));
+  return crypto.sign(null, transcript, privateKey.keyObject);
+}
+
+function sshTargetHost(target) {
+  const s = String(target || "").trim();
+  const at = s.indexOf("@");
+  return at === -1 ? s : s.slice(at + 1);
+}
+
+function pairingMetadataURL(host) {
+  const h = sshTargetHost(host);
+  const wrapped = h.includes(":") && !h.startsWith("[") ? `[${h}]` : h;
+  return `http://${wrapped}:${TAILNET_PAIRING_METADATA_PORT}/.well-known/xpair-pairing.json`;
+}
+
+function fetchPairingMetadata(host, timeoutMs = 1200) {
+  const h = sshTargetHost(host);
+  if (!validHost(h)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const req = http.get(pairingMetadataURL(h), { timeout: timeoutMs }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > 16384) req.destroy();
+      });
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(body || "{}"));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on("error", () => resolve(null));
+  });
+}
+
+function sendUdpJSON(host, port, obj) {
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket("udp4");
+    const payload = Buffer.from(JSON.stringify(obj), "utf8");
+    socket.send(payload, Number(port), host, (err) => {
+      socket.close();
+      resolve(err ? { ok: false, err: err.message } : { ok: true, err: "" });
+    });
+  });
+}
+
+function commandOutput(cmd, args) {
+  try {
+    const r = cp.spawnSync(cmd, args, { encoding: "utf8", timeout: 1200, windowsHide: true });
+    return r.status === 0 ? String(r.stdout || "") : "";
+  } catch {
+    return "";
+  }
+}
+
+function currentGatewayMac() {
+  const route = commandOutput("/sbin/route", ["-n", "get", "default"]);
+  const gm = route.match(/gateway:\s*([^\s]+)/);
+  if (!gm) return "";
+  const arp = commandOutput("/usr/sbin/arp", ["-n", gm[1]]);
+  const mm = arp.match(/\bat\s+([0-9a-f]{1,2}(?::[0-9a-f]{1,2}){5})\b/i);
+  return mm ? mm[1].toLowerCase() : "";
+}
+
+function gatewayMacStatus({ updateBaseline = false } = {}) {
+  const stored = parseEnv(CLIENT_ENV).GATEWAY_MAC || "";
+  if (process.platform !== "darwin") {
+    return { allowed: true, state: "unsupported-platform", current: "", stored, err: "" };
+  }
+  const current = currentGatewayMac();
+  // Roaming safety (blueprint §6.4): the gateway MAC is NOT auth, but auto-connect must FAIL CLOSED on
+  // an unknown/changed network (a moved-network signal). It is never the security boundary (SSH host
+  // key + the restricted, fingerprint-bound key is), so recovery is a user-confirmed re-baseline:
+  // gatewayMacStatus({ updateBaseline: true }) (exposed as confirmGatewayBaseline) adopts the new
+  // network on an explicit reconnect — no manual client.env edit needed.
+  if (!current) {
+    return { allowed: false, state: "unknown", current: "", stored, err: "default gateway MAC unknown" };
+  }
+  if (updateBaseline || !stored) {
+    upsertEnv("GATEWAY_MAC", current);
+    return { allowed: true, state: "baseline", current, stored: current, err: "" };
+  }
+  if (stored !== current) {
+    return { allowed: false, state: "changed", current, stored, err: "default gateway MAC changed" };
+  }
+  return { allowed: true, state: "same", current, stored, err: "" };
 }
 
 /** True only when the FULL password-bootstrap toolchain is present: the installed CLI understands
@@ -900,6 +1284,17 @@ const bridge = {
     return { ok: true, err: "" };
   },
 
+  async openHostOnboarding() {
+    const app = await run("open", ["-a", "XpairHost"]);
+    if (app.code === 0) return { ok: true, err: "" };
+    const docs = await run("open", [HOST_SETUP_URL]);
+    if (docs.code === 0) return { ok: true, err: "" };
+    return {
+      ok: false,
+      err: docs.err || app.err || `could not open host onboarding (${HOST_SETUP_URL})`,
+    };
+  },
+
   // Current client config (real state, not hardcoded).
   // SSOT: mappings come from the CLI (`map list --json`), NOT from re-parsing client.env here.
   // rp_set shell-escapes FOLDER_MAPS (e.g. `a::b\;c::d`); the CLI `.`-sources it (unescaping),
@@ -972,10 +1367,10 @@ const bridge = {
   async sshReachable(host) {
     const h = String(host || "").trim();
     if (!h) return { reachable: false, err: "no host" };
-    if (!validHost(h)) {
+    if (!validSshTarget(h)) {
       return {
         reachable: false,
-        err: invalidHost(h),
+        err: invalidSshTarget(h),
         state: SSH_STATE.INVALID_HOST,
         action: SSH_ACTION.ABORT,
       };
@@ -1011,16 +1406,34 @@ const bridge = {
   // BatchMode) runs an engine-specific probe and prints a parseable RP_* block. Auth detection is
   // engine-specific (each engine stores creds differently); see ENGINE_PROBE below. Returns
   // {installed, authed, version, err}.
+  async hostEnvEngine(hostArg) {
+    const host = String(hostArg || parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    if (!host) return { engine: "", err: "REMOTE_HOST not set" };
+    if (!validSshTarget(host)) {
+      return { engine: "", err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    }
+    const cmd = 'set -a; [ -f "$HOME/.xpair/host/host.env" ] && . "$HOME/.xpair/host/host.env"; printf "%s\\n" "${ENGINE:-}"';
+    const r = await run("ssh", [...sshProbeOpts(host, 6), host, cmd]);
+    if (r.code !== 0) {
+      const s = sshResult(r);
+      return { engine: "", err: s.err, state: s.state, action: s.action };
+    }
+    const engine = String(r.out || "").trim().split(/\r?\n/).pop().trim();
+    if (!engine) return { engine: "", err: "host ENGINE not set" };
+    if (!SESSION_ENGINES.has(engine)) return { engine: "", err: `unknown host ENGINE: ${engine}` };
+    return { engine, err: "" };
+  },
+
   async hostEngineStatus(engine) {
-    const e = String(engine || "");
+    const e = String(engine || "").trim();
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { installed: false, authed: false, version: "", err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
+    if (!validSshTarget(host)) {
       return {
         installed: false,
         authed: false,
         version: "",
-        err: invalidHost(host),
+        err: invalidSshTarget(host),
         state: SSH_STATE.INVALID_HOST,
         action: SSH_ACTION.ABORT,
       };
@@ -1065,8 +1478,8 @@ const bridge = {
     const e = String(engine || "");
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
-      return { ok: false, err: invalidHost(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(host)) {
+      return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     if (!ENGINE_INSTALL[e]) return { ok: false, err: `unknown engine: ${e}` };
     // Run the native installer, then persist PATH (skip for shell — nothing was installed).
@@ -1090,8 +1503,8 @@ const bridge = {
     const e = String(engine || "");
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
-      return { ok: false, err: invalidHost(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(host)) {
+      return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     if (!apiKey) return { ok: false, err: "no API key" };
     const writer = ENGINE_AUTH_WRITE[e];
@@ -1120,13 +1533,38 @@ const bridge = {
     if (!p) return { exists: false, err: "no path" };
     const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
     if (!host) return { exists: false, err: "REMOTE_HOST not set" };
-    if (!validHost(host)) {
-      return { exists: false, err: invalidHost(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(host)) {
+      return { exists: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     const r = await run("ssh", [...sshProbeOpts(host, 5), host, "test -e " + shPathQuotePreserveHome(p)]);
     if (r.code === 0) return { exists: true, err: "", state: SSH_STATE.READY, action: SSH_ACTION.CONTINUE };
     const s = sshResult(r);
     return { exists: false, err: s.err, state: s.state, action: s.action };
+  },
+
+  // Mappings — resolve a host folder over SSH before saving it. The webview's sample host
+  // browser emits "~" paths, but FOLDER_MAPS must store an absolute path that exists on the host.
+  async resolveHostPath(sshTarget, hostPath) {
+    const h = String(sshTarget || "").trim();
+    const p = String(hostPath || "").trim();
+    if (!h) return { ok: false, path: "", err: "no host" };
+    if (!p) return { ok: false, path: "", err: "no path" };
+    if (!validSshTarget(h)) {
+      return { ok: false, path: "", err: invalidSshTarget(h), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    }
+    // ssh appends extra argv to the remote command STRING (space-joined); it does NOT set $1. So the
+    // path must be embedded — safely quoted, leading ~ left unquoted so the remote shell expands it —
+    // directly into the command. Mirrors hostPathExists' shPathQuotePreserveHome usage. cd verifies
+    // existence; pwd returns the absolute path.
+    const r = await run("ssh", [...sshProbeOpts(h, 5), h, "cd " + shPathQuotePreserveHome(p) + " 2>/dev/null && pwd"]);
+    if (r.code === 0 && String(r.out || "").trim()) {
+      return { ok: true, path: String(r.out || "").trim().split("\n").pop(), err: "" };
+    }
+    if (r.code === 255 || r.err) {
+      const s = sshResult(r, "could not resolve host folder");
+      return { ok: false, path: "", err: s.err, state: s.state, action: s.action };
+    }
+    return { ok: false, path: "", err: "folder not found" };
   },
 
   // Mappings — compute the default mountpoint the same way xpair-mount does, so the UI
@@ -1174,9 +1612,16 @@ const bridge = {
   // method (mount|sync) is persisted per-mapping (FOLDER_MAP_MODES); omitted ⇒ the CLI infers
   // it by path convention, preserving legacy callers.
   async addMapping(clientPath, hostPath, method) {
-    const args = ["map", "add", clientPath, hostPath];
+    const args = ["map", "add", expandClientHome(clientPath), hostPath];
     if (method === "mount" || method === "sync") args.push(method);
     return cli(args);
+  },
+
+  async removeMapping(clientPath) {
+    // Expand ~ the same way addMapping does, so the stored (absolute) client path is matched on rm.
+    const c = expandClientHome(String(clientPath || "").trim());
+    if (!c) return { code: -1, out: "", err: "removeMapping requires a client path" };
+    return cli(["map", "rm", c]);
   },
 
   // Host File Sharing (SMB) readiness probe → "on" | "off" | "unknown" (best-effort over SSH).
@@ -1213,6 +1658,130 @@ const bridge = {
       return { peers: [], err: "discover: bad JSON: " + String(e && e.message ? e.message : e) };
     }
     return { peers, err: "" };
+  },
+
+  // Pairing — send a signed request to the host's ephemeral UDP endpoint. The request carries the
+  // actual client public key and a raw Ed25519 signature over the length-prefixed transcript:
+  // hostKeyFP, hostNonce, serviceInstanceID, clientPubKey, timestamp.
+  async sendPairingRequest({ host, port, hostKeyFP, hostNonce, serviceInstanceID, name, user } = {}) {
+    const h = String(host || "").trim();
+    const p = Number(port);
+    if (!h || !validHost(h)) return { ok: false, err: invalidHost(h), fingerprint: "" };
+    if (!Number.isInteger(p) || p <= 0 || p > 65535) {
+      return { ok: false, err: "invalid pairing port", fingerprint: "" };
+    }
+    if (!hostKeyFP || !hostNonce || !serviceInstanceID) {
+      return { ok: false, err: "missing pairing transcript fields", fingerprint: "" };
+    }
+
+    if (!(await ensurePairingKey())) {
+      return { ok: false, err: "could not create the xpair pairing key", fingerprint: "" };
+    }
+    let pubkey;
+    try {
+      pubkey = sanitizeEd25519PublicKey(fs.readFileSync(PAIRING_KEY + ".pub", "utf8"));
+    } catch (e) {
+      return { ok: false, err: `could not read pairing public key: ${e.message || e}`, fingerprint: "" };
+    }
+
+    let pub;
+    try {
+      pub = parseEd25519PublicKey(pubkey);
+    } catch (e) {
+      return { ok: false, err: `could not read pairing public key: ${e.message || e}`, fingerprint: "" };
+    }
+
+    const timestamp = Math.floor(Date.now() / 1000);
+    const transcript = canonicalPairingTranscript(hostKeyFP, hostNonce, serviceInstanceID, pub.clean, timestamp);
+    let sig;
+    try {
+      sig = signPairingTranscript(transcript).toString("base64");
+    } catch (e) {
+      return { ok: false, err: `could not sign pairing request: ${e.message || e}`, fingerprint: pub.fingerprint };
+    }
+    const sent = await sendUdpJSON(h, p, {
+      clientPubKey: pub.clean,
+      name: String(name || os.hostname()),
+      user: String(user || os.userInfo().username),
+      timestamp,
+      sig,
+    });
+    return { ok: sent.ok, err: sent.err, fingerprint: pub.fingerprint };
+  },
+
+  async pairingStatus({ host, pairingHost } = {}) {
+    const h = String(host || "").trim();
+    if (!h) return { paired: false, pending: false, denied: false, err: "no host", fingerprint: "" };
+    if (!validSshTarget(h)) {
+      return {
+        paired: false,
+        pending: false,
+        denied: false,
+        err: invalidSshTarget(h),
+        fingerprint: "",
+        state: SSH_STATE.INVALID_HOST,
+        action: SSH_ACTION.ABORT,
+      };
+    }
+
+    await ensurePairingKey();
+    let pub;
+    let clientID;
+    try {
+      pub = parseEd25519PublicKey(fs.readFileSync(PAIRING_KEY + ".pub", "utf8"));
+      clientID = clientIDForKeyBlob(pub.clean.split(/\s+/)[1]);
+    } catch (e) {
+      return {
+        paired: false,
+        pending: false,
+        denied: false,
+        err: `could not read client public key: ${e.message || e}`,
+        fingerprint: "",
+      };
+    }
+
+    const metadata = await fetchPairingMetadata(pairingHost || h);
+    if (
+      metadata &&
+      metadata.phase === "denied" &&
+      metadata.deniedFingerprint &&
+      metadata.deniedFingerprint === pub.fingerprint
+    ) {
+      return {
+        paired: false,
+        pending: false,
+        denied: true,
+        err: "pairing request denied on host",
+        fingerprint: pub.fingerprint,
+        state: SSH_STATE.KEY_AUTH_BLOCKED,
+        action: SSH_ACTION.ABORT,
+      };
+    }
+
+    const probe =
+      `XPAIR_CLIENT_ID=${clientID} /usr/bin/perl -MJSON::PP -e '` +
+      'use strict; use warnings; ' +
+      'my $id=$ENV{"XPAIR_CLIENT_ID"}||""; ' +
+      'my $ledger="$ENV{HOME}/.xpair/authorized_clients.json"; ' +
+      'open(my $fh,"<",$ledger) or exit 2; local $/; my $raw=<$fh>; close($fh); ' +
+      'my $j=eval { JSON::PP->new->decode($raw) }; exit 3 if $@ || ref($j) ne "HASH" || ref($j->{clients}) ne "ARRAY"; ' +
+      'for my $r (@{$j->{clients}}) { next unless ref($r) eq "HASH" && ($r->{clientID}//"") eq $id; if (($r->{status}//"") eq "paired") { print "paired\\n"; exit 0; } exit 4; } exit 5;' +
+      "'";
+    const r = await run("ssh", [...sshPairingProofOpts(h, 5), h, probe]);
+    if (r.code === 0 && /\bpaired\b/.test(r.out || "")) {
+      return { paired: true, pending: false, denied: false, err: "", fingerprint: pub.fingerprint };
+    }
+    const s = sshResult(r, "pairing proof not accepted yet");
+    const pending = s.state === SSH_STATE.KEY_AUTH_BLOCKED || s.state === SSH_STATE.NEEDS_PASSWORD || r.code === 255;
+    return {
+      paired: false,
+      pending,
+      denied: false,
+      err: s.err,
+      fingerprint: pub.fingerprint,
+      state: s.state,
+      action: s.action,
+    };
   },
 
   // Setup — remote install over SSH. Keys are the PRIMARY path: we preflight the key-only path and,
@@ -1382,14 +1951,22 @@ const bridge = {
     }
   },
 
+  // Gateway-MAC roaming is a convenience guard only (blueprint §6.4). Unknown/changed network state
+  // fails CLOSED for auto-connect; auth remains SSH host-key TOFU + the approved client key.
+  gatewayMacStatus,
+  // Recovery for a fail-closed roaming state: an explicit user reconnect re-confirms the current
+  // network by adopting it as the new baseline (so auto-connect is re-enabled without editing client.env).
+  confirmGatewayBaseline() {
+    return gatewayMacStatus({ updateBaseline: true });
+  },
   // TOFU confirm — pin the exact ed25519 host key fingerprint the user confirmed into the effective
   // durable UserKnownHostsFile. Probes learn first-seen keys in an app-launch ephemeral known_hosts
   // file; this asks ssh to bridge the confirmed key into the durable store so later CLI/RD SSH flows
   // do not re-TOFU.
   async pinHostKey(host, expectedFp) {
     const h = String(host || "").trim();
-    if (!validHost(h)) {
-      return { ok: false, err: invalidHost(h), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
+    if (!validSshTarget(h)) {
+      return { ok: false, err: invalidSshTarget(h), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
     }
     if (!expectedFp) return { ok: false, err: "no fingerprint to confirm" };
 
@@ -1467,7 +2044,7 @@ const bridge = {
 
   async hasDurableHostKey(host) {
     const h = String(host || "").trim();
-    if (!validHost(h)) return { ok: false, present: false, err: invalidHost(h) };
+    if (!validSshTarget(h)) return { ok: false, present: false, err: invalidSshTarget(h) };
     const r = await run("ssh", [
       ...sshDurablePinOpts(8),
       "-o", "StrictHostKeyChecking=yes",
@@ -1498,13 +2075,13 @@ const bridge = {
   async hostAppStatus(host) {
     const h = String(host || "").trim();
     if (!h) return { installed: false, version: "", compatible: false, incompatibleKind: "", err: "no host" };
-    if (!validHost(h)) {
+    if (!validSshTarget(h)) {
       return {
         installed: false,
         version: "",
         compatible: false,
         incompatibleKind: "",
-        err: invalidHost(h),
+        err: invalidSshTarget(h),
         state: SSH_STATE.INVALID_HOST,
         action: SSH_ACTION.ABORT,
       };
@@ -1649,6 +2226,14 @@ const bridge = {
   sshActionForState,
   SSH_STATE,
   SSH_ACTION,
+	  __pairingTest: {
+	    canonicalPairingTranscript,
+	    sanitizeEd25519PublicKey,
+	    parseEd25519PublicKey,
+	    clientIDForKeyBlob,
+	    parseOpenSSHEd25519PrivateKey,
+	    gatewayMacStatus,
+	  },
 };
 
 module.exports = bridge;

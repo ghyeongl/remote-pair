@@ -69,6 +69,17 @@ APPROVE_TRIGGER="${APPROVE_TRIGGER:-/tmp/xpair.approve-request}"
 LOG_FILE="${LOG_FILE:-$RP_DIR/logs/xpair.log}"
 HEARTBEAT_FILE="${HEARTBEAT_FILE:-$RP_DIR/logs/xpair.heartbeat}"
 REMOTE_HOST="${REMOTE_HOST:-}"
+
+# Dedicated pairing identity: offer ~/.xpair/host/pairing_ed25519 on EVERY ssh path (the wrapper
+# below routes all `ssh …` calls through it) so a paired client authenticates. Add it with -i but
+# WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet
+# authorized on the host), so ssh must still fall back to the user's normal keys — forcing the key
+# exclusively would break a client that already reached the host via id_ed25519. Empty until the key
+# exists. Scalar (not array) → safe under `set -u` on bash 3.2; no spaces in the path.
+PAIRING_KEY="$RP_DIR/pairing_ed25519"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
+ssh() { command ssh $SSH_ID "$@"; }
+
 FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"     # client::host mappings (legacy SYNC_ROOTS compatible)
 FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"          # per-mapping method, keyed by clientPath: "client::mount;client2::sync"
 LAUNCHER="${LAUNCHER:-$RP_DIR/bin/xpair-launch}"
@@ -101,10 +112,17 @@ ok() { printf '\033[1;32m✓ %s\033[0m\n' "$*"; }
 sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
 valid_host() {
-  case "${1:-}" in
-    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) return 0 ;;
+  local target="${1:-}" user="" host=""
+  case "$target" in ''|-*) return 1 ;; esac
+  case "$target" in
+    *@*)
+      case "$target" in *@*@*|@*|*@) return 1 ;; esac
+      user="${target%@*}"; host="${target#*@}"
+      case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      ;;
+    *) host="$target" ;;
   esac
+  case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
 }
 
 if [ -n "$REMOTE_HOST" ] && ! valid_host "$REMOTE_HOST"; then
@@ -878,7 +896,10 @@ cmd_attach() {
       # symlink at $LOCAL_BIN/mosh is a user shim (e.g. Homebrew) — don't force our client onto it.
       _clientarg=(--client="$LOCAL_BIN/mosh-client")
     fi
-    if mosh ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
+    # mosh spawns its OWN ssh for the server handshake — the ssh() shell wrapper above does NOT apply to
+    # it — so thread the pairing identity through --ssh (mirrors xpair-launch). On a host paired only with
+    # ~/.xpair/host/pairing_ed25519, omitting this fails the mosh handshake before it can attach.
+    if mosh --ssh="ssh $SSH_ID" ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
       trap - HUP TERM
       return 0
     fi
@@ -1112,7 +1133,7 @@ cmd_logs() {
   if [ "$host" = 1 ]; then
     [ -n "$REMOTE_HOST" ] || { echo "no REMOTE_HOST configured — 'xpair config set host <ssh-host>'" >&2; return 1; }
     local rl='$HOME/.xpair/host/logs'
-    if [ "$follow" = 1 ]; then exec ssh -t "$REMOTE_HOST" "tail -n $n -F $rl/*.log 2>/dev/null"
+    if [ "$follow" = 1 ]; then exec ssh $SSH_ID -t "$REMOTE_HOST" "tail -n $n -F $rl/*.log 2>/dev/null"
     else ssh "$REMOTE_HOST" "tail -n $n $rl/*.log 2>/dev/null || echo '(no host logs at ~/.xpair/host/logs)'"; fi
     return
   fi
@@ -1255,11 +1276,13 @@ rp_norm_fp() { case "$1" in SHA256:*) printf '%s' "$1" ;; *) printf 'SHA256:%s' 
 # ── C1. xpair discover [--json] [--timeout S] ──
 # Concurrent LAN (Bonjour via dns-sd) + Tailscale discovery → normalized JSON
 # peer list on stdout (the Electron bridge calls this). Schema per peer:
-#   {"name","addrs":[…],"source":"lan|tailscale|ssh","fp":"SHA256:…"|null,
+#   {"name","addrs":[…],"target","pairingAddress","source":"lan|tailscale|ssh",
+#    "fp":"SHA256:…"|null,"serviceInstanceID","hostNonce","pairPort","hostUser",
 #    "status":"reconnect|connect|setup"}
 # Dedup by host-key fingerprint; cross-reference ~/.ssh/config + client.env.
 RP_BONJOUR_TYPE="_xpair._tcp"
 RP_LEGACY_BONJOUR_TYPE="_remotepair._tcp"
+RP_TAILNET_PAIRING_METADATA_PORT=8891
 # Auto-detect the Tailscale CLI across install layouts (App Store sandbox, brew, manual).
 rp_tailscale_bin() {
   local p
@@ -1320,7 +1343,8 @@ cmd_discover() {
     return 0
   fi
 
-  # Collect peers as tab-separated records: name \t addr \t source \t fp \t role
+  # Collect peers as tab-separated records:
+  # name \t addr \t source \t fp \t role \t serviceInstanceID \t hostNonce \t pairPort \t hostUser
   # then dedup by fp (fall back to name) and emit JSON. We use a temp file rather
   # than a subshell pipe so the awk emitter sees the whole set.
   local rec; rec="$(mktemp "${TMPDIR:-/tmp}/rp-disc.XXXXXX")" || { err "mktemp failed"; return 1; }
@@ -1366,45 +1390,72 @@ cmd_discover() {
       for _i in "${!_lfiles[@]}"; do
         lk="${_lfiles[$_i]}"; svcname="${_lnames[$_i]}"
         # TXT comes as: ... can be reached at <target>:<port> (interface …) hn=… v=… role=… fp=…
-        local txt hn fp role addr
+        local txt hn fp role addr sid nonce pp user
         txt="$(cat "$lk" 2>/dev/null)"
         addr="$(printf '%s' "$txt" | sed -n 's/.*reached at \([^: ]*\):.*/\1/p' | head -1)"
         hn="$(printf '%s' "$txt"   | sed -n 's/.*[[:space:]]hn=\([^ ]*\).*/\1/p'   | head -1)"
         fp="$(printf '%s' "$txt"   | sed -n 's/.*[[:space:]]fp=\([^ ]*\).*/\1/p'   | head -1)"
         role="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]role=\([^ ]*\).*/\1/p' | head -1)"
+        user="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]user=\([^ ]*\).*/\1/p' | head -1)"
+        sid="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]sid=\([^ ]*\).*/\1/p' | head -1)"
+        nonce="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]nonce=\([^ ]*\).*/\1/p' | head -1)"
+        pp="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]pp=\([0-9][0-9]*\).*/\1/p' | head -1)"
         [ -n "$hn" ] || hn="$svcname"
         [ -n "$fp" ] && fp="$(rp_norm_fp "$fp")"
-        printf '%s\t%s\t%s\t%s\t%s\n' "$hn" "${addr:-$hn}" "lan" "${fp:-}" "${role:-}" >> "$rec"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$hn" "${addr:-$hn}" "lan" "${fp:-}" "${role:-}" "${sid:-}" "${nonce:-}" "${pp:-}" "${user:-}" >> "$rec"
         rm -f "$lk"
       done
     done
   fi
 
-  # ── Tailscale: parse `tailscale status --json` peers ──
+  # ── Tailscale: parse `tailscale status --json` peers + Xpair pairing metadata ──
   local ts; ts="$(rp_tailscale_bin || true)"
   if [ -n "$ts" ] && command -v python3 >/dev/null 2>&1; then
-    "$ts" status --json 2>/dev/null | python3 -c '
-import json, sys
-try: d = json.load(sys.stdin)
-except Exception: sys.exit(0)
-for p in (d.get("Peer") or {}).values():
-    # XpairHost is a macOS app — never surface iOS/iPadOS/Linux/Windows/Android tailnet
-    # devices (iPhone, iPad, Raspberry Pi, …) as installable host candidates. Only skip when the
-    # OS is KNOWN-non-macOS (keep unknown/empty to avoid dropping a real Mac with missing metadata).
-    os_ = (p.get("OS") or "").strip().lower()
-    if os_ and os_ != "macos": continue
-    name = (p.get("DNSName") or p.get("HostName") or "").rstrip(".")
-    if not name: continue
-    addrs = p.get("TailscaleIPs") or []
-    addr = addrs[0] if addrs else name
-    online = "online" if p.get("Online") else "offline"
-    # name, addr, source, fp(empty), role(empty); status hint via role col left blank
-    print("%s\t%s\t%s\t%s\t%s" % (name, addr, "tailscale", "", online))
-' >> "$rec" 2>/dev/null || true
+    "$ts" status --json 2>/dev/null | python3 -c 'import textwrap; exec(textwrap.dedent("""
+	import concurrent.futures, json, sys, urllib.request
+	META_PORT = 8891
+	try: d = json.load(sys.stdin)
+	except Exception: sys.exit(0)
+	def fetch_meta(addr):
+	    if not addr: return {}
+	    wrapped = "[%s]" % addr if ":" in addr and not addr.startswith("[") else addr
+	    url = "http://%s:%d/.well-known/xpair-pairing.json" % (wrapped, META_PORT)
+	    try:
+	        with urllib.request.urlopen(url, timeout=0.8) as r:
+	            if getattr(r, "status", 200) != 200: return {}
+	            return json.loads(r.read(16384).decode("utf-8", "replace") or "{}")
+	    except Exception:
+	        return {}
+	def row(p):
+	    # XpairHost is a macOS app — never surface iOS/iPadOS/Linux/Windows/Android tailnet
+	    # devices (iPhone, iPad, Raspberry Pi, …) as installable host candidates. Only skip when the
+	    # OS is KNOWN-non-macOS (keep unknown/empty to avoid dropping a real Mac with missing metadata).
+	    os_ = (p.get("OS") or "").strip().lower()
+	    if os_ and os_ != "macos": return None
+	    if p.get("Online") is False: return None
+	    name = (p.get("DNSName") or p.get("HostName") or "").rstrip(".")
+	    if not name: return None
+	    addrs = p.get("TailscaleIPs") or []
+	    addr = addrs[0] if addrs else name
+	    meta = fetch_meta(addr)
+	    fp = str(meta.get("hostKeyFP") or meta.get("fp") or "")
+	    if fp and not fp.startswith("SHA256:"): fp = "SHA256:" + fp
+	    role = str(meta.get("role") or "")
+	    sid = str(meta.get("serviceInstanceID") or meta.get("sid") or "")
+	    nonce = str(meta.get("hostNonce") or meta.get("nonce") or "")
+	    pp = str(meta.get("pairPort") or meta.get("pp") or "")
+	    user = str(meta.get("hostUser") or meta.get("user") or "")
+	    host_name = str(meta.get("hostname") or name).rstrip(".")
+	    return "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" % (host_name, addr, "tailscale", fp, role, sid, nonce, pp, user)
+	peers = list((d.get("Peer") or {}).values())
+	with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+	    for rec in pool.map(row, peers):
+	        if rec: print(rec)
+	"""))' >> "$rec" 2>/dev/null || true
   fi
 
   # ── Dedup by fp (fallback name) + cross-reference config; emit JSON array ──
-  python3 - "$rec" <<'PY'
+  PAIRING_KEY="$PAIRING_KEY" python3 - "$rec" <<'PY'
 import json, sys, subprocess, os, re
 recfile = sys.argv[1]
 peers = {}
@@ -1435,26 +1486,33 @@ def host_app_present(target):
     # hanging on a stale ControlMaster socket or password/keyboard-interactive fallback, and a tight
     # ConnectTimeout + subprocess cap bound the wait. On timeout we return None (NOT False) so the
     # caller can decide; status_for treats "couldn't confirm" as 'setup' (idempotent (re)install).
+    # Offer the dedicated pairing key so a host-first / pairing-only host (trusts the restricted
+    # ~/.xpair/host/pairing_ed25519) is probed as present instead of mis-reported 'setup'. Add it with
+    # -i but WITHOUT IdentitiesOnly so ssh still falls back to the user's normal key when the pairing
+    # key isn't authorized yet (unproven pairing). Raw subprocess, so the shell ssh() wrapper does not
+    # apply; inject the identity here.
+    pairing_key = os.environ.get("PAIRING_KEY", "")
+    ident = ["-i", pairing_key] if pairing_key and os.path.exists(pairing_key) else []
     try:
         r = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", "-o", "ConnectionAttempts=1",
              "-o", "ControlMaster=no", "-o", "ControlPath=none",
              "-o", "PreferredAuthentications=publickey", "-o", "NumberOfPasswordPrompts=0",
              "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/dev/null",
-             "-T", "-n", target,
+             *ident, "-T", "-n", target,
              "[ -d /Applications/XpairHost.app ] || [ -d $HOME/Applications/XpairHost.app ]"],
             timeout=6, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return r.returncode == 0
     except Exception:
         return None
 
-def status_for(name, addr, role):
-    if name in cfg_aliases or addr in cfg_aliases or name == remote_host or addr == remote_host:
+def status_for(name, addr, role, target):
+    if name in cfg_aliases or addr in cfg_aliases or name == remote_host or addr == remote_host or target == remote_host:
         # Known in ssh config. Only claim 'reconnect' when the host app is CONFIRMED installed; a
         # confirmed-absent OR unverifiable host shows 'setup' so the user lands on the (idempotent)
         # install path instead of a misleading reconnect that would fail. (host_app_present returns
         # None when the probe times out on a cold/slow link — treat that as "not confirmed".)
-        present = host_app_present(name if name in cfg_aliases else addr)
+        present = host_app_present(name if name in cfg_aliases else (addr if addr in cfg_aliases else target))
         return "reconnect" if present is True else "setup"
     if role in ("host", "both", "client"):
         return "connect"
@@ -1468,12 +1526,14 @@ for ln in lines:
     if not ln.strip():
         continue
     parts = ln.split("\t")
-    while len(parts) < 5:
+    while len(parts) < 9:
         parts.append("")
-    name, addr, source, fp, role = parts[:5]
+    name, addr, source, fp, role, sid, nonce, pp, host_user = parts[:9]
     key = fp if fp else ("name:" + name)
     if key not in peers:
-        peers[key] = {"name": name, "addrs": [], "sources": [], "fp": fp or None, "_role": role}
+        peers[key] = {"name": name, "addrs": [], "sources": [], "fp": fp or None, "_role": role,
+                      "serviceInstanceID": sid or "", "hostNonce": nonce or "", "pairPort": pp or "",
+                      "hostUser": host_user or ""}
         order.append(key)
     p = peers[key]
     if addr and addr not in p["addrs"]:
@@ -1484,6 +1544,14 @@ for ln in lines:
         p["fp"] = fp
     if (not p["_role"]) and role in ("host", "both", "client"):
         p["_role"] = role
+    if (not p.get("serviceInstanceID")) and sid:
+        p["serviceInstanceID"] = sid
+    if (not p.get("hostNonce")) and nonce:
+        p["hostNonce"] = nonce
+    if (not p.get("pairPort")) and pp:
+        p["pairPort"] = pp
+    if (not p.get("hostUser")) and host_user:
+        p["hostUser"] = host_user
 
 def alias_for(name, addrs):
     # Prefer an ssh-config Host alias for this peer (matched by full name, the short
@@ -1509,16 +1577,34 @@ for key in order:
     # alias, that alias is the ONLY target that carries an IdentityFile + User (key auth) — a bare
     # discovered address (e.g. a tailnet 100.x IP not in ssh config) would fall back to password
     # auth and hang the GUI askpass. So: alias-known -> the alias name; otherwise the address.
-    target = name if (name in cfg_aliases or name == remote_host) else (addr or name)
-    out.append({
+    if name in cfg_aliases or name == remote_host:
+        target = name
+    elif p.get("hostUser") and addr:
+        target = "%s@%s" % (p["hostUser"], addr)
+    else:
+        target = addr or name
+    item = {
         "name": name,
         "addrs": p["addrs"],
         "target": target,
+        "pairingAddress": addr,
         "source": src,
         "sources": p["sources"],
         "fp": p["fp"],
-        "status": status_for(name, addr, p["_role"]),
-    })
+        "status": status_for(name, addr, p["_role"], target),
+    }
+    if p.get("serviceInstanceID"):
+        item["serviceInstanceID"] = p["serviceInstanceID"]
+    if p.get("hostNonce"):
+        item["hostNonce"] = p["hostNonce"]
+    if p.get("pairPort"):
+        try:
+            item["pairPort"] = int(p["pairPort"])
+        except Exception:
+            pass
+    if p.get("hostUser"):
+        item["hostUser"] = p["hostUser"]
+    out.append(item)
 print(json.dumps(out))
 PY
 }
@@ -1603,6 +1689,13 @@ cmd_install_host() {
     RP_SSHOPTS+=(-o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no
                  -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes
                  -o BatchMode=no -o NumberOfPasswordPrompts=1)
+  fi
+  # Paired update path (StepUpdate → install-host --force, key auth): offer the restricted pairing key
+  # to every ssh AND scp over this master so a paired host authenticates. Added with -i but WITHOUT
+  # IdentitiesOnly, so ssh still falls back to the user's normal key if the pairing key isn't authorized
+  # yet (unproven pairing). Skip during the password bootstrap (pre-pairing). Appended → set -u safe.
+  if [ "$password_stdin" != 1 ] && [ -f "$PAIRING_KEY" ]; then
+    RP_SSHOPTS+=(-i "$PAIRING_KEY")
   fi
   # ONE combined cleanup trap on RETURN — fires on every function return (normal + error) while the
   # locals it needs (RP_CM, target, …) are STILL IN SCOPE. (An EXIT trap runs after the function has
@@ -1702,15 +1795,19 @@ cmd_install_host() {
       # lib.sh from its own dir, and config.sh sets REPO_ROOT = <stage>/shared/.. = <stage>, so build/
       # and host/ must live under <stage>. rsync over the detached-ssh wrapper needs -e plumbing; scp -r
       # is sufficient and reuses the same askpass env.
+      # -O forces LEGACY SCP mode (remote `scp -t` over SSH_ORIGINAL_COMMAND) instead of the SFTP
+      # subsystem: on a paired-only host these transfers authenticate with the restricted pairing key,
+      # whose forced xpair-ssh-gate execs SSH_ORIGINAL_COMMAND and serves NO sftp subsystem — default
+      # (SFTP) scp would fail before the update installs. -O is harmless over the normal key/password path.
       _rp_ssh "$target" "rm -rf ~/.cache/xpair/stage && mkdir -p ~/.cache/xpair/stage/shared ~/.cache/xpair/stage/host ~/.cache/xpair/stage/client ~/.cache/xpair/stage/build" 2>/dev/null || true
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" "$repo_root"/shared/*.sh "$target:~/.cache/xpair/stage/shared/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" "$repo_root"/shared/*.sh "$target:~/.cache/xpair/stage/shared/" </dev/null \
         || { err "scp of shared/ failed"; return 1; }
       # role=host also (re)installs the client CLI tools from client/cli/ — stage them too.
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" -r "$repo_root/client/cli" "$target:~/.cache/xpair/stage/client/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/client/cli" "$target:~/.cache/xpair/stage/client/" </dev/null \
         || { err "scp of client/cli failed"; return 1; }
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" -r "$repo_root/host/rules.txt" "$repo_root/host/skills" "$repo_root/host/hooks" "$target:~/.cache/xpair/stage/host/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/host/rules.txt" "$repo_root/host/skills" "$repo_root/host/hooks" "$target:~/.cache/xpair/stage/host/" </dev/null \
         || { err "scp of host resources failed"; return 1; }
-      "${SSHENV[@]}" scp "${RP_SSHOPTS[@]}" -r "$appsrc" "$target:~/.cache/xpair/stage/build/" </dev/null \
+      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$appsrc" "$target:~/.cache/xpair/stage/build/" </dev/null \
         || { err "scp of signed app failed"; return 1; }
       _rp_ssh "$target" "cd ~/.cache/xpair/stage && RP_YES=1 bash shared/install.sh --role host" \
         || { err "remote install.sh failed"; return 1; }
@@ -1725,19 +1822,30 @@ cmd_install_host() {
   # BatchMode=yes (key-only) calls below — and every later editor/desktop/notify call
   # — would fail despite a "successful" install/re-register. Idempotent (grep -qxF),
   # so re-running on an already-authorized host is a no-op.
-  local pubpath; pubpath="$(rp_ssh_pubkey)" || { err "could not resolve client pubkey"; return 1; }
-  local pubdata; pubdata="$(cat "$pubpath" 2>/dev/null)"
-  [ -n "$pubdata" ] || { err "empty client pubkey: $pubpath"; return 1; }
-  c "authorizing client key on $target (over the setup connection) …"
-  # ssh-copy-id-style append: idempotent (grep -qxF guard), correct perms. Rides the
-  # SAME multiplexed master (RP_SSHOPTS/SSHENV) the connection authenticated — so no
-  # re-auth, no separate password prompt, no host-key prompt. The pubkey is piped
-  # into ssh and read via $(cat) on the host; we do NOT use _rp_ssh (it hardcodes
-  # </dev/null, which would drop the piped key).
-  local rp_authcmd='umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; key=$(cat); grep -qxF "$key" ~/.ssh/authorized_keys || printf "%s\n" "$key" >> ~/.ssh/authorized_keys'
-  printf '%s\n' "$pubdata" | "${SSHENV[@]}" ssh "${RP_SSHOPTS[@]}" "$target" "$rp_authcmd" \
-    || { err "failed to authorize client key on $target"; return 1; }
-  ok "client key authorized on $target"
+  # Authorize the UNRESTRICTED personal key EXCEPT on the key-auth update path to an already-paired host.
+  # Appending ~/.ssh/id_ed25519.pub on a post-pairing update (StepUpdate → install-host --force, key auth)
+  # would silently re-grant access OUTSIDE the restricted xpair-ssh-gate line and undo the dedicated
+  # pairing-key boundary — and it is unnecessary there because the pairing key already grants access.
+  # A PASSWORD bootstrap (password_stdin=1) is always a NEW host that has NOT installed the pairing key,
+  # so it must still authorize the personal key even when a pairing key exists locally for another host
+  # (the pairing key is client-wide, not per-host) — otherwise the new host fails every later key-only probe.
+  if [ -f "$PAIRING_KEY" ] && [ "$password_stdin" != 1 ]; then
+    c "paired host (key auth): skipping personal-key authorization (restricted pairing key already grants access)"
+  else
+    local pubpath; pubpath="$(rp_ssh_pubkey)" || { err "could not resolve client pubkey"; return 1; }
+    local pubdata; pubdata="$(cat "$pubpath" 2>/dev/null)"
+    [ -n "$pubdata" ] || { err "empty client pubkey: $pubpath"; return 1; }
+    c "authorizing client key on $target (over the setup connection) …"
+    # ssh-copy-id-style append: idempotent (grep -qxF guard), correct perms. Rides the
+    # SAME multiplexed master (RP_SSHOPTS/SSHENV) the connection authenticated — so no
+    # re-auth, no separate password prompt, no host-key prompt. The pubkey is piped
+    # into ssh and read via $(cat) on the host; we do NOT use _rp_ssh (it hardcodes
+    # </dev/null, which would drop the piped key).
+    local rp_authcmd='umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; key=$(cat); grep -qxF "$key" ~/.ssh/authorized_keys || printf "%s\n" "$key" >> ~/.ssh/authorized_keys'
+    printf '%s\n' "$pubdata" | "${SSHENV[@]}" ssh "${RP_SSHOPTS[@]}" "$target" "$rp_authcmd" \
+      || { err "failed to authorize client key on $target"; return 1; }
+    ok "client key authorized on $target"
+  fi
 
   # Persist a managed SSH config block for future key-auth connections. This is deliberately after
   # authorization: a written config should mean the host accepts the pinned client key.

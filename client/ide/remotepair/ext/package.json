@@ -35,6 +35,10 @@
         "icon": "$(remote)"
       },
       {
+        "command": "remotepair.confirmGatewayBaseline",
+        "title": "Xpair: Reconnect After Network Change (adopt new gateway)"
+      },
+      {
         "command": "remotepair.remoteDesktop.refresh",
         "title": "Xpair: Refresh Remote Desktop",
         "icon": "$(refresh)"

@@ -1,50 +1,59 @@
-import { Check } from "lucide-react";
-import type { Mapping } from "./StepFileAccess";
-import { ConsentControls } from "./ConsentControls";
+import { Check, Sparkles } from "lucide-react";
+import type { Mapping } from "./StepMappings";
+import type { DiscoveredHost } from "./StepDiscover";
+import { StepHero, StepHeader } from "@/components/onboarding/StepHero";
+import { useT } from "@/lib/i18n";
 
-type Props = { host: string; mappings: Mapping[] };
+type Props = { host: DiscoveredHost | null; mappings: Mapping[] };
 
 export function StepDone({ host, mappings }: Props) {
+  const { t } = useT();
   return (
-    <div className="flex flex-col items-center text-center">
-      <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10 text-primary">
-        <Check className="h-7 w-7" />
-      </div>
-      <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-        You're all set
-      </h2>
-      <p className="mt-3 max-w-sm text-sm text-muted-foreground">
-        Xpair is connected to{" "}
-        <span className="font-mono text-foreground">{host}</span>
-        {mappings.length === 0 ? (
-          <> — no folders mapped yet. Add them anytime from the IDE with Add Root.</>
-        ) : (
+    <div>
+      <StepHero icon={Sparkles} tone="success" />
+      <StepHeader
+        title={t("done.client.title")}
+        description={
           <>
-            {" "}
-            with {mappings.length} mapping{mappings.length === 1 ? "" : "s"}.
+            {t("done.client.pairedWith")}{" "}
+            <span className="font-mono text-foreground">
+              {host?.name ?? t("done.client.yourHost")}
+            </span>
+            {t("done.client.workspaceReady")}
           </>
-        )}
-      </p>
+        }
+      />
 
-      <div className="mt-8 w-full max-w-sm rounded-xl border border-border bg-muted/30 p-4 text-left">
-        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Summary
-        </div>
-        <div className="mt-2 flex justify-between text-sm">
-          <span className="text-muted-foreground">Host</span>
-          <span className="font-mono text-foreground">{host}</span>
-        </div>
-        <div className="mt-1.5 flex justify-between text-sm">
-          <span className="text-muted-foreground">Mappings</span>
-          <span className="text-foreground">{mappings.length}</span>
-        </div>
+      <div className="mx-auto mt-5 max-w-sm rounded-2xl border border-border/60 bg-muted/30 p-4">
+        <SummaryRow label={t("done.host")} value={host?.name ?? t("shell.notAvailable")} mono />
+        <SummaryRow label={t("done.transport")} value={host?.transport ?? t("shell.notAvailable")} />
+        <SummaryRow
+          label={t("done.mappings")}
+          value={`${mappings.length} ${
+            mappings.length === 1 ? t("done.folder") : t("done.folders")
+          }`}
+        />
       </div>
+    </div>
+  );
+}
 
-      {/* Consent re-toggle — same two opt-in flags first surfaced on StepWelcome (default OFF).
-          Reflects/persists the user's earlier choice; also changeable later in settings. */}
-      <div className="mt-4">
-        <ConsentControls variant="summary" />
-      </div>
+function SummaryRow({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between py-1 text-sm">
+      <span className="flex items-center gap-2 text-muted-foreground">
+        <Check className="h-3.5 w-3.5 text-emerald-500" />
+        {label}
+      </span>
+      <span className={mono ? "font-mono text-foreground" : "text-foreground"}>{value}</span>
     </div>
   );
 }

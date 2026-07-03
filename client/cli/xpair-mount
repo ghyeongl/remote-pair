@@ -39,6 +39,15 @@ done
 REMOTE_HOST="${REMOTE_HOST:-}"
 MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"
 
+# Dedicated pairing identity: offer ~/.xpair/host/pairing_ed25519 on every SSH helper (SMB-state
+# probe, whoami) AND on the sshfs mount so a paired client authenticates. Added with -i / IdentityFile
+# but WITHOUT IdentitiesOnly, so ssh/sshfs still fall back to the user's normal key when the pairing
+# key isn't authorized yet (unproven pairing). Empty until the key exists; scalar → set -u safe.
+PAIRING_KEY="$RP_DIR/pairing_ed25519"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
+SSHFS_ID=""; [ -f "$PAIRING_KEY" ] && SSHFS_ID="-o IdentityFile=$PAIRING_KEY"
+ssh() { command ssh $SSH_ID "$@"; }
+
 # Default mountpoint root: ~/.xpair/host/mounts/<host>/<sanitized-path>
 MOUNTS_ROOT="$RP_DIR/mounts"
 
@@ -72,13 +81,24 @@ SUBCMD="${SUBCMD:-help}"
 
 # ── helpers ──
 # Mirror the main CLI's valid_host guard: reject empty, option-looking (-…), or any
-# host containing characters outside [A-Za-z0-9._-] before it reaches ssh/sshfs/mount_smbfs.
+# host/user containing characters outside [A-Za-z0-9._-] before it reaches ssh/sshfs/mount_smbfs.
 # This helper re-sources client.env, so re-validate here (e.g. -oProxyCommand=… injection).
 valid_host() {
-  case "${1:-}" in
-    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) return 0 ;;
+  local target="${1:-}" user="" host=""
+  case "$target" in ''|-*) return 1 ;; esac
+  case "$target" in
+    *@*)
+      case "$target" in *@*@*|@*|*@) return 1 ;; esac
+      user="${target%@*}"; host="${target#*@}"
+      case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+      ;;
+    *) host="$target" ;;
   esac
+  case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+}
+
+smb_host() {
+  case "${REMOTE_HOST:-}" in *@*) printf '%s' "${REMOTE_HOST#*@}" ;; *) printf '%s' "${REMOTE_HOST:-}" ;; esac
 }
 
 # Best-effort probe of the host's File Sharing (SMB) state over SSH → echoes on|off|unknown.
@@ -227,7 +247,7 @@ cmd_mount() {
       # Sub-path within the share (empty if hostpath IS the share root).
       # macOS File Sharing shares the exact folder added in System Preferences, so the
       # mountpoint maps to hostpath directly when share_name == basename(hostpath).
-      local smb_url="//${smb_user_name}@${REMOTE_HOST}/${share_name}"
+      local smb_url="//${smb_user_name}@$(smb_host)/${share_name}"
       info "Mounting via SMB: $smb_url → $mountpoint"
       printf >&2 '  Note: the host must have File Sharing enabled:\n'
       printf >&2 '    System Settings > General > Sharing > File Sharing\n'
@@ -259,6 +279,7 @@ cmd_mount() {
       local volname; volname="rp-$(basename "$hostpath")"
       info "Mounting via SSHFS: $REMOTE_HOST:$hostpath → $mountpoint"
       if ! sshfs "${REMOTE_HOST}:${hostpath}" "$mountpoint" \
+          $SSHFS_ID \
           -o reconnect \
           -o defer_permissions \
           -o noappledouble \

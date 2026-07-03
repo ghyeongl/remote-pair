@@ -3,24 +3,19 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const root = __dirname;
+const repoRoot = path.join(root, "..", "..", "..", "..");
 const patch = fs.readFileSync(
   path.join(root, "..", "patches", "zz-remotepair-ide-frontend.patch"),
   "utf8",
 );
-const clientStepEngine = fs.readFileSync(
-  path.join(root, "onboarding-webview/src/components/onboarding/client/StepEngine.tsx"),
-  "utf8",
-);
 const bridge = fs.readFileSync(path.join(root, "onboarding-bridge.js"), "utf8");
 const launcher = fs.readFileSync(path.join(root, "..", "..", "..", "cli", "xpair-launch"), "utf8");
+const hostApp = fs.readFileSync(path.join(repoRoot, "host/onboarding/src/App.tsx"), "utf8");
 const hostStepEngine = fs.readFileSync(
-  path.join(root, "..", "..", "..", "..", "host/onboarding/src/components/onboarding/host/StepEngine.tsx"),
+  path.join(repoRoot, "host/onboarding/src/components/onboarding/host/StepEngine.tsx"),
   "utf8",
 );
-const engineGuard = fs.readFileSync(
-  path.join(root, "..", "..", "..", "..", "host/app/EngineGuard.swift"),
-  "utf8",
-);
+const engineGuard = fs.readFileSync(path.join(repoRoot, "host/app/EngineGuard.swift"), "utf8");
 
 function addedFileSection(fileName) {
   const marker = `diff --git a/${fileName} b/${fileName}`;
@@ -50,12 +45,12 @@ test("Codex is supported by the terminal/session flow and host install/auth chec
     /export type SessionKind = 'claude' \| 'shell' \| 'codex' \| 'gemini';/,
     "New Session picker/session kind model must include codex",
   );
-  assert.match(clientStepEngine, /\{ id: "codex", label: "Codex"/);
-  assert.match(clientStepEngine, /window\.remotepair\.hostEngineStatus\(e\)/);
-  assert.match(clientStepEngine, /window\.remotepair\.installHostEngine\(engine\)/);
-  assert.match(clientStepEngine, /window\.remotepair\.setHostEngineAuth\(engine, apiKey\.trim\(\)\)/);
-  assert.match(hostStepEngine, /\{ id: "codex", label: "Codex"/);
+  assert.match(hostApp, /w\.index === ENGINE_IDX && \([\s\S]*<StepEngine selected=\{engines\} setSelected=\{setEngines\} \/>/);
+  assert.match(hostStepEngine, /const ORDER: EngineKey\[\] = \["claude", "codex", "opencode", "shell"\]/);
+  assert.match(hostStepEngine, /codex: Bot/);
   assert.match(hostStepEngine, /window\.xpair\.engineStatus\(e\)/);
+  assert.match(hostStepEngine, /window\.xpair\.installEngine\(engine\)/);
+  assert.match(hostStepEngine, /window\.xpair\.setEngineAuth\(engine, apiKey\.trim\(\)\)/);
   assert.match(bridge, /const ENGINES = new Set\(\["claude", "codex", "opencode"\]\)/);
   assert.match(bridge, /codex:\s*\n\s*PATH_PREFIX \+/);
   assert.match(bridge, /command -v codex/);

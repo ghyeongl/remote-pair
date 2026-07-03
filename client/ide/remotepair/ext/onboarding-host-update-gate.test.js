@@ -4,8 +4,12 @@ const path = require("node:path");
 
 const root = __dirname;
 const app = fs.readFileSync(path.join(root, "onboarding-webview/src/App.tsx"), "utf8");
-const stepInstalling = fs.readFileSync(
-  path.join(root, "onboarding-webview/src/components/onboarding/client/StepInstalling.tsx"),
+const discover = fs.readFileSync(
+  path.join(root, "onboarding-webview/src/components/onboarding/client/StepDiscover.tsx"),
+  "utf8",
+);
+const update = fs.readFileSync(
+  path.join(root, "onboarding-webview/src/components/onboarding/client/StepUpdate.tsx"),
   "utf8",
 );
 const bridge = fs.readFileSync(path.join(root, "onboarding-bridge.js"), "utf8");
@@ -23,177 +27,66 @@ function test(name, fn) {
   }
 }
 
-function requiredConst(name) {
-  const match = app.match(new RegExp(`const ${name} =[\\s\\S]*?;\\n`));
-  assert.ok(match, `${name} must exist`);
-  return match[0];
-}
-
-test("bridge installHost supports force:true and host incompatibility kinds", () => {
+test("bridge and preload contracts still expose force host updates and incompatibility kind", () => {
+  assert.match(bridge, /const MIN_COMPATIBLE_HOST = "0\.5\.0a51";/);
   assert.match(bridge, /async installHost\(\{ host, user, password, force \} = \{\}\)/);
   assert.match(bridge, /if \(force\) args\.push\("--force"\)/);
   assert.match(bridge, /incompatibleKind = "major_mismatch"/);
   assert.match(bridge, /incompatibleKind = "below_floor"/);
-  assert.match(bridge, /MIN_COMPATIBLE_HOST = "0\.5\.0a51"/);
-});
-
-test("global.d.ts exposes force installs and incompatibleKind", () => {
   assert.match(globals, /installHost: \(opts: \{ host: string; user\?: string; password\?: string; force\?: boolean \}\)/);
   assert.match(globals, /incompatibleKind: "below_floor" \| "major_mismatch" \| ""/);
 });
 
-test("StepInstalling repair mode warns first and only force-installs non-restart repairs after a click", () => {
-  assert.match(stepInstalling, /isUpdate\?: boolean/);
-  assert.match(stepInstalling, /forceInstall\?: boolean/);
-  assert.match(stepInstalling, /repairKind\?: "missing" \| "update" \| "restart" \| "incompatible"/);
-  assert.match(stepInstalling, /const useForce = repairMode && repairKind !== "restart";/);
-  // installHost is opts-based now: force from useForce, plus the optional one-shot password.
-  assert.match(stepInstalling, /useForce \? \{ force: true \}[\s\S]*password !== undefined \? \{ password \}/);
-  assert.match(stepInstalling, /restart XpairHost/);
-  assert.match(stepInstalling, /terminate any running tmux sessions on the host/);
-  assert.match(stepInstalling, /without reinstalling it/);
-  assert.match(
-    stepInstalling,
-    /\{useForce \? \([\s\S]*terminate any running tmux sessions on the host[\s\S]*\) : \([\s\S]*without reinstalling it/,
-  );
-  assert.match(stepInstalling, /minimum compatible host version is \$\{requiredVersion\} or newer/);
-  assert.match(stepInstalling, /if \(repairMode\) return;\s*\n\s*if \(started\.current\) return;/);
-  assert.match(stepInstalling, /state === "idle" && !showingPassword[\s\S]*onClick=\{\(\) => runInstall\(\)\}[\s\S]*\{repairButton\}/);
+test("discovery classifies host update states before leaving Discover", () => {
+  assert.match(discover, /function deriveHostFlags/);
+  assert.match(discover, /!!r\.installed && !r\.compatible && r\.incompatibleKind === "major_mismatch"/);
+  assert.match(discover, /!majorMismatch && !!r\.installed && !r\.compatible && r\.incompatibleKind === "below_floor"/);
+  assert.match(discover, /const status = await window\.remotepair\.hostAppStatus\(host\.sshTarget \?\? host\.address\)/);
+  assert.match(discover, /outdated: flags\.outdated/);
+  assert.match(discover, /majorMismatch: flags\.majorMismatch/);
 });
 
-test("password bootstrap states are surfaced through bridge and StepInstalling", () => {
+test("Discover keeps non-broadcasting XpairHosts so below-floor hosts can reach the Update flow", () => {
+  // Regression for the round-10 `if (!canPair) continue` drop-everything filter: it hid below-floor
+  // XpairHosts (fp set, no live pairing metadata), so selecting them — the only way hostAppStatus()
+  // detects below_floor and routes to Update — was impossible and the upgrade dead-ended in an empty
+  // Discover screen. The keep must be gated on `!canPair && !isXpairHost`, never `!canPair` alone.
+  assert.match(discover, /const isXpairHost = !!peer\.fp \|\| peer\.status !== "setup"/);
+  assert.match(discover, /if \(!canPair && !isXpairHost\) continue/);
+  assert.doesNotMatch(discover, /if \(!canPair\) continue/);
+});
+
+test("App gates the Update step and cannot finish while update or pairing is incomplete", () => {
+  assert.match(app, /UPDATE: 4,[\s\S]*WAIT_PERM: 5,[\s\S]*MAPPINGS: 6,[\s\S]*DONE: 7/);
+  assert.match(app, /const needsUpdate = !!selectedHost\?\.outdated;/);
+  assert.match(app, /const majorMismatch = !!selectedHost\?\.majorMismatch;/);
+  assert.match(app, /const blockedOnUpdate = w\.index === 4 && majorMismatch;/);
+  assert.match(app, /w\.index === 4 && needsUpdate && updateState !== "done"/);
+  assert.match(app, /if \(majorMismatch \|\| \(needsUpdate && updateState !== "done"\)\) \{[\s\S]*w\.goTo\(S\.UPDATE, "prev"\)/);
+  assert.match(app, /if \(!permAccepted \|\| permDenied\) \{[\s\S]*w\.goTo\(S\.WAIT_PERM, "prev"\)/);
+  assert.match(app, /if \(!hasRealMapping\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
+  assert.match(app, /w\.index === 4 && !needsUpdate && !majorMismatch && updateState !== "done"[\s\S]*setTimeout\(\(\) => w\.next\(\), 650\)/);
+});
+
+test("StepUpdate force-installs below-floor hosts, re-probes, and blocks major mismatches", () => {
+  assert.match(update, /const needsUpdate = !!host\?\.outdated && !host\.majorMismatch;/);
+  assert.match(update, /const majorMismatch = !!host\?\.majorMismatch;/);
+  assert.match(update, /if \(majorMismatch\) \{[\s\S]*<StepDeadEnd[\s\S]*title=\{t\("update\.tooNew\.title"\)\}[\s\S]*update\.checkClientUpdates[\s\S]*update\.pickAnother/);
+  assert.match(update, /const target = host\.sshTarget \?\? host\.address/);
+  assert.match(update, /window\.remotepair\.installHost\(\{ host: target, force: true \}\)/);
+  assert.match(update, /const status = await window\.remotepair\.hostAppStatus\(target\)/);
+  assert.match(update, /if \(status\.compatible\) \{[\s\S]*setPct\(100\);[\s\S]*setState\("done"\);[\s\S]*return;/);
+  assert.match(update, /setError\(status\.err \|\| t\("update\.error"\)\)/);
+  assert.doesNotMatch(app, /StepInstalling/);
+  assert.doesNotMatch(app, /routeToHostUpdate/);
+});
+
+test("password bootstrap states remain bridge-only, not a renderer StepInstalling dependency", () => {
   assert.match(bridge, /NEEDS_PASSWORD: "needs_password"/);
   assert.match(bridge, /PASSWORD_DENIED: "password_denied"/);
   assert.match(bridge, /PROMPT_PASSWORD: "prompt_password"/);
   assert.match(bridge, /cliWithPasswordStdin\(args, pw\)/);
-  assert.match(stepInstalling, /r\.state === "needs_password"/);
-  assert.match(stepInstalling, /r\.state === "password_denied"/);
-  assert.match(stepInstalling, /I Understand/);
-  assert.match(stepInstalling, /Host account password/);
-});
-
-test("App keeps automatic host detection but removes update auto-navigation machinery", () => {
-  assert.match(
-    app,
-    /if \(requiresHostApp && reachReady && connectTarget\) \{\s*void checkHostApp\(connectTarget\);/,
-  );
-  assert.doesNotMatch(app, /routeToHostUpdate/);
-  assert.doesNotMatch(app, /updateDismissed/);
-  assert.doesNotMatch(app, /waitForFreshHostStatus/);
-  assert.doesNotMatch(app, /updateCompletionId/);
-  assert.doesNotMatch(app, /setInstallMode\("update"\)/);
-  assert.doesNotMatch(app, /w\.goTo\(S\.INSTALL, "next"\)/);
-});
-
-test("safe saved, manual, reconnect, or connect hosts render an inline repair button instead of navigating", () => {
-  assert.match(
-    app,
-    /const hostAppLiveFalse =[\s\S]*hostApp\.installed === true &&[\s\S]*hostApp\.compatible === true &&[\s\S]*hostPerms\.alive === false/,
-  );
-  const canRepairHost = requiredConst("canRepairHost");
-  assert.match(canRepairHost, /requiresHostApp &&/);
-  assert.match(canRepairHost, /reachReady &&/);
-  assert.match(canRepairHost, /\(manual \|\| startsFromSavedHost \|\| isReconnect \|\| isConnect\) &&/);
-  assert.match(canRepairHost, /hostApp\.target === connectTarget &&/);
-  assert.match(
-    canRepairHost,
-    /hostApp\.installed !== true \|\|[\s\S]*hostApp\.incompatibleKind === "below_floor"[\s\S]*\|\|[\s\S]*hostAppLiveFalse/,
-  );
-  assert.match(
-    app,
-    /const hostRepairPanel = canRepairHost \? \([\s\S]*<StepInstalling[\s\S]*forceInstall[\s\S]*repairKind=\{hostRepairKind\}[\s\S]*host=\{connectTarget\}/,
-  );
-  assert.match(app, /const MIN_COMPATIBLE_HOST = "0\.5\.0a51"/);
-});
-
-test("missing-app repair shows fingerprint/key prep before the install panel unless a durable key exists", () => {
-  assert.match(app, /const \[savedHost, setSavedHost\] = useState\(""\);/);
-  assert.match(app, /const hydratedHost = cfg\.remoteHost\.trim\(\);/);
-  assert.match(app, /setSavedHost\(\(current\) => current \|\| hydratedHost\);/);
-  assert.match(app, /setHost\(\(current\) => current \|\| hydratedHost\);/);
-  assert.match(
-    app,
-    /const missingRepairNeedsHostKey =[\s\S]*hostRepairKind === "missing" &&[\s\S]*\(manual \|\| startsFromSavedHost \|\| isReconnect \|\| isConnect \|\| !!savedHost\);/,
-  );
-  assert.match(
-    app,
-    /hasDurableHostKey\(connectTarget\)[\s\S]*present: !!r\.ok && !!r\.present/,
-  );
-  assert.match(
-    app,
-    /const missingRepairPeer: Peer \| null = connectTarget[\s\S]*source: "ssh"[\s\S]*status: "setup"/,
-  );
-  assert.match(
-    app,
-    /missingRepairNeedsHostKey && !durableEntryVerified && missingRepairPeer[\s\S]*<StepSetupPassword[\s\S]*peer=\{missingRepairPeer\}[\s\S]*onReady=\{setSetupReady\}/,
-  );
-  assert.match(
-    app,
-    /const durableEntryVerified =[\s\S]*missingRepairNeedsHostKey &&[\s\S]*durableHostKey\?\.target === connectTarget &&[\s\S]*durableHostKey\.present/,
-  );
-  assert.match(
-    app,
-    /const repairHostKeyPinned =[\s\S]*!missingRepairNeedsHostKey \|\|[\s\S]*durableEntryVerified \|\|[\s\S]*setupPinnedKey === setupPinKey\(connectTarget, setupFp\);/,
-  );
-  assert.match(
-    app,
-    /missingRepairNeedsHostKey && setupReady && !repairHostKeyPinned[\s\S]*onClick=\{\(\) => void pinConfirmedHostKey\(connectTarget, setupFp\)\}/,
-  );
-  assert.match(
-    app,
-    /\{repairHostKeyPinned && \([\s\S]*<StepInstalling/,
-  );
-  assert.match(
-    app,
-    /previousConnectTarget\.current = connectTarget;[\s\S]*setSetupReady\(false\);[\s\S]*setInstallState\("idle"\);/,
-  );
-});
-
-test("below-floor hosts keep update wording while major-mismatch hosts stay blocked", () => {
-  const canRepairHost = requiredConst("canRepairHost");
-  assert.match(
-    app,
-    /const canUpdateHost =[\s\S]*hostApp\.installed &&[\s\S]*!hostApp\.compatible &&[\s\S]*hostApp\.incompatibleKind === "below_floor"/,
-  );
-  assert.doesNotMatch(
-    canRepairHost,
-    /hostApp\.compatible !== true \|\| hostAppLiveFalse/,
-    "broad incompatible repair would include major_mismatch and can downgrade a newer host",
-  );
-  assert.doesNotMatch(canRepairHost, /major_mismatch/);
-  assert.match(
-    app,
-    /hostApp\.compatible !== true[\s\S]*\? canUpdateHost[\s\S]*\? "update"[\s\S]*: "incompatible"/,
-  );
-  assert.match(
-    app,
-    /requiredVersion=\{hostRepairKind === "update" \? MIN_COMPATIBLE_HOST : ""\}/,
-  );
-});
-
-test("successful inline repair performs hostAppStatus and liveness re-probes before opening Next", () => {
-  assert.match(
-    app,
-    /const handleHostRepairDone = useCallback\(\(\) => \{[\s\S]*setInstallState\("idle"\);[\s\S]*setHostApp\(null\);[\s\S]*setHostPerms\(null\);[\s\S]*setHostPermChecking\(false\);[\s\S]*void checkHostApp\(connectTarget\);/,
-  );
-  assert.match(
-    app,
-    /const hostAppReady =[\s\S]*hostApp\.target === connectTarget &&[\s\S]*hostApp\.installed &&[\s\S]*hostApp\.compatible/,
-  );
-  assert.match(
-    app,
-    /hostPermissions\(\{ host: connectTarget \}\)/,
-  );
-  assert.match(app, /const connectReady = reachReady && hostAppReady && hostPermReady/);
-  assert.match(app, /!connectReady \|\|[\s\S]*hostAppChecking/);
-});
-
-test("final liveness reports incompatibility without launching a host-update route", () => {
-  assert.match(
-    app,
-    /if \(app\.installed && !app\.compatible\) \{[\s\S]*setLiveErr\(app\.err \|\| "Host version is incompatible with this client\."\);[\s\S]*setLive\("host-app"\)/,
-  );
-  assert.doesNotMatch(app, /routeToHostUpdate\(target/);
+  assert.doesNotMatch(app, /StepSetupPassword/);
 });
 
 console.log(

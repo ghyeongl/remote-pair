@@ -11,9 +11,14 @@ export interface Peer {
   // not in ssh config falls back to password auth and hangs the GUI askpass. Optional for
   // back-compat with an older CLI that did not emit it (fall back to addrs[0] || name).
   target?: string
+  pairingAddress?: string
+  hostUser?: string
   source: PeerSource
   sources: PeerSource[]
   fp: string | null
+  serviceInstanceID?: string
+  hostNonce?: string
+  pairPort?: number
   status: PeerStatus
 }
 
@@ -30,6 +35,7 @@ declare global {
       // No dead end: install the bundled client CLI to ~/.local/bin (install.sh --role client). The
       // onboarding calls this when cliReady is false; only ok===false blocks (with Retry).
       installCli: () => Promise<{ ok: boolean; err: string }>
+      openHostOnboarding: () => Promise<{ ok: boolean; err: string }>
       // Hard host-app guard (Connect/Reconnect): reachable is not enough — the host must have the
       // Xpair host app installed AND be version-compatible. installed/compatible false → block the step.
       hostAppStatus: (host: string) => Promise<{
@@ -70,6 +76,8 @@ declare global {
       // pipe (NEVER argv/log/disk) and persisted engine-specifically. Re-probe afterwards.
       setHostEngineAuth: (engine: EngineId, apiKey: string) => Promise<{ ok: boolean; err: string }>
       addMapping: (clientPath: string, hostPath: string, method?: "mount" | "sync") => Promise<any>
+      removeMapping: (clientPath: string) => Promise<{ code: number; out: string; err: string }>
+      resolveHostPath: (target: string, hostPath: string) => Promise<{ ok: boolean; path: string; err: string }>
       hostSmbStatus: () => Promise<"on" | "off" | "unknown">
       setBackend: (sync: string, mount?: string) => Promise<any>
       mount: (hostPath: string, mountpoint?: string) => Promise<{ code: number; out: string; err: string; mountpoint: string }>
@@ -88,6 +96,24 @@ declare global {
       // and the bridge uses BatchMode/publickey-only probes. Failures return explicit recovery states
       // (host-key mismatch, key-agent/passphrase failure) instead of password or pairing-code entry.
       discover: () => Promise<{ peers: Peer[]; err: string }>
+      sendPairingRequest: (opts: {
+        host: string
+        port: number
+        hostKeyFP: string
+        hostNonce: string
+        serviceInstanceID: string
+        name?: string
+        user?: string
+      }) => Promise<{ ok: boolean; err: string; fingerprint: string }>
+      pairingStatus: (opts: { host: string; pairingHost?: string }) => Promise<{
+        paired: boolean
+        pending: boolean
+        denied: boolean
+        err: string
+        fingerprint: string
+        state?: "ready" | "invalid_host" | "host_key_mismatch" | "key_auth_blocked" | "needs_password" | "password_denied" | "unreachable"
+        action?: "continue" | "abort" | "recover_host_key" | "approve_or_retry" | "prompt_password" | "retry"
+      }>
       // force:true reinstalls the bundled XpairHost over a missing/incompatible/below-floor host app
       // (restart repairs omit force so the CLI only kickstarts/opens the existing app). password is a
       // one-shot used only to bootstrap the first connection to a host that hasn't authorized the key.

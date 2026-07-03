@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Xpair — Onboarding Storyboard (current implementation · client + host)</title>
+<style>
+  /* Tokens + components lifted from host/onboarding/mockups/client-onboarding.html
+     to match the implemented onboarding look (Tailwind v4 theme, oklch, WizardShell). */
+  .dark {
+    --background: oklch(0.129 0.042 264.695);
+    --foreground: oklch(0.984 0.003 247.858);
+    --card: oklch(0.208 0.042 265.755);
+    --primary: oklch(0.929 0.013 255.508);
+    --primary-foreground: oklch(0.208 0.042 265.755);
+    --muted: oklch(0.279 0.041 260.031);
+    --muted-foreground: oklch(0.704 0.04 256.788);
+    --border: oklch(1 0 0 / 12%);
+    --destructive: oklch(0.704 0.191 22.216);
+    --emerald: oklch(0.72 0.17 162.5);
+    --amber: oklch(0.79 0.16 84);
+    --accent-blue: oklch(0.696 0.17 162.48);
+    --accent-violet: oklch(0.627 0.265 303.9);
+  }
+  * { box-sizing: border-box; border-color: var(--border); margin: 0; padding: 0; }
+  body { background: var(--background); color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; padding: 40px 32px 72px; }
+  .page-title { text-align:center; margin-bottom: 6px; font-size: 20px; font-weight: 650; letter-spacing:-0.01em; }
+  .page-sub { text-align:center; margin-bottom: 30px; font-size: 13px; color: var(--muted-foreground); }
+  .track-h { max-width:1360px; margin: 42px auto 18px; font-size:12px; letter-spacing:.12em; text-transform:uppercase;
+             color:var(--muted-foreground); border-bottom:1px dashed color-mix(in oklab, var(--border) 80%, transparent); padding-bottom:10px; }
+  .track-h b { color: var(--foreground); font-weight:600; letter-spacing:normal; text-transform:none; font-size:13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, 440px); gap: 40px 36px; justify-content: center; max-width:1360px; margin:0 auto; }
+  .frame-wrap { display:flex; flex-direction:column; gap:10px; }
+  .frame-label { font-size: 12px; color: var(--muted-foreground); padding-left: 4px; }
+  .frame-label b { color: var(--foreground); font-weight:600; }
+  .tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:6px; margin-left:6px;
+         background: color-mix(in oklab, var(--primary) 12%, transparent); color: var(--muted-foreground); }
+
+  .win { width: 440px; height: 588px; background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    overflow: hidden; position: relative; display: flex; flex-direction: column;
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.02) inset; }
+  .titlebar { display:flex; align-items:center; justify-content:space-between; padding: 13px 18px 13px 16px; position: relative;
+    border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent); }
+  .lights { display:flex; gap:7px; position:absolute; left:16px; top:16px; }
+  .lights i { width:11px; height:11px; border-radius:50%; display:block; }
+  .lights .r{background:#ff5f57}.lights .y{background:#febc2e}.lights .g{background:#28c840}
+  .tb-text { margin-left: 64px; min-width:0; } .tb-text h1 { font-size: 13px; font-weight: 600; }
+  .tb-text p { font-size: 11px; color: var(--muted-foreground); margin-top:1px; }
+  .dots { display:flex; align-items:center; gap:5px; }
+  .dots span { height:6px; width:6px; border-radius:9999px; background: var(--border); transition:all .3s; display:block; }
+  .dots span.cur { width:22px; background: var(--primary); }
+  .dots span.done { background: color-mix(in oklab, var(--primary) 60%, transparent); }
+
+  .body { flex:1; padding: 28px 30px; overflow:hidden; }
+  .footer { display:grid; grid-template-columns: 1fr auto; align-items:center; padding: 14px 18px;
+    border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent); background: color-mix(in oklab, var(--muted) 18%, transparent); }
+  .btn { font-size: 13px; font-weight: 500; border-radius: 8px; padding: 7px 14px; cursor: default; border: 1px solid transparent; display:inline-flex; align-items:center; gap:6px; }
+  .btn-primary { background: var(--primary); color: var(--primary-foreground); }
+  .btn-primary.dis { opacity:.5; }
+  .btn-ghost { background: transparent; color: var(--muted-foreground); }
+  .btn-outline { background: transparent; color: var(--foreground); border-color: var(--border); }
+  .btn-sm { font-size:12px; padding:6px 11px; }
+  .row-end { display:flex; gap:8px; justify-content:flex-end; }
+
+  .center { display:flex; flex-direction:column; align-items:center; text-align:center; }
+  .icon-badge { width:62px; height:62px; border-radius:18px; display:flex; align-items:center; justify-content:center;
+                background: color-mix(in oklab, var(--primary) 10%, transparent); color: var(--primary); margin-bottom: 20px; }
+  .icon-badge.round { border-radius:50%; } .icon-badge.sm { width:52px; height:52px; margin-bottom:14px; }
+  .icon-badge.violet { background: color-mix(in oklab, var(--accent-violet) 14%, transparent); color: var(--accent-violet); }
+  .icon-badge.emerald { background: color-mix(in oklab, var(--emerald) 14%, transparent); color: var(--emerald); }
+  h2.title { font-size: 22px; font-weight: 650; letter-spacing:-0.015em; }
+  h2.title.sm { font-size: 19px; }
+  .lead { margin-top: 11px; max-width: 330px; font-size: 13.5px; line-height:1.5; color: var(--muted-foreground); }
+  .lead b { color: var(--foreground); font-weight:600; }
+  .bullets { margin-top: 22px; width:100%; max-width:330px; display:flex; flex-direction:column; gap:9px; text-align:left; }
+  .bullets li { list-style:none; display:flex; gap:9px; align-items:flex-start; font-size:13px; color:var(--muted-foreground); }
+  .bullets li::before { content:""; width:6px;height:6px;border-radius:50%; background:var(--primary); margin-top:7px; flex:none; }
+  .sect-h { font-size:18px; font-weight:650; letter-spacing:-0.01em; }
+  .sect-p { font-size:12.5px; color:var(--muted-foreground); margin-top:6px; line-height:1.5; }
+  .eyebrow { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted-foreground); margin-bottom:8px; }
+
+  .peer { display:flex; align-items:center; gap:12px; padding:12px 13px; border-radius:12px; border:1px solid var(--border); margin-bottom:9px; }
+  .peer.primary { border-color: color-mix(in oklab, var(--primary) 35%, transparent); background: color-mix(in oklab, var(--primary) 6%, transparent); }
+  .peer .pic { width:36px;height:36px;border-radius:9px; display:flex;align-items:center;justify-content:center; background: var(--muted); color: var(--muted-foreground); flex:none; }
+  .peer .pic.on { background: color-mix(in oklab, var(--primary) 16%, transparent); color: var(--primary); }
+  .peer .meta { flex:1; min-width:0; } .peer .meta .nm { font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:7px; }
+  .peer .meta .sub { font-size:11px; color:var(--muted-foreground); font-family:ui-monospace,Menlo,monospace; margin-top:2px; }
+  .warnhint { font-size:10.5px; color: color-mix(in oklab, var(--accent-violet) 70%, var(--muted-foreground)); margin-top:3px; display:flex; gap:5px; align-items:center; }
+  .badge { font-size:10px; font-weight:600; padding:1px 7px; border-radius:6px; }
+  .badge.lan { background: color-mix(in oklab, var(--accent-blue) 20%, transparent); color: var(--accent-blue); }
+  .badge.ts  { background: color-mix(in oklab, var(--accent-violet) 22%, transparent); color: var(--accent-violet); }
+  .badge.ssh { background: color-mix(in oklab, var(--muted) 60%, transparent); color: var(--muted-foreground); }
+  .pill { font-size:10px; font-weight:600; padding:3px 9px; border-radius:7px; flex:none;
+          background: color-mix(in oklab, var(--primary) 14%, transparent); color: var(--primary); }
+
+  .toggle { display:flex; align-items:flex-start; gap:11px; padding:12px 13px; border:1px solid var(--border); border-radius:12px; margin-bottom:9px; text-align:left; }
+  .toggle .box { width:17px;height:17px;border-radius:5px; flex:none; margin-top:1px; border:1px solid var(--border);
+                 display:flex;align-items:center;justify-content:center; background:transparent; color: var(--primary-foreground); }
+  .toggle .box.on { background: color-mix(in oklab, var(--primary) 90%, transparent); border-color: color-mix(in oklab, var(--primary) 55%, transparent); }
+  .toggle .ti { width:28px;height:28px;border-radius:8px;flex:none; display:flex;align-items:center;justify-content:center; background:var(--muted); color:var(--muted-foreground); }
+  .toggle .t .a { font-size:12.5px; font-weight:600; } .toggle .t .b { font-size:11px; color:var(--muted-foreground); margin-top:2px; line-height:1.4; }
+
+  .prow { display:flex; align-items:center; gap:11px; padding:11px 13px; border:1px solid var(--border); border-radius:11px; margin-bottom:9px; }
+  .prow .ico { width:30px;height:30px;border-radius:8px;flex:none; display:flex;align-items:center;justify-content:center; background: var(--muted); color: var(--muted-foreground); }
+  .prow .t { flex:1; min-width:0; } .prow .t .a { font-size:12.5px; font-weight:600; } .prow .t .b { font-size:10.5px; color:var(--muted-foreground); margin-top:1px; line-height:1.35; }
+  .stat { font-size:10.5px; font-weight:600; padding:2px 9px; border-radius:999px; flex:none; display:inline-flex; align-items:center; gap:4px; }
+  .stat.ok  { background: color-mix(in oklab, var(--emerald) 18%, transparent); color: var(--emerald); }
+  .stat.off { background: color-mix(in oklab, var(--muted) 55%, transparent); color: var(--muted-foreground); }
+  .stat.rec { background: color-mix(in oklab, var(--amber) 18%, transparent); color: var(--amber); }
+
+  .eng { display:flex; align-items:center; gap:12px; padding:12px 13px; border-radius:12px; border:1px solid var(--border); margin-bottom:9px; }
+  .eng.sel { border-color: color-mix(in oklab, var(--primary) 40%, transparent); background: color-mix(in oklab, var(--primary) 7%, transparent); }
+  .eng .pic { width:34px;height:34px;border-radius:9px; flex:none; display:flex;align-items:center;justify-content:center; background: var(--muted); color: var(--muted-foreground); }
+  .eng.sel .pic { background: color-mix(in oklab, var(--primary) 16%, transparent); color: var(--primary); }
+  .eng .m { flex:1; } .eng .m .a { font-size:13px; font-weight:600; } .eng .m .b { font-size:11px; color:var(--muted-foreground); margin-top:1px; }
+
+  .steps { margin-top:18px; display:flex; flex-direction:column; gap:12px; width:100%; max-width:340px; margin-left:auto; margin-right:auto; text-align:left; }
+  .st { display:flex; align-items:center; gap:12px; font-size:13px; }
+  .st .b { width:24px;height:24px;border-radius:50%; flex:none; display:flex;align-items:center;justify-content:center; font-size:11px; }
+  .st.done .b { background: color-mix(in oklab, var(--emerald) 18%, transparent); color: var(--emerald); }
+  .st.done .x { color: var(--foreground); }
+  .st.now .b  { background: color-mix(in oklab, var(--primary) 14%, transparent); color: var(--primary); }
+  .st.now .x  { color: var(--foreground); font-weight:600; }
+  .st.todo .b { background: var(--muted); color: var(--muted-foreground); } .st.todo .x { color: var(--muted-foreground); }
+
+  .callout { margin-top:16px; border:1px solid var(--border); border-radius:12px; padding:12px 13px; text-align:left; background: color-mix(in oklab, var(--muted) 16%, transparent); }
+  .callout .ch { display:flex; gap:9px; align-items:flex-start; }
+  .callout .ico { width:30px;height:30px;border-radius:8px;flex:none; display:flex;align-items:center;justify-content:center; background: color-mix(in oklab, var(--amber) 16%, transparent); color: var(--amber); }
+  .callout .ico.violet { background: color-mix(in oklab, var(--accent-violet) 16%, transparent); color: var(--accent-violet); }
+  .callout .tt { font-size:12.5px; font-weight:600; } .callout .dd { font-size:11px; color:var(--muted-foreground); margin-top:2px; line-height:1.45; }
+  .callout .dd b { color:var(--foreground); }
+
+  .card { border:1px solid var(--border); border-radius:12px; padding:12px 13px; text-align:left; background: color-mix(in oklab, var(--muted) 14%, transparent); margin-top:12px; }
+  .card .hd { display:flex; align-items:center; gap:9px; } .card .hd .l { font-size:12.5px; font-weight:600; flex:1; }
+  .keyblock { margin-top:9px; font-family:ui-monospace,Menlo,monospace; font-size:10.5px; color:var(--muted-foreground); word-break:break-all; line-height:1.5;
+              background: rgba(0,0,0,.22); border:1px solid var(--border); border-radius:8px; padding:8px 9px; }
+  .cmd { margin-top:8px; display:flex; align-items:center; gap:8px; font-family:ui-monospace,Menlo,monospace; font-size:11px;
+         background: rgba(0,0,0,.22); border:1px solid var(--border); border-radius:8px; padding:8px 9px; }
+  .cmd .c { flex:1; color:var(--foreground); word-break:break-all; } .cmd .cp { color:var(--muted-foreground); flex:none; }
+  .fp { margin-top:14px; border:1px solid var(--border); border-radius:12px; padding:12px 13px; text-align:left; background: color-mix(in oklab, var(--muted) 16%, transparent); }
+  .fp .lbl { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted-foreground); display:flex; gap:6px; align-items:center; }
+  .fp .lbl .cv { margin-left:auto; }
+  .fp .val { margin-top:7px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; word-break:break-all; line-height:1.5; }
+  .fp .ask { margin-top:8px; font-size:11px; color:var(--muted-foreground); }
+
+  .field { text-align:left; margin-top:14px; } .field .l { font-size:11px; color:var(--muted-foreground); margin-bottom:6px; display:block; }
+  .input { border:1px solid var(--border); border-radius:9px; padding:9px 11px; font-size:12.5px; color:var(--muted-foreground);
+           background: color-mix(in oklab, var(--muted) 12%, transparent); display:flex; align-items:center; gap:7px; }
+  .input .ph { color:var(--muted-foreground); } .input svg { color:var(--muted-foreground); flex:none; }
+  .method { display:flex; gap:9px; margin-top:12px; }
+  .method .mc { flex:1; border:1px solid var(--border); border-radius:11px; padding:11px; text-align:left; }
+  .method .mc.sel { border-color: color-mix(in oklab, var(--primary) 40%, transparent); background: color-mix(in oklab, var(--primary) 7%, transparent); }
+  .method .mc .ic { width:28px;height:28px;border-radius:8px; display:flex;align-items:center;justify-content:center; background:var(--muted); color:var(--muted-foreground); margin-bottom:8px; }
+  .method .mc.sel .ic { background: color-mix(in oklab, var(--primary) 16%, transparent); color:var(--primary); }
+  .method .mc .a { font-size:12.5px; font-weight:600; } .method .mc .b { font-size:10.5px; color:var(--muted-foreground); margin-top:2px; line-height:1.35; }
+  .seg { display:inline-flex; margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .seg span { font-size:11px; padding:5px 12px; color:var(--muted-foreground); } .seg span.on { background: color-mix(in oklab, var(--primary) 14%, transparent); color:var(--primary); font-weight:600; }
+
+  .scanline { display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--muted-foreground); margin-top:6px; }
+  .spinner { width:13px;height:13px;border-radius:50%; border:2px solid var(--border); border-top-color:var(--primary); animation:spin .8s linear infinite; flex:none; }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  .radar { position:relative; width:78px; height:78px; margin-bottom: 18px; }
+  .radar .ring { position:absolute; inset:0; border-radius:50%; border:1px solid var(--primary); animation: radar 1.8s ease-out infinite; }
+  .radar .ring:nth-child(2){ animation-delay:.7s; }
+  @keyframes radar { 0%{transform:scale(.5);opacity:.6} 100%{transform:scale(2.2);opacity:0} }
+  .radar .core { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+  .radar .core div { width:46px;height:46px;border-radius:50%; display:flex;align-items:center;justify-content:center; background: color-mix(in oklab, var(--primary) 16%, transparent); color:var(--primary); }
+  .fallback { margin-top:12px; display:flex; flex-direction:column; gap:8px; }
+  .fb { display:flex; align-items:center; gap:11px; padding:11px 12px; border:1px solid var(--border); border-radius:11px; }
+  .fb .ico { width:30px;height:30px;border-radius:8px;flex:none; display:flex;align-items:center;justify-content:center; background: var(--muted); color: var(--muted-foreground); }
+  .fb .t { flex:1; } .fb .t .a { font-size:12.5px; font-weight:600; } .fb .t .b { font-size:10.5px; color:var(--muted-foreground); margin-top:1px; }
+  .buildstamp { position:absolute; left:14px; bottom:10px; font-size:9px; color:color-mix(in oklab,var(--muted-foreground) 70%, transparent); font-family:ui-monospace,Menlo,monospace; }
+  .chev { color: var(--muted-foreground); flex:none; }
+</style>
+</head>
+<body>
+  <div class="page-title">Xpair — Onboarding storyboard</div>
+  <div class="page-sub">current implementation · client (9 steps) + host (5 steps) · verbatim copy from the shipped step components</div>
+
+<div class="track-h">Client · <b>onboarding-webview</b> — STEP_TITLES: Welcome · Before you start · Find your host · Connect · Set up host · Grant permissions · Choose engine · File access &amp; mapping · Done</div>
+<div class="grid" id="g-client"></div>
+
+<div class="track-h">Host · <b>host/onboarding</b> — STEP_TITLES: Welcome · Permissions · Engine · Connect · Done</div>
+<div class="grid" id="g-host"></div>
+
+<script>
+const I = {
+  laptop:'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>',
+  server:'<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg>',
+  wifi:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><path d="M12 20h.01"/></svg>',
+  check:'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  check_sm:'<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  chevDown:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+  chev:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
+  shieldCheck:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>',
+  shieldAlert:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M12 8v4M12 16h.01"/></svg>',
+  lock:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+  alert:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>',
+  globe:'<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20"/></svg>',
+  terminal:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg>',
+  download:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>',
+  box:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/></svg>',
+  cpu:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>',
+  key:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="3.5"/><path d="m10 13 8-8M16 3l3 3-2.5 2.5L14 6"/></svg>',
+  search:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>',
+  refresh:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>',
+  chart:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="7"/><rect x="14" y="6" width="3" height="11"/></svg>',
+  bug:'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="6" width="8" height="14" rx="4"/><path d="M19 7 16 8M5 7l3 1M3 13h5M16 13h5M4 19l3-1M20 19l-3-1M12 2v4"/></svg>',
+  monitor:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+  hdd:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 12h.01M10 12h.01"/></svg>',
+  ext:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+  arrow:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+  copy:'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  folderTree:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z"/></svg>',
+  link2:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg>',
+};
+function dots(cur,total){ let s=''; for(let i=0;i<total;i++){ s+=`<span class="${i===cur?'cur':(i<cur?'done':'')}"></span>`; } return `<div class="dots">${s}</div>`; }
+function win({app,sub,step,total,body,prev=true,nextLabel='Next',nextDis=false,extraFooter='',build=true}){
+  const prevBtn = prev ? `<button class="btn btn-ghost btn-sm">Previous</button>` : '<span></span>';
+  const next = nextLabel ? `<button class="btn btn-primary btn-sm${nextDis?' dis':''}">${nextLabel}</button>` : '';
+  return `<div class="win"><div class="titlebar"><div class="lights"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+    <div class="tb-text"><h1>${app}</h1><p>${sub}</p></div>${dots(step,total)}</div>
+    <div class="body">${body}</div><div class="footer">${prevBtn}<div class="row-end">${extraFooter}${next}</div></div>
+    ${build?'<div class="buildstamp">build a51</div>':''}</div>`;
+}
+function frame(label,tag,html){ return `<div class="frame-wrap"><div class="frame-label"><b>${label}</b>${tag?`<span class="tag">${tag}</span>`:''}</div>${html}</div>`; }
+
+const consentClient = `
+  <div class="toggle"><div class="box off"></div><div class="ti">${I.chart}</div><div class="t"><div class="a">Share anonymous product analytics</div><div class="b">Onboarding & connection funnel, so we can fix the rough edges.</div></div></div>
+  <div class="toggle"><div class="box off"></div><div class="ti">${I.bug}</div><div class="t"><div class="a">Send crash reports</div><div class="b">Scrubbed crash diagnostics (no personal data) to catch bugs.</div></div></div>`;
+const consentHost = `
+  <div class="toggle"><div class="box on">${I.check_sm}</div><div class="ti">${I.chart}</div><div class="t"><div class="a">Share anonymous usage analytics</div><div class="b">Onboarding & connection funnel, so we can fix the rough edges.</div></div></div>
+  <div class="toggle"><div class="box on">${I.check_sm}</div><div class="ti">${I.bug}</div><div class="t"><div class="a">Send anonymized crash reports</div><div class="b">Scrubbed crash diagnostics (no personal data) to catch bugs.</div></div></div>`;
+
+/* ===== CLIENT (9) ===== */
+const CT=9;
+const c1 = win({app:'Xpair',sub:'Welcome',step:0,total:CT,prev:false,nextLabel:'Next',
+  body:`<div class="center"><div class="icon-badge">${I.laptop}</div>
+    <h2 class="title">Welcome to Xpair</h2>
+    <p class="lead">Attach to a Mac running XpairHost and work as if it were sitting on your desk. Let's get you connected.</p>
+    <ul class="bullets"><li>Reach your host over Tailscale or SSH</li><li>Choose a file-access backend</li><li>Map folders between host and client</li></ul></div>`});
+
+const c2 = win({app:'Xpair',sub:'Before you start',step:1,total:CT,nextLabel:'Next',
+  body:`<div><div class="sect-h">Before you start</div>
+    <div class="sect-p" style="margin-bottom:16px">Off by default. Anonymous only — never your files, paths, repo names, or IP. Change anytime in settings.</div>
+    ${consentClient}</div>`});
+
+const c3scan = win({app:'Xpair',sub:'Find your host',step:2,total:CT,nextLabel:'',
+  body:`<div class="center"><div class="radar"><span class="ring"></span><span class="ring"></span><div class="core"><div>${I.wifi}</div></div></div>
+    <h2 class="title sm">Looking for your host…</h2>
+    <p class="lead">Scanning this network for Macs running XpairHost.</p>
+    <div class="scanline" style="margin-top:16px"><span class="spinner"></span> Bonjour · same Wi-Fi</div>
+    <div class="scanline">${' '}<span class="spinner"></span> Tailscale · your tailnet</div></div>`});
+
+const c3found = win({app:'Xpair',sub:'Find your host',step:2,total:CT,nextLabel:'',extraFooter:`<button class="btn btn-ghost btn-sm">Enter manually</button>`,
+  body:`<div><div class="sect-h">Found your host</div>
+    <div class="sect-p" style="margin-bottom:16px">The same machine on Wi-Fi and Tailscale is shown once (matched by host key).</div>
+    <div class="peer primary"><div class="pic on">${I.server}</div><div class="meta"><div class="nm">gh-mac-m1 <span class="badge lan">LAN</span><span class="badge ts">TS</span></div><div class="sub">192.168.1.12 · 100.84.21.7</div></div><div class="pill">Reconnect</div></div>
+    <div class="peer"><div class="pic">${I.server}</div><div class="meta"><div class="nm">gh-mac-studio <span class="badge ts">TS</span></div><div class="sub">100.84.21.7</div></div><div class="pill">Connect</div></div>
+    <div class="peer"><div class="pic">${I.server}</div><div class="meta"><div class="nm">gh-mac-mini <span class="badge ssh">SSH</span></div><div class="sub">192.168.1.31</div><div class="warnhint">${I.download} Xpair not installed — we'll set it up</div></div><div class="pill">Set up</div></div>
+    <div class="scanline" style="margin-top:12px"><span class="spinner"></span> still looking…</div></div>`});
+
+const c3empty = win({app:'Xpair',sub:'Find your host',step:2,total:CT,nextLabel:'',extraFooter:`<button class="btn btn-ghost btn-sm">Enter manually</button>`,
+  body:`<div><div class="center" style="margin-bottom:4px"><div class="icon-badge round sm" style="background:color-mix(in oklab,var(--muted) 30%,transparent);color:var(--muted-foreground)">${I.search}</div>
+    <h2 class="title sm">No other Mac here yet</h2><p class="lead" style="max-width:300px">We couldn't see a host on this network.</p>
+    <button class="btn btn-outline btn-sm" style="margin-top:12px">${I.refresh} Retry scan</button></div>
+    <div class="callout"><div class="ch"><div class="ico">${I.alert}</div><div><div class="tt">On the same Wi-Fi?</div><div class="dd">Public/office Wi-Fi often blocks devices from seeing each other. If so, use Tailscale below.</div></div></div></div>
+    <div class="fallback">
+      <div class="fb"><div class="ico">${I.globe}</div><div class="t"><div class="a">Connect over Internet (Uses Tailscale)</div><div class="b">Works anywhere · needs Tailscale on both Macs (~2 min)</div></div><div class="chev">${I.chev}</div></div>
+      <div class="fb"><div class="ico">${I.terminal}</div><div class="t"><div class="a">Enter host manually</div><div class="b">Type an ssh host or IP yourself</div></div><div class="chev">${I.chev}</div></div>
+    </div></div>`});
+
+const c4setup = win({app:'Xpair',sub:'Connect',step:3,total:CT,nextLabel:'Next',nextDis:true,
+  body:`<div><h2 class="title sm">Confirm this host</h2>
+    <p class="lead" style="margin-top:8px">Xpair will set up <b>gh-mac-mini</b> with your SSH key. No account password or 6-digit code is used.</p>
+    <div class="card"><div class="hd"><span style="color:var(--muted-foreground)">${I.key}</span><span class="l">Client SSH key</span><span class="stat ok">${I.check_sm} Generated</span></div>
+      <div class="keyblock">ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI… ghyeong@mbp</div></div>
+    <div class="field"><span class="l">SSH target</span><div class="input" style="font-family:ui-monospace,Menlo,monospace">ghyeong@gh-mac-mini</div></div>
+    <div class="fp"><div class="lbl">${I.lock} Host key fingerprint <span class="cv">${I.chevDown}</span></div>
+      <div class="val">SHA256:9fAa1c…Lp0e  ed25519</div>
+      <div class="ask">First time connecting — confirm this is the right Mac.</div></div></div>`});
+
+const c4reconnect = win({app:'Xpair',sub:'Connect',step:3,total:CT,nextLabel:'Next',
+  body:`<div class="center"><div class="icon-badge round sm">${I.shieldCheck}</div>
+    <h2 class="title sm">Reconnect to your host</h2>
+    <p class="lead"><b>gh-mac-m1</b> is already set up. Reconnecting with your existing key — no PIN or password needed.</p>
+    <div class="scanline" style="margin-top:14px;color:var(--emerald)">${I.check_sm} Reachable — your key works. Continue.</div>
+    <div class="fp" style="width:100%;max-width:330px"><div class="lbl">${I.lock} Host key fingerprint <span class="cv">${I.chevDown}</span></div>
+      <div class="val">SHA256:Xr4uK9…2bQ7  ed25519</div>
+      <div class="ask">Matches what gh-mac-m1 shows? You're connecting to the right Mac.</div></div></div>`});
+
+const c5install = win({app:'Xpair',sub:'Set up host',step:4,total:CT,nextLabel:'',
+  body:`<div><div class="center" style="margin-bottom:2px"><div class="icon-badge round sm">${I.box}</div>
+    <h2 class="title sm">Setting up the host</h2><p class="lead" style="max-width:300px">Installing XpairHost on gh-mac-mini over SSH.</p></div>
+    <div class="steps">
+      <div class="st done"><span class="b">${I.check_sm}</span><span class="x">Verified SSH key auth</span></div>
+      <div class="st done"><span class="b">${I.check_sm}</span><span class="x">Pushed XpairHost.app</span></div>
+      <div class="st now"><span class="b"><span class="spinner" style="width:11px;height:11px;border-width:1.5px"></span></span><span class="x">Registering launch agent</span></div>
+      <div class="st todo"><span class="b">4</span><span class="x">Starting host</span></div>
+    </div></div>`});
+
+const c6grant = win({app:'Xpair',sub:'Grant permissions',step:5,total:CT,nextLabel:'Next',nextDis:true,
+  body:`<div class="center" style="margin-bottom:2px"><div class="icon-badge round sm violet">${I.shieldAlert}</div>
+    <h2 class="title sm">Grant permissions on the host</h2>
+    <p class="lead" style="max-width:320px">macOS won't let us grant these remotely. On gh-mac-mini's own screen, turn them on — its setup window pops up automatically. We'll detect it here.</p></div>
+    <div style="width:100%;margin-top:16px">
+      <div class="prow"><div class="ico">${I.shieldCheck}</div><div class="t"><div class="a">Accessibility</div></div><span class="stat ok">${I.check_sm} granted</span></div>
+      <div class="prow"><div class="ico">${I.monitor}</div><div class="t"><div class="a">Screen Recording</div></div><span class="stat rec"><span class="spinner" style="width:10px;height:10px;border-width:1.5px"></span> checking…</span></div>
+      <div class="prow"><div class="ico">${I.hdd}</div><div class="t"><div class="a">Full Disk Access <span style="color:var(--muted-foreground);font-weight:400">(optional)</span></div></div><span class="stat off">waiting</span></div>
+    </div>
+    <div class="callout" style="width:100%"><div class="dd" style="padding-left:0">⚠︎ That Mac must be <b>logged in as ghyeong on its screen</b> for screen share to work.</div></div>`});
+
+const c7engine = win({app:'Xpair',sub:'Choose engine',step:6,total:CT,nextLabel:'Next',
+  body:`<div><h2 class="title sm">Choose your engine</h2>
+    <p class="lead" style="margin-top:8px;max-width:340px">The agent that runs on the host. We check the selected host first and only show engines already installed and signed in there.</p>
+    <div style="margin-top:16px">
+      <div class="eng sel"><div class="pic">${I.cpu}</div><div class="m"><div class="a">Claude Code</div><div class="b">v1.2.4</div></div><span class="stat ok">ready</span></div>
+      <div class="eng"><div class="pic">${I.cpu}</div><div class="m"><div class="a">Shell</div><div class="b">Plain host login shell.</div></div></div>
+      <div class="eng"><div class="pic">${I.cpu}</div><div class="m"><div class="a">Codex</div><div class="b">OpenAI — GPT models.</div></div></div>
+      <div class="eng"><div class="pic">${I.cpu}</div><div class="m"><div class="a">opencode</div><div class="b">Open-source, multi-provider.</div></div></div>
+    </div>
+    <div class="scanline" style="margin-top:12px;color:var(--emerald)">${I.check_sm} Claude Code is installed (v1.2.4) and signed in on the host. Continue.</div></div>`});
+
+const c8map = win({app:'Xpair',sub:'File access & mapping',step:7,total:CT,nextLabel:'Skip for now',
+  body:`<div><h2 class="title sm">File access & mapping</h2>
+    <p class="lead" style="margin-top:8px">Add folders one at a time — each can use a different access method.</p>
+    <div class="center" style="margin-top:16px;color:var(--muted-foreground)"><div class="ti" style="width:34px;height:34px;border-radius:9px;background:var(--muted);display:flex;align-items:center;justify-content:center;margin-bottom:8px">${I.folderTree}</div>
+      <div style="font-size:12.5px">Add your first folder mapping.</div></div>
+    <div class="method">
+      <div class="mc sel"><div class="ic">${I.hdd}</div><div class="a">Mount</div><div class="b">Appears in Finder as a volume.</div></div>
+      <div class="mc"><div class="ic">${I.link2}</div><div class="a">Third-party sync</div><div class="b">Map paths for Syncthing, Drive, etc.</div></div>
+    </div>
+    <div style="text-align:left"><div class="seg"><span class="on">SMB</span><span>SSHFS</span></div></div>
+    <div class="field"><span class="l">Host path</span><div class="input"><span class="ph">/path/on/the/host</span></div></div>
+    <div class="field"><span class="l">Mount location</span><div class="input"><span class="ph">appears as a Finder volume</span></div></div></div>`});
+
+const c9done = win({app:'Xpair',sub:'Done',step:8,total:CT,nextLabel:'',extraFooter:`<button class="btn btn-primary btn-sm">Open Xpair</button>`,
+  body:`<div class="center"><div class="icon-badge round emerald">${I.check}</div>
+    <h2 class="title">You're all set</h2>
+    <p class="lead">Xpair is connected to <b>gh-mac-m1</b> with 1 mapping.</p>
+    <div class="card" style="width:100%;max-width:330px"><div class="eyebrow">Summary</div>
+      <div style="display:flex;justify-content:space-between;font-size:12.5px"><span style="color:var(--muted-foreground)">Host</span><span style="font-family:ui-monospace,Menlo,monospace">gh-mac-m1</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-top:6px"><span style="color:var(--muted-foreground)">Mappings</span><span>1</span></div></div></div>`});
+
+/* ===== HOST (5) ===== */
+const HT=5;
+const h1 = win({app:'XpairHost',sub:'Welcome',step:0,total:HT,prev:false,nextLabel:'Begin setup',
+  body:`<div><div class="center"><div class="icon-badge">${I.server}</div>
+    <h2 class="title">Set up XpairHost</h2>
+    <p class="lead">This Mac will run your sessions 24/7 and accept connections from your client. Setup takes about a minute.</p>
+    <p class="lead" style="margin-top:8px">Tap <b>Begin setup</b> to grant the screen permission.</p>
+    <ul class="bullets"><li>Grant Screen Recording (required)</li><li>Optionally grant Full Disk Access</li></ul></div>
+    <div class="eyebrow" style="margin-top:16px">Before we start</div>${consentHost}</div>`});
+
+const h2 = win({app:'XpairHost',sub:'Permissions',step:1,total:HT,nextLabel:'Next',nextDis:true,
+  body:`<div><h2 class="title sm">Grant permissions</h2>
+    <p class="lead" style="margin-top:8px">macOS requires you to enable each toggle yourself. We'll open the right Settings pane for you.</p>
+    <div style="margin-top:16px">
+      <div class="prow"><div class="ico">${I.shieldCheck}</div><div class="t"><div class="a">Accessibility (required)</div><div class="b">Lets the host auto-approve prompts (clicks/keys) for computer-use.</div></div><span class="stat ok">${I.check_sm} Granted</span></div>
+      <div class="prow"><div class="ico">${I.monitor}</div><div class="t"><div class="a">Screen Recording (required)</div><div class="b">Captures screenshots so Claude can see the screen.</div></div><button class="btn btn-outline btn-sm">${I.ext} Open Settings</button></div>
+      <div class="prow"><div class="ico">${I.hdd}</div><div class="t"><div class="a">Full Disk Access (recommended)</div><div class="b">Allows reading project files across protected locations.</div></div><button class="btn btn-outline btn-sm">${I.ext} Open Settings</button></div>
+    </div></div>`});
+
+const h3 = win({app:'XpairHost',sub:'Engine',step:2,total:HT,nextLabel:'Next',
+  body:`<div><h2 class="title sm">Choose your engine</h2>
+    <p class="lead" style="margin-top:8px;max-width:340px">The agent that runs on this Mac. We check this host first and only show engines already installed and signed in here.</p>
+    <div style="margin-top:16px">
+      <div class="eng sel"><div class="pic">${I.cpu}</div><div class="m"><div class="a">Claude Code</div><div class="b">v1.2.4</div></div><span class="stat ok">ready</span></div>
+      <div class="eng"><div class="pic">${I.cpu}</div><div class="m"><div class="a">Codex</div><div class="b">OpenAI — GPT models.</div></div></div>
+      <div class="eng"><div class="pic">${I.cpu}</div><div class="m"><div class="a">opencode</div><div class="b">Open-source, multi-provider.</div></div></div>
+    </div>
+    <div class="scanline" style="margin-top:12px;color:var(--emerald)">${I.check_sm} Claude Code is installed (v1.2.4) and signed in. Continue.</div></div>`});
+
+const h4wait = win({app:'XpairHost',sub:'Connect',step:3,total:HT,nextLabel:'Next',nextDis:true,
+  body:`<div class="center"><div class="radar"><span class="ring"></span><span class="ring"></span><div class="core"><div>${I.wifi}</div></div></div>
+    <h2 class="title sm">Waiting for a client…</h2>
+    <p class="lead" style="max-width:300px">On your other Mac, open Xpair — once it can SSH in, it connects automatically.</p>
+    <div class="card" style="width:100%;max-width:330px"><div class="eyebrow">This Mac</div>
+      <div style="font-family:ui-monospace,Menlo,monospace;font-size:12.5px">gh-mac-mini.local</div></div></div>`});
+
+const h5done = win({app:'XpairHost',sub:'Done',step:4,total:HT,nextLabel:'',extraFooter:`<button class="btn btn-primary btn-sm">Open Xpair</button>`,
+  body:`<div class="center"><div class="icon-badge round emerald">${I.check}</div>
+    <h2 class="title">You're paired</h2>
+    <p class="lead">XpairHost is paired with <b>swjeon-mbp</b>. Control sessions, view status, and stop the host from the menu bar icon.</p>
+    <div class="card" style="width:100%;max-width:330px"><div class="eyebrow">Connected from</div>
+      <div style="font-family:ui-monospace,Menlo,monospace;font-size:12.5px">swjeon-mbp</div>
+      <div style="font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted-foreground);margin-top:3px">ghyeong</div></div></div>`});
+
+document.getElementById('g-client').innerHTML = [
+  frame('C1 · Welcome','StepWelcome',c1),
+  frame('C2 · Before you start','StepConsent',c2),
+  frame('C3a · Find your host — scanning','StepDiscover',c3scan),
+  frame('C3b · Find your host — found','StepDiscover · reconnect/connect/set-up',c3found),
+  frame('C3c · Find your host — empty','StepDiscover · diagnose+fallback',c3empty),
+  frame('C4a · Connect — set up (new host)','StepSetupPassword',c4setup),
+  frame('C4b · Connect — reconnect','StepReconnect',c4reconnect),
+  frame('C5 · Set up host — installing','StepInstalling · setup path',c5install),
+  frame('C6 · Grant permissions','StepGrantPermissions · setup path',c6grant),
+  frame('C7 · Choose engine','StepEngine',c7engine),
+  frame('C8 · File access & mapping','StepFileAccess',c8map),
+  frame('C9 · Done','StepDone',c9done),
+].join('');
+document.getElementById('g-host').innerHTML = [
+  frame('H1 · Welcome','StepWelcome',h1),
+  frame('H2 · Permissions','StepPermissions',h2),
+  frame('H3 · Engine','StepEngine',h3),
+  frame('H4 · Connect — waiting','StepWaiting',h4wait),
+  frame('H5 · Done','StepDone',h5done),
+].join('');
+</script>
+</body>
+</html>

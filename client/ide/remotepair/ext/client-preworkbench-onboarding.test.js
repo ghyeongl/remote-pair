@@ -38,9 +38,6 @@ test("Q0369 client onboarding appears before the IDE workbench and only completi
   assert.match(electronMainPatch, /const handled = await ob\.resolveOnboarding\(/);
   assert.match(electronMainPatch, /return \[\];/);
   assert.match(electronMainPatch, /onComplete: \(\) => \{ this\.doOpenFirstWindow\(initialProtocolUrls\); \}/);
-  // The ServicesAccessor is valid only during the synchronous openFirstWindow call, but onComplete
-  // fires after the onboarding await — so the services are captured up front and doOpenFirstWindow
-  // reads the stored fields, never a (by-then dead) accessor.
   assert.match(electronMainPatch, /this\.windowsMainService = accessor\.get\(IWindowsMainService\);/);
   assert.match(electronMainPatch, /private async doOpenFirstWindow\(initialProtocolUrls/);
   assert.doesNotMatch(electronMainPatch, /doOpenFirstWindow\(accessor,/);
@@ -50,13 +47,18 @@ test("Q0369 client onboarding appears before the IDE workbench and only completi
   assert.doesNotMatch(main, /\bapp\.quit\(/, "IDE-hosted onboarding must not use the old second-app quit/relaunch flow");
   assert.match(preload, /complete: \(\) => \{[\s\S]*ipcRenderer\.invoke\('onboarding:complete'\)/);
 
+  assert.match(app, /const TOTAL = 8;/);
   assert.match(app, /new URLSearchParams\(window\.location\.search\)\.get\("startStep"\)/);
-  assert.match(app, /const w = useWizard\(9, initialStep\)/);
-  assert.match(app, /autoCheck=\{initialStep === S\.CONNECT\}/);
-  assert.match(app, /<StepDiscover onSelect=\{onSelectPeer\} onManual=\{onManual\} \/>/);
-  assert.match(app, /const onManual = useCallback/);
-  assert.match(app, /<StepConnect[\s\S]*state=\{connState\}[\s\S]*setState=\{setConnState\}/);
+  assert.match(app, /connect: S\.DISCOVER/);
+  assert.match(app, /grant: S\.DISCOVER/);
+  assert.match(app, /engine: S\.DISCOVER/);
+  assert.match(app, /const w = useWizard\(TOTAL, initialStep\)/);
+  assert.match(app, /<StepDiscover[\s\S]*selected=\{selectedHost\}[\s\S]*setSelected=\{setSelected\}/);
+  assert.match(app, /<StepUpdate[\s\S]*host=\{selectedHost\}[\s\S]*state=\{updateState\}/);
+  assert.match(app, /<StepWaitPerm[\s\S]*accepted=\{permAccepted\}[\s\S]*setAccepted=\{setPermAccepted\}/);
+  assert.match(app, /<StepMappings[\s\S]*mappings=\{mappings\}[\s\S]*setMappings=\{setMappings\}[\s\S]*hostTarget=\{selectedHost\?\.sshTarget \?\? selectedHost\?\.address\}/);
   assert.match(app, /<Button size="sm" onClick=\{\(\) => window\.remotepair\.complete\(\)\}>/);
+  assert.doesNotMatch(app, /StepConnect|useWizard\(9/);
 
   const uncommented = stripLineComments(main);
   assert.doesNotMatch(

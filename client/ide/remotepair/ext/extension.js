@@ -68,10 +68,11 @@ const RD_SESSION_TOKEN_REMOTE_FILE = "~/.xpair/host/rd-session-token";
 const RD_SESSION_TOKEN_RE = /^[A-Za-z0-9._-]{24,128}$/;
 const RD_TOKEN_FILE_NOT_READY_RE = /rd-session-token[\s\S]*(?:No such file|ENOENT)|(?:No such file|ENOENT)[\s\S]*rd-session-token/i;
 
-// REMOTE_HOST must be a bare ssh host alias / hostname. Validate hard before
-// it ever reaches a spawned process (defense in depth even though spawn is
-// argv-safe: prevents an attacker-controlled env from injecting ssh options).
-const HOST_RE = /^[A-Za-z0-9._-]+$/;
+// REMOTE_HOST must be an ssh alias / hostname, optionally prefixed with a normal
+// login (`user@host`). Validate hard before it ever reaches a spawned process
+// (defense in depth even though spawn is argv-safe: prevents an attacker-
+// controlled env from injecting ssh options).
+const HOST_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
 const { spawnEnv, sshFailureKind, sshFailureMessage, SSH_STATE } = onboardingBridge;
 const RD_TRANSIENT_SSH_RE = /agent refused operation|signing failed|Permission denied \(publickey|Connection refused|Connection reset|kex_exchange|Operation timed out|Could not resolve|Host is down/i;
 const RD_MAX_TRANSIENT_ATTEMPTS = 4;
@@ -104,6 +105,23 @@ function rdTransientRetryDelayMs(attempt) {
 const LOG_DIR = path.join(os.homedir(), ".xpair/host", "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(os.homedir(), ".xpair/host", "client.env");
+// Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
+// WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
+// on the host), so adding -i must still leave the ssh-agent + default identities available —
+// IdentitiesOnly=yes would restrict auth to only these files and break a client whose working host auth
+// is agent-only. Neither present → [] (ssh uses its defaults). Only the pairing PROOF login (bridge)
+// forces the key alone.
+const PAIRING_KEY_FILE = path.join(os.homedir(), ".xpair/host", "pairing_ed25519");
+const PERSONAL_KEY_FILE = path.join(os.homedir(), ".ssh", "id_ed25519");
+function pairingIdArgs() {
+  try {
+    const a = [];
+    if (fs.existsSync(PAIRING_KEY_FILE)) a.push("-i", PAIRING_KEY_FILE);
+    if (fs.existsSync(PERSONAL_KEY_FILE)) a.push("-i", PERSONAL_KEY_FILE);
+    return a;
+  } catch { /* ignore */ }
+  return [];
+}
 const LOG_COMP = "ide";
 const LOG_MAX_BYTES = 5 * 1024 * 1024; // rotate-on-open threshold
 const LOG_LEVELS = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
@@ -241,50 +259,12 @@ function readClientEnvValue(keyName) {
   return null;
 }
 
-function setClientEnvValue(keyName, value) {
-  let raw = "";
-  try {
-    raw = fs.readFileSync(CLIENT_ENV_FILE, "utf8");
-  } catch (_e) {
-    raw = "";
-  }
-  const lines = raw ? raw.split(/\r?\n/) : [];
-  const next = [];
-  let found = false;
-  for (const line of lines) {
-    if (line === "" && next.length === lines.length - 1) continue;
-    const t = line.trim();
-    const eq = t.indexOf("=");
-    if (eq >= 0 && t.slice(0, eq).trim() === keyName) {
-      if (!found) next.push(`${keyName}=${value}`);
-      found = true;
-    } else {
-      next.push(line);
-    }
-  }
-  if (!found) next.push(`${keyName}=${value}`);
-  fs.mkdirSync(path.dirname(CLIENT_ENV_FILE), { recursive: true });
-  fs.writeFileSync(CLIENT_ENV_FILE, `${next.join("\n")}\n`);
-}
-
 /** Read REMOTE_HOST from ~/.xpair/host/client.env (KEY=VALUE lines). */
 function readRemoteHost() {
   // env override wins (useful for testing), then the client.env file.
   const fromEnv = process.env.REMOTE_HOST;
   if (fromEnv && HOST_RE.test(fromEnv.trim())) return fromEnv.trim();
   return readClientEnvValue("REMOTE_HOST");
-}
-
-function localModeActive() {
-  const fromFile = readClientEnvValue("LOCAL_MODE");
-  const raw = fromFile !== null ? fromFile : process.env.LOCAL_MODE;
-  return /^(1|true|yes|on|local)$/i.test(String(raw || "").trim());
-}
-
-function clearLocalModeFlag() {
-  if (!localModeActive()) return false;
-  setClientEnvValue("LOCAL_MODE", "0");
-  return true;
 }
 
 /** Validated REMOTE_HOST or null. */
@@ -343,6 +323,7 @@ function sshRun(host, remoteCmd, opts = {}) {
   const maxBuffer = opts.maxBuffer || 16 * 1024 * 1024;
   const timeoutMs = opts.timeoutMs || 15000;
   const args = [
+    ...pairingIdArgs(),
     "-o",
     "BatchMode=yes",
     "-o",
@@ -476,6 +457,11 @@ function classifiedSshFailureMessage(detail) {
   return sshFailureMessage(state, detail);
 }
 
+function gatewayMacBlockDetail(gw) {
+  const state = gw && gw.state ? gw.state : "unknown";
+  return `gateway MAC guard fail-closed: ${state}${gw && gw.err ? ` (${gw.err})` : ""}`;
+}
+
 function rdFailureKindForSshState(state) {
   if (state === SSH_STATE.HOST_KEY_MISMATCH) return "host-key";
   if (state === SSH_STATE.KEY_AUTH_BLOCKED) return "key-auth";
@@ -519,7 +505,7 @@ function getFreePort() {
 
 /**
  * Spawn an ssh local-forward tunnel (foreground: ssh -N).
- * argv-safe: host is validated, ports are integers.
+   * argv-safe: host is validated, ports are integers.
  *
  * Returns the child process — child.kill() to teardown.  We deliberately do NOT pass `-f`:
  * with `-f`, ssh forks into the background and the foreground (this Node child) exits
@@ -538,6 +524,7 @@ function spawnTunnel(host, localPort, remotePort) {
   // onboarding guard authenticate once and the workbench tunnel reuse the same live master, without
   // reusing stale masters from earlier launches.
   const args = [
+    ...pairingIdArgs(),
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o", "StrictHostKeyChecking=accept-new",
@@ -547,7 +534,7 @@ function spawnTunnel(host, localPort, remotePort) {
     "-o", "ExitOnForwardFailure=yes",
     "-N",
     "-L", `${localPort}:127.0.0.1:${rport}`,
-    host, // validated HOST_RE element
+    host, // validated HOST_RE ssh target
   ];
   log(`tunnel: ssh -N -L ${localPort}:127.0.0.1:${rport} ${host}`);
   const child = cp.spawn("ssh", args, { windowsHide: true, detached: false, env: spawnEnv() });
@@ -762,6 +749,20 @@ class RemoteDesktopPanel {
     const host = getValidHost();
     if (!host) {
       this.post({ type: "status", state: "no-host" });
+      return;
+    }
+    try {
+      const gw = onboardingBridge.gatewayMacStatus();
+      if (gw && gw.allowed === false) {
+        const detail = gatewayMacBlockDetail(gw);
+        log(detail, "warn");
+        this.post({ type: "status", state: "error", detail, failureKind: "reach" });
+        return;
+      }
+    } catch (e) {
+      const detail = `gateway MAC guard unavailable; auto-connect disabled: ${e && e.message ? e.message : e}`;
+      log(detail, "warn");
+      this.post({ type: "status", state: "error", detail, failureKind: "reach" });
       return;
     }
     await this._startV2(host);
@@ -1951,13 +1952,7 @@ function activate(context) {
     /\.ts\.net$/i.test(String(host || "")) ? telemetry.PATHS.TAILSCALE : telemetry.PATHS.LAN;
   const renderHostButton = () => {
     const host = getValidHost();
-    if (localModeActive()) {
-      hostBtn.text = "$(debug-disconnect) 로컬 모드";
-      hostBtn.tooltip = host
-        ? `Xpair: 로컬 모드 — launch/attach use local sessions until ${host} is reachable.`
-        : "Xpair: 로컬 모드 — launch/attach use local sessions.";
-      hostBtn.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-    } else if (!host) {
+    if (!host) {
       hostBtn.text = "$(gear) Set host";
       hostBtn.tooltip = "Xpair: no host configured — click to set up";
       hostBtn.backgroundColor = undefined;
@@ -1993,6 +1988,26 @@ function activate(context) {
     let ok = false;
     let probeReason = telemetry.REASONS.UNKNOWN;
     try {
+      const gw = onboardingBridge.gatewayMacStatus();
+      if (gw && gw.allowed === false) {
+        hostReachable = false;
+        renderHostButton();
+        if (prev === true) {
+          telemetry.capture(telemetry.EVENTS.HOST_CONNECT_FAILED, {
+            path: classifyPath(host),
+            reason: telemetry.REASONS.HOST_UNREACHABLE,
+          });
+        }
+        log(gatewayMacBlockDetail(gw), "warn");
+        return;
+      }
+    } catch (e) {
+      hostReachable = false;
+      renderHostButton();
+      log(`gateway MAC guard unavailable; auto-connect disabled: ${e && e.message ? e.message : e}`, "warn");
+      return;
+    }
+    try {
       const r = await sshRun(host, "true", { timeoutMs: 6000 });
       ok = r.code === 0;
       if (!ok) probeReason = r.code === -2 ? telemetry.REASONS.TIMEOUT : telemetry.REASONS.HOST_UNREACHABLE;
@@ -2001,9 +2016,6 @@ function activate(context) {
       probeReason = telemetry.REASONS.HOST_UNREACHABLE;
     }
     hostReachable = ok;
-    if (ok && clearLocalModeFlag()) {
-      log(`local mode cleared: ${host} is reachable`);
-    }
     renderHostButton();
     // Edge-trigger telemetry: only on a change to/from reachable (prev !== current).
     // host_connected cardinality = ONCE PER INSTALL (Insight A/B count installs, not IDE
@@ -2034,6 +2046,23 @@ function activate(context) {
     vscode.commands.registerCommand("remotepair.runSetup", () => runSetup()),
     vscode.commands.registerCommand("remotepair.endSessionReonboard", () => endSessionReonboard()),
     vscode.commands.registerCommand("remotepair.connectHost", () => connectHost(panel)),
+    // Recovery path for a fail-closed roaming state (blueprint §6.4): when the user moves to another
+    // network the stored gateway MAC differs and auto-connect stays blocked. confirmGatewayBaseline()
+    // adopts the current network as the new baseline; re-probe so reachability re-enables immediately
+    // without editing client.env. This is the ONLY caller of confirmGatewayBaseline().
+    vscode.commands.registerCommand("remotepair.confirmGatewayBaseline", async () => {
+      const gw = onboardingBridge.confirmGatewayBaseline();
+      if (gw && gw.allowed) {
+        vscode.window.showInformationMessage(
+          `Xpair: adopted the current network as the gateway baseline${gw.current ? ` (${gw.current})` : ""}. Reconnecting…`,
+        );
+        await probeHost();
+      } else {
+        vscode.window.showWarningMessage(
+          `Xpair: could not confirm the gateway baseline${gw && gw.err ? ` (${gw.err})` : ""}.`,
+        );
+      }
+    }),
     vscode.commands.registerCommand("remotepair.launchRemoteClaude", () => launchRemoteClaude()),
     vscode.commands.registerCommand("remotepair.remoteDesktop.refresh", () => panel.refresh()),
     vscode.commands.registerCommand("remotepair.sessions.listJson", () =>

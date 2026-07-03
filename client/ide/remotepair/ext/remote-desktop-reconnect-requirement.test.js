@@ -135,11 +135,22 @@ const fakeVscode = {
   WebviewPanelSerializer: class WebviewPanelSerializer {},
 };
 
+// Real bridge with only the roaming guard overridden (this reconnect test does not exercise
+// gateway-MAC roaming; the guard must simply allow so the RD token read / tunnel path runs).
+const realBridge = require("./onboarding-bridge.js");
+const fakeBridge = {
+  ...realBridge,
+  gatewayMacStatus() {
+    return { allowed: true, state: "same", current: "aa:bb:cc:dd:ee:ff", stored: "aa:bb:cc:dd:ee:ff", err: "" };
+  },
+};
+
 const realLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
   if (request === "vscode") return fakeVscode;
   if (request === "child_process") return { spawn: fakeSpawn };
   if (request === "net") return fakeNet;
+  if (request === "./onboarding-bridge.js") return fakeBridge;
   return realLoad.call(this, request, parent, isMain);
 };
 

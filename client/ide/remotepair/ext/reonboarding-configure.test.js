@@ -96,6 +96,7 @@ function greenBridge(overrides = {}) {
       err: "",
     }),
     hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
+    hostEnvEngine: async () => ({ engine: "codex", err: "" }),
     hostEngineStatus: async () => ({ installed: true, authed: true, version: "ok", err: "" }),
     ...overrides,
   };
@@ -190,10 +191,65 @@ test("Q0473/Q0493/Q0494 per-launch guard parachutes to the first failing step", 
     })), "grant");
     assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
       hostEngineStatus: async (engine) => {
-        assert.equal(engine, "codex", "guard must reuse the configured #44 engine status path");
+        assert.equal(engine, "codex", "guard must use the host.env engine status path");
         return { installed: false, authed: false, version: "", err: "missing" };
       },
     })), "engine");
+  });
+});
+
+test("Q0473/Q0493/Q0494 no engine named anywhere checks the launcher's claude fallback", async () => {
+  await withTempHome(async (home, onboardingMain) => {
+    const rpDir = path.join(home, ".xpair/host");
+    fs.mkdirSync(rpDir, { recursive: true });
+    fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\n");
+
+    // `xpair launch` execs `claude` when neither host.env nor client.env names an engine
+    // (CLIENT_ENGINE_FALLBACK=${ENGINE:-claude}), so the guard must check claude on the host — not skip.
+    let checked = "";
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      hostEnvEngine: async () => ({ engine: "", err: "host ENGINE not set" }),
+      hostEngineStatus: async (engine) => {
+        checked = engine;
+        return { installed: true, authed: true, version: "ok", err: "" };
+      },
+    })), null, "claude ready on host → guard passes");
+    assert.equal(checked, "claude", "guard must probe the launcher's claude fallback when nothing is named");
+
+    // claude missing/unauthed on the host → route to the engine step instead of dead-ending at launch.
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      hostEnvEngine: async () => ({ engine: "", err: "host ENGINE not set" }),
+      hostEngineStatus: async (engine) => {
+        assert.equal(engine, "claude");
+        return { installed: false, authed: false, version: "", err: "not found" };
+      },
+    })), "engine", "claude not ready on host → engine recovery");
+  });
+});
+
+test("Q0473/Q0493/Q0494 LOCAL_MODE no longer bypasses native remote guards", async () => {
+  await withTempHome(async (home, onboardingMain) => {
+    const rpDir = path.join(home, ".xpair/host");
+    fs.mkdirSync(rpDir, { recursive: true });
+    fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\nENGINE=codex\nLOCAL_MODE=1\n");
+
+    let sshProbes = 0;
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      sshReachable: async () => {
+        sshProbes += 1;
+        return { reachable: false, err: "offline" };
+      },
+    })), "connect");
+    assert.equal(sshProbes, 1, "LOCAL_MODE must not skip remote reachability");
+
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      cliReady: async () => ({ ready: false, bin: "", err: "missing cli" }),
+    })), "welcome", "LOCAL_MODE must still run the local CLI guard first");
+
+    fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\nENGINE=codex\nLOCAL_MODE=0\n");
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      sshReachable: async () => ({ reachable: false, err: "offline" }),
+    })), "connect", "cleared LOCAL_MODE=0 follows the same remote guard path");
   });
 });
 

@@ -36,3 +36,6 @@ context/
 client/ide/remotepair/.build-counter
 
 shared/.build-counter
+
+# Xcode/swiftc local module cache (machine-specific build artifacts, never source)
+host/app/.swift-module-cache/

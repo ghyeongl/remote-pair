@@ -50,6 +50,10 @@ const START_STEP = Object.freeze({
 })
 const START_STEPS = new Set(Object.values(START_STEP))
 const SESSION_ENGINES = new Set(['claude', 'shell', 'codex', 'opencode'])
+// Mirrors `xpair launch`'s CLIENT_ENGINE_FALLBACK=${ENGINE:-claude}: the engine actually exec'd when
+// neither host.env nor client.env names one. The readiness guard checks this so an un-configured setup
+// doesn't skip the check and then dead-end at launch time.
+const LAUNCH_ENGINE_FALLBACK = 'claude'
 
 function readClientEnv() {
   const file = path.join(os.homedir(), '.xpair/host', 'client.env')
@@ -72,9 +76,11 @@ function configuredEngine(env = readClientEnv()) {
   return SESSION_ENGINES.has(engine) ? engine : 'claude'
 }
 
-function configuredLocalMode(env = readClientEnv()) {
-  const localMode = String(env.LOCAL_MODE || '').trim()
-  return /^(1|true|yes|on|local)$/i.test(localMode)
+async function configuredHostEngine(host, probeBridge = bridge) {
+  if (!probeBridge || typeof probeBridge.hostEnvEngine !== 'function') return null
+  const result = await probeBridge.hostEnvEngine(host)
+  const engine = String((result && result.engine) || '').trim()
+  return SESSION_ENGINES.has(engine) ? engine : null
 }
 
 /** Historical helper: "configured" ⇔ REMOTE_HOST is set. Folder mappings are OPTIONAL (you can
@@ -112,8 +118,6 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
     return START_STEP.WELCOME
   }
 
-  if (configuredLocalMode(clientEnv)) return null
-
   try {
     const reach = await probeBridge.sshReachable(host)
     if (!reach || reach.reachable !== true) return START_STEP.CONNECT
@@ -137,11 +141,31 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
     return START_STEP.CONNECT
   }
 
+  let hostEngine = null
   try {
-    const engine = await probeBridge.hostEngineStatus(configuredEngine(clientEnv))
-    if (!engine || engine.installed !== true || engine.authed !== true) return START_STEP.ENGINE
+    hostEngine = await configuredHostEngine(host, probeBridge)
   } catch {
-    return START_STEP.ENGINE
+    hostEngine = null
+  }
+  // On upgraded hosts that were configured by the old client-side engine step, host.env may not exist
+  // yet even though client.env still NAMES the engine the user expects. Fall back to that client engine
+  // so the readiness gate still runs — otherwise a missing/unreadable host.env silently skips the check
+  // and the first `xpair launch` fails when that engine isn't installed/signed in on the host.
+  // When nothing is named anywhere, mirror the launcher: `xpair launch` resolves the engine to
+  // `${host ENGINE} || ${client ENGINE} || CLIENT_ENGINE_FALLBACK` where CLIENT_ENGINE_FALLBACK is
+  // `${ENGINE:-claude}` (see client/cli/xpair-launch). So an un-configured setup still execs `claude`
+  // on the host — check that same default here, or the guard skips and the first launch dead-ends with
+  // "claude not found on host".
+  const clientEngineRaw = (readClientEnv().ENGINE || "").trim()
+  const clientEngine = SESSION_ENGINES.has(clientEngineRaw) ? clientEngineRaw : null
+  const engineToCheck = hostEngine || clientEngine || LAUNCH_ENGINE_FALLBACK
+  if (engineToCheck) {
+    try {
+      const engine = await probeBridge.hostEngineStatus(engineToCheck)
+      if (!engine || engine.installed !== true || engine.authed !== true) return START_STEP.ENGINE
+    } catch {
+      return START_STEP.ENGINE
+    }
   }
 
   return null
@@ -273,6 +297,7 @@ async function resolveOnboarding({ electron, onComplete, argv = process.argv, pr
 
 module.exports = {
   isOnboarded,
+  configuredHostEngine,
   firstFailingGuard,
   shouldOnboard,
   resolveOnboarding,
