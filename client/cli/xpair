@@ -31,7 +31,7 @@
 #   xpair host           Ensure the tmux-aqua host server is up (when the app is local)
 #   xpair help
 #
-# config: ~/.xpair/host/{common,host,client}.env (finalized by install.sh — outside .claude, self-contained).
+# config: ~/.xpair/client/{common,client}.env + ~/.xpair/host/host.env (finalized by install.sh — outside .claude, self-contained).
 set -euo pipefail
 
 # ── platform portability (single codebase; the mac branch is byte-identical to prior behavior) ──
@@ -50,11 +50,15 @@ _stat_mtime() { if [ "$XPAIR_OS" = mac ]; then stat -f %m  "$1" 2>/dev/null; els
 _stat_mode()  { if [ "$XPAIR_OS" = mac ]; then stat -f %Lp "$1" 2>/dev/null; else stat -c %a "$1" 2>/dev/null; fi; }
 
 RP_DIR="${RP_DIR:-$HOME/.xpair/host}"
-CLIENT_ENV="$RP_DIR/client.env"
-for _f in common host client; do
+RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
+RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
+CLIENT_ENV="$RP_CLIENT_DIR/client.env"
+for _f in common client; do
   # shellcheck disable=SC1090
-  [ -f "$RP_DIR/$_f.env" ] && { set -a; . "$RP_DIR/$_f.env"; set +a; }
+  [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
 done
+# shellcheck disable=SC1090
+[ -f "$RP_HOST_DIR/host.env" ] && { set -a; . "$RP_HOST_DIR/host.env"; set +a; }
 APP_NAME="${APP_NAME:-XpairHost}"
 BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.x10lab.xpair-host}"
 # Dual-id fallbacks: current shipping id is com.x10lab.xpair-host / XpairHost (above).
@@ -66,8 +70,8 @@ FORWARD_APP="Xpair"
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
 AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux.sock}"
 APPROVE_TRIGGER="${APPROVE_TRIGGER:-/tmp/xpair.approve-request}"
-LOG_FILE="${LOG_FILE:-$RP_DIR/logs/xpair.log}"
-HEARTBEAT_FILE="${HEARTBEAT_FILE:-$RP_DIR/logs/xpair.heartbeat}"
+LOG_FILE="${LOG_FILE:-$RP_CLIENT_DIR/logs/xpair.log}"
+HEARTBEAT_FILE="${HEARTBEAT_FILE:-$RP_CLIENT_DIR/logs/xpair.heartbeat}"
 REMOTE_HOST="${REMOTE_HOST:-}"
 
 # Dedicated pairing identity: offer ~/.xpair/host/pairing_ed25519 on EVERY ssh path (the wrapper
@@ -76,13 +80,13 @@ REMOTE_HOST="${REMOTE_HOST:-}"
 # authorized on the host), so ssh must still fall back to the user's normal keys — forcing the key
 # exclusively would break a client that already reached the host via id_ed25519. Empty until the key
 # exists. Scalar (not array) → safe under `set -u` on bash 3.2; no spaces in the path.
-PAIRING_KEY="$RP_DIR/pairing_ed25519"
+PAIRING_KEY="$RP_HOST_DIR/pairing_ed25519"
 SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
 ssh() { command ssh $SSH_ID "$@"; }
 
 FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"     # client::host mappings (legacy SYNC_ROOTS compatible)
 FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"          # per-mapping method, keyed by clientPath: "client::mount;client2::sync"
-LAUNCHER="${LAUNCHER:-$RP_DIR/bin/xpair-launch}"
+LAUNCHER="${LAUNCHER:-$RP_CLIENT_DIR/bin/xpair-launch}"
 # Terminal app for open-gui/onboard. Default iterm2 if iTerm installed, else terminal.
 TERMINAL_APP="${TERMINAL_APP:-$( [ -d /Applications/iTerm.app ] && echo iterm2 || echo terminal )}"
 TMUXB="$LOCAL_BIN/tmux-aqua"
@@ -102,7 +106,7 @@ TERMINAL_PATH="/System/Applications/Utilities/Terminal.app"
 # Source the shared logger (installed by install.sh / self-update); no-op fallback keeps the
 # script functional on a partially-updated client where logging.sh is absent.
 # shellcheck disable=SC1090
-[ -f "$RP_DIR/bin/logging.sh" ] && . "$RP_DIR/bin/logging.sh"
+[ -f "$RP_CLIENT_DIR/bin/logging.sh" ] && . "$RP_CLIENT_DIR/bin/logging.sh"
 type rp_log >/dev/null 2>&1 || { rp_log(){ :; }; log_info(){ :; }; log_warn(){ printf '%s\n' "$*" >&2; }; log_error(){ printf '%s\n' "$*" >&2; }; err(){ printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; }; info(){ printf '\033[1;36m▸ %s\033[0m\n' "$*"; }; warn(){ printf '\033[1;33m⚠ %s\033[0m\n' "$*" >&2; }; }
 
 # ── UI helpers (err/info/warn come from logging.sh or the fallback above) ──
@@ -138,7 +142,7 @@ canonical_engine() {
   esac
 }
 
-STATUS_FILE="${STATUS_FILE:-$RP_DIR/logs/status.json}"
+STATUS_FILE="${STATUS_FILE:-$RP_HOST_DIR/logs/status.json}"
 
 tm() { "$TMUXB" -S "$AQUA_SOCK" "$@"; }
 host_up() { [ -x "$TMUXB" ] && tm has-session >/dev/null 2>&1; }
@@ -211,8 +215,8 @@ map_host_of()   { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '
 
 # ── per-mapping access method (FOLDER_MAP_MODES, keyed by clientPath) ──
 # Same path-convention inference the onboarding webview uses (StepFileAccess.inferMethod):
-# a clientPath under ~/.xpair/host/mounts/ was created by the mount backend ⇒ mount, else sync.
-map_mode_infer() { case "$1" in */.xpair/host/mounts/*) printf 'mount' ;; *) printf 'sync' ;; esac; }
+# a clientPath under ~/.xpair/client/mounts/ was created by the mount backend ⇒ mount, else sync.
+map_mode_infer() { case "$1" in */.xpair/client/mounts/*) printf 'mount' ;; *) printf 'sync' ;; esac; }
 # Stored method for a clientPath, or the inferred fallback when not explicitly recorded.
 map_mode_of() {
   local d="$1" e c IFS=';'
@@ -634,9 +638,9 @@ cmd_onboard() {
 
   local ans=""
 
-  # Detect role: ~/.xpair/host/role — host|client|both (absent = host default, mirrors Installer.swift logic)
+  # Detect client role marker: ~/.xpair/client/role — host|client|both (absent = host default, mirrors Installer.swift logic)
   local _rp_role=""
-  [ -f "$RP_DIR/role" ] && _rp_role="$(cat "$RP_DIR/role" 2>/dev/null || true)"
+  [ -f "$RP_CLIENT_DIR/role" ] && _rp_role="$(cat "$RP_CLIENT_DIR/role" 2>/dev/null || true)"
   local _is_client=0 _is_host=0
   case "$_rp_role" in
     client) _is_client=1 ;;
@@ -1102,7 +1106,7 @@ cmd_approve() {
   local trail; trail="$(_router_trail)"
   if [ -n "$trail" ]; then printf '%s\n' "$trail" | sed 's/^/  /' >&2
   else echo "  (no router log — check app/permissions/trigger. full: $LOG_FILE)" >&2; fi
-  echo "  → If the window appears late: re-trigger non-blocking, then immediately retry the blocked call. For an unknown window, add a rule to $RP_DIR/rules.txt." >&2
+  echo "  → If the window appears late: re-trigger non-blocking, then immediately retry the blocked call. For an unknown window, add a rule to $RP_HOST_DIR/rules.txt." >&2
   return 1
 }
 
@@ -1123,8 +1127,8 @@ cmd_logs() {
   if [ "$collect" = 1 ]; then
     local stamp out
     stamp="$(date +%Y%m%d-%H%M%S)"
-    out="${RP_DIR}/logs/xpair-logs-${stamp}.tgz"
-    tar -czf "$out" -C "$(dirname "${RP_DIR}/logs")" "$(basename "${RP_DIR}/logs")" 2>/dev/null \
+    out="${RP_CLIENT_DIR}/logs/xpair-logs-${stamp}.tgz"
+    tar -czf "$out" -C "$(dirname "${RP_CLIENT_DIR}/logs")" "$(basename "${RP_CLIENT_DIR}/logs")" 2>/dev/null \
       || { warn "collect: tar failed"; return 1; }
     printf '%s\n' "$out"
     return
@@ -1139,7 +1143,7 @@ cmd_logs() {
   fi
 
   # Local: glob all *.log files in $LOG_DIR (covers cli.log, xpair.log, launchd captures, etc.)
-  local log_dir="${RP_DIR}/logs"
+  local log_dir="${RP_CLIENT_DIR}/logs"
   if [ "$follow" = 1 ]; then
     # shellcheck disable=SC2086
     exec tail -n "$n" -F "$log_dir"/*.log 2>/dev/null
@@ -1175,18 +1179,18 @@ cmd_self_update() {
     warn "skipped CLI update: xpair-askpass download incomplete — the FIFO password bootstrap needs both; re-run self-update"
   fi
   [ -s "$tmp/xpair-launch" ] && { chmod +x "$tmp/xpair-launch"; mkdir -p "$(dirname "$LAUNCHER")"; mv "$tmp/xpair-launch" "$LAUNCHER" && ok "launcher → $LAUNCHER"; }
-  [ -s "$tmp/hangul-romanize" ]    && { chmod +x "$tmp/hangul-romanize";    mkdir -p "$RP_DIR/bin"; mv "$tmp/hangul-romanize" "$RP_DIR/bin/hangul-romanize"; }
-  [ -s "$tmp/logging.sh" ]         && { mkdir -p "$RP_DIR/bin"; mv "$tmp/logging.sh" "$RP_DIR/bin/logging.sh" && ok "logger → $RP_DIR/bin/logging.sh"; }
+  [ -s "$tmp/hangul-romanize" ]    && { chmod +x "$tmp/hangul-romanize";    mkdir -p "$RP_CLIENT_DIR/bin"; mv "$tmp/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize"; }
+  [ -s "$tmp/logging.sh" ]         && { mkdir -p "$RP_CLIENT_DIR/bin"; mv "$tmp/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" && ok "logger → $RP_CLIENT_DIR/bin/logging.sh"; }
   rm -rf "$tmp"; ok "self-update complete — applies from the next invocation"
 }
 
-# Resolve a sibling client tool (installed → LOCAL_BIN/~/.xpair/host/bin → repo copy).
+# Resolve a sibling client tool (installed → LOCAL_BIN/~/.xpair/client/bin → repo copy).
 # Echoes the path, or returns 1. Used by editor/desktop to resolve their launcher.
 _resolve_client_tool() {
   local name="$1" p=""
   if command -v "$name" >/dev/null 2>&1; then p="$(command -v "$name")"
   elif [ -x "$LOCAL_BIN/$name" ]; then p="$LOCAL_BIN/$name"
-  elif [ -x "$RP_DIR/bin/$name" ]; then p="$RP_DIR/bin/$name"
+  elif [ -x "$RP_CLIENT_DIR/bin/$name" ]; then p="$RP_CLIENT_DIR/bin/$name"
   else
     local _repo; _repo="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$name"
     [ -x "$_repo" ] && p="$_repo"
@@ -1784,7 +1788,7 @@ cmd_install_host() {
       rm -f "$btmp"
     else
       # Default: scp the locally-built SIGNED .app + install.sh; integrity = signature.
-      [ -n "$repo_root" ] || { err "install-host: cannot locate the Xpair repo tree (no shared/install.sh via RP_REPO_ROOT or \$0/../..). Set RP_REPO_ROOT=<repo> in ~/.xpair/host/client.env, run from the repo, or use --bootstrap --sha256 <hex> for a release install."; return 1; }
+      [ -n "$repo_root" ] || { err "install-host: cannot locate the Xpair repo tree (no shared/install.sh via RP_REPO_ROOT or \$0/../..). Set RP_REPO_ROOT=<repo> in ~/.xpair/client/client.env, run from the repo, or use --bootstrap --sha256 <hex> for a release install."; return 1; }
       # build-host.sh writes build/<app> relative to its CWD: host/build/ when run from host/, or
       # build/ when run from the repo root. Accept either so a repo-root build is found too.
       local appsrc="$repo_root/host/build/$APP_NAME.app"
@@ -1951,7 +1955,7 @@ cmd_notify() {
 
   # Local ENABLED_TYPES filter (mirror xpair-notify.sh parsing). Default: all on.
   local enabled="Stop,Notification,SubagentStop,approve-wait,approve"
-  local conf="$RP_DIR/notify.conf"
+  local conf="$RP_HOST_DIR/notify.conf"
   if [ -f "$conf" ]; then
     local v; v="$(sed -n 's/^[[:space:]]*ENABLED_TYPES[[:space:]]*=[[:space:]]*\(.*\)$/\1/p' "$conf" | tail -1)"
     # An explicit empty value (ENABLED_TYPES=) means "all off" — honor it; only fall back when the key is absent.

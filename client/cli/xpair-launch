@@ -32,12 +32,16 @@ XPAIR_OS="$(_xpair_os)"
 # stat: BSD (mac) uses -f, GNU (linux/WSL/Git-Bash coreutils) uses -c. Keep callers OS-agnostic.
 _stat_size() { if [ "$XPAIR_OS" = mac ]; then stat -f %z "$1" 2>/dev/null; else stat -c %s "$1" 2>/dev/null; fi; }
 
-# ── config (single source of truth: ~/.xpair/host) ──
+# ── config (split runtime dirs) ──
 RP_DIR="${RP_DIR:-$HOME/.xpair/host}"
-for _f in common host client; do
+RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
+RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
+for _f in common client; do
   # shellcheck disable=SC1090
-  [ -f "$RP_DIR/$_f.env" ] && { set -a; . "$RP_DIR/$_f.env"; set +a; }
+  [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
 done
+# shellcheck disable=SC1090
+[ -f "$RP_HOST_DIR/host.env" ] && { set -a; . "$RP_HOST_DIR/host.env"; set +a; }
 REMOTE_HOST="${REMOTE_HOST:-}"
 
 # Dedicated pairing identity: offer ~/.xpair/host/pairing_ed25519 (installed as the restricted
@@ -47,7 +51,7 @@ REMOTE_HOST="${REMOTE_HOST:-}"
 # Scalar (NOT an array): an empty array expanded as "${arr[@]}" under `set -u` is an "unbound
 # variable" error on bash 3.2 (the macOS default). A scalar is always safe, and the xpair path has
 # no spaces, so unquoted word-splitting into ssh options is fine.
-PAIRING_KEY="$RP_DIR/pairing_ed25519"
+PAIRING_KEY="$RP_HOST_DIR/pairing_ed25519"
 SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
 APP_NAME="${APP_NAME:-XpairHost}"
 BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.x10lab.xpair-host}"
@@ -60,7 +64,7 @@ AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux.sock}"
 # SSH account differs from the client user. Left empty here when no override was given.
 MOSH_SERVER="${MOSH_SERVER:-}"
 FOLDER_MAPS="${FOLDER_MAPS:-}"
-HROMANIZE="${HROMANIZE:-$RP_DIR/bin/hangul-romanize}"
+HROMANIZE="${HROMANIZE:-$RP_CLIENT_DIR/bin/hangul-romanize}"
 # Engine selection (claude|codex|opencode|shell). RP_ENGINE/--engine wins; otherwise the host's
 # host.env ENGINE is read over SSH at launch. The client-side ENGINE is only a last-resort fallback.
 CLIENT_ENGINE_FALLBACK="${ENGINE:-claude}"
@@ -97,7 +101,7 @@ fi
 
 # Source the shared logger; no-op fallback for partially-updated clients.
 # shellcheck disable=SC1090
-[ -f "$RP_DIR/bin/logging.sh" ] && . "$RP_DIR/bin/logging.sh"
+[ -f "$RP_CLIENT_DIR/bin/logging.sh" ] && . "$RP_CLIENT_DIR/bin/logging.sh"
 type rp_log >/dev/null 2>&1 || { rp_log(){ :; }; log_info(){ :; }; log_warn(){ printf '%s\n' "$*" >&2; }; log_error(){ printf '%s\n' "$*" >&2; }; }
 
 # ── args ──
@@ -113,8 +117,8 @@ esac; done
 # ── error logging + pause on failure ──
 # Tee all stderr to a log file — prevents errors from disappearing when the window closes.
 # On success the process is replaced by exec (tmux/mosh), so the EXIT trap only fires on failure.
-LAUNCH_LOG="$RP_DIR/logs/claude-launch.err.log"
-mkdir -p "$RP_DIR/logs"
+LAUNCH_LOG="$RP_CLIENT_DIR/logs/claude-launch.err.log"
+mkdir -p "$RP_CLIENT_DIR/logs"
 # size-cap rotation (5MB → .1) — unbounded otherwise on a long-lived client
 _rotate_log() { local f="$1" max="${2:-5000000}" sz; sz="$(_stat_size "$f" || echo 0)"; [ "$sz" -gt "$max" ] && mv -f "$f" "$f.1" 2>/dev/null || true; }
 _rotate_log "$LAUNCH_LOG"
@@ -193,7 +197,7 @@ map_to_host() { # $1=clientDir → echo hostDir
 # ── human-readable deterministic session name ──
 # Folder name → session name mapping is the deterministic SSOT.
 # Stored in a permanent location (not .cache which may be deleted).
-_TRCACHE="$RP_DIR/session-names"
+_TRCACHE="$RP_CLIENT_DIR/session-names"
 # Folder basename → readable ASCII slug.
 #  · Already ASCII → use as-is (no translation)
 #  · Non-ASCII (e.g. Korean) → translate to English via claude haiku (cached → deterministic)
@@ -289,7 +293,7 @@ export CLAUDE_WARP_RC="$RC"
 # on a miss we start blank rather than risk grabbing the wrong project's conversation.
 _LSD="$HOME/.claude/.git/last-session"
 _K="$(printf '%s' "$PWD" | shasum -a 256 | cut -c1-16)"
-_rplog="$HOME/.xpair/host/logs/xpair.log"; mkdir -p "$(dirname "$_rplog")" 2>/dev/null
+_rplog="$HOME/.xpair/client/logs/xpair.log"; mkdir -p "$(dirname "$_rplog")" 2>/dev/null
 while :; do
   # Re-read inside the loop so a crash-respawn picks up the latest recorded id.
   RESUME_SID=""
@@ -669,8 +673,8 @@ resolve_xpair_cli() {
     command -v xpair
   elif [ -x "$LOCAL_BIN/xpair" ]; then
     printf '%s\n' "$LOCAL_BIN/xpair"
-  elif [ -x "$RP_DIR/bin/xpair" ]; then
-    printf '%s\n' "$RP_DIR/bin/xpair"
+  elif [ -x "$RP_CLIENT_DIR/bin/xpair" ]; then
+    printf '%s\n' "$RP_CLIENT_DIR/bin/xpair"
   else
     return 1
   fi

@@ -3,8 +3,10 @@
 cd "$(dirname "$0")"; . ./lib.sh
 
 new_sandbox
+rm -rf "$RP_CLIENT_DIR"
 mkdir -p "$HOME/.xpair/client/User"
 printf 'legacy ide data\n' > "$HOME/.xpair/client/User/settings.json"
+printf 'REMOTE_HOST=legacy-host\n' > "$HOME/.xpair/host/client.env"
 printf 'HOST_ONLY=1\n' > "$HOME/.xpair/host/host.env"
 printf 'host manifest\n' > "$HOME/.xpair/host/.manifest-host"
 

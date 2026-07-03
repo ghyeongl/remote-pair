@@ -95,9 +95,9 @@ make_all_mocks
   printf '{ printf "%%s" "$(basename "$0")"; for a in "$@"; do printf "|%%s" "$a"; done; printf "\\n"; } >> "$MOCKLOG"\n'
   printf 'exit 0\n'
 } > "$MOCKBIN/claude"; chmod +x "$MOCKBIN/claude"
-# The launcher's romanizer looks at $HROMANIZE=$RP_DIR/bin/hangul-romanize, not PATH (L30,L100).
+# The launcher's romanizer looks at $HROMANIZE=$RP_CLIENT_DIR/bin/hangul-romanize, not PATH.
 # → to hit the romanization fallback, place an executable at that location.
-cp "$MOCKBIN/hangul-romanize" "$RP_DIR/bin/hangul-romanize"; chmod +x "$RP_DIR/bin/hangul-romanize"
+cp "$MOCKBIN/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize"; chmod +x "$RP_CLIENT_DIR/bin/hangul-romanize"
 HAN_DIR4="$SBX/한글폴더"; mkdir -p "$HAN_DIR4"
 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ MOCK_HROMANIZE=romanX run_launcher "$HAN_DIR4"
 GOT4="$(extract_session)"
@@ -121,7 +121,7 @@ make_all_mocks
   printf 'case " $* " in *" -p "*) printf "Failed to authenticate. API Error: 401 Invalid authentication credentials\\n"; exit 42 ;; esac\n'
   printf 'exit 0\n'
 } > "$MOCKBIN/claude"; chmod +x "$MOCKBIN/claude"
-cp "$MOCKBIN/hangul-romanize" "$RP_DIR/bin/hangul-romanize"; chmod +x "$RP_DIR/bin/hangul-romanize"
+cp "$MOCKBIN/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize"; chmod +x "$RP_CLIENT_DIR/bin/hangul-romanize"
 HAN_DIR4B="$SBX/회의녹음본"; mkdir -p "$HAN_DIR4B"
 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ MOCK_HROMANIZE=hoeui-nogeum-bon run_launcher "$HAN_DIR4B"
 GOT4B="$(extract_session)"
@@ -146,7 +146,7 @@ make_all_mocks
   printf 'case " $* " in *" -p "*) printf "provider exploded in a novel way\\n"; exit 77 ;; esac\n'
   printf 'exit 0\n'
 } > "$MOCKBIN/claude"; chmod +x "$MOCKBIN/claude"
-cp "$MOCKBIN/hangul-romanize" "$RP_DIR/bin/hangul-romanize"; chmod +x "$RP_DIR/bin/hangul-romanize"
+cp "$MOCKBIN/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize"; chmod +x "$RP_CLIENT_DIR/bin/hangul-romanize"
 HAN_DIR4C="$SBX/번역실패"; mkdir -p "$HAN_DIR4C"
 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ MOCK_HROMANIZE=beonyeok-silpae run_launcher "$HAN_DIR4C"
 GOT4C="$(extract_session)"
@@ -162,8 +162,8 @@ cleanup_sandbox
 
 # ───────────────────────────────────────────────────────────────────
 # Scenario 5 — claude translation fails + hangul-romanize absent → raw basename (sanitized) fallback.
-# The romanizer looks at $RP_DIR/bin/hangul-romanize, not the PATH mock (launcher L30).
-# new_sandbox creates only the $RP_DIR/bin directory and lays down no file → [ -x ] fails → raw fallback.
+# The romanizer looks at $RP_CLIENT_DIR/bin/hangul-romanize, not the PATH mock.
+# new_sandbox creates only the $RP_CLIENT_DIR/bin directory and lays down no file → [ -x ] fails → raw fallback.
 # claude is present (so the local launch proceeds) but left with empty -p output.
 # ───────────────────────────────────────────────────────────────────
 new_sandbox
@@ -182,7 +182,7 @@ EXP5="$(expect_name "$HAN_DIR5" "한글폴더")"
 it "nonascii/raw-fallback"
 assert_rc "$RP_RC" 0 "claude-failure + romanizer-absent -> raw fallback succeeds"
 assert_contains "$MLOG" "claude|" "claude -p attempted (empty output)"
-assert_absent "$MLOG" "hangul-romanize|" "romanizer absent (RP_DIR/bin is empty)"
+assert_absent "$MLOG" "hangul-romanize|" "romanizer absent (RP_CLIENT_DIR/bin is empty)"
 assert_eq "$GOT5" "$EXP5" "session base = host_session_<5hex> (safe raw fallback)"
 cleanup_sandbox
 

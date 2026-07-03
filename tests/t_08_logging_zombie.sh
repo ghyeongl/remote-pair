@@ -7,7 +7,7 @@ SBX_REMOTE_HOST="" new_sandbox
 make_all_mocks
 MOCK_HASSESSION=0 run_launcher "$SBX"
 it "s1/launch-log-header"
-LOGTXT="$(cat "$RP_DIR/logs/claude-launch.err.log" 2>/dev/null)"
+LOGTXT="$(cat "$RP_CLIENT_DIR/logs/claude-launch.err.log" 2>/dev/null)"
 assert_contains "$LOGTXT" "launch" "launch header written to LAUNCH_LOG"
 assert_contains "$LOGTXT" "=====" "header separator present"
 cleanup_sandbox
@@ -18,7 +18,7 @@ make_all_mocks
 RP_YES=1 run_launcher "$SBX/does-not-exist-xyz"
 it "s2/die-missing-dir"
 assert_rc "$RP_RC" 1 "missing folder → die rc=1"
-assert_contains "$RP_ERR$(cat "$RP_DIR/logs/claude-launch.err.log" 2>/dev/null)" "directory not found" "die message printed"
+assert_contains "$RP_ERR$(cat "$RP_CLIENT_DIR/logs/claude-launch.err.log" 2>/dev/null)" "directory not found" "die message printed"
 cleanup_sandbox
 
 # ── s3: stderr tee → stderr warning lands in LAUNCH_LOG ──
@@ -27,7 +27,7 @@ new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude hangul-romanize launchctl open tput
 MOCK_REACH=fail MOCK_HASSESSION=0 run_launcher "$SBX"
 it "s3/stderr-tee-to-log"
-LOGTXT="$(cat "$RP_DIR/logs/claude-launch.err.log" 2>/dev/null)"
+LOGTXT="$(cat "$RP_CLIENT_DIR/logs/claude-launch.err.log" 2>/dev/null)"
 assert_contains "$LOGTXT" "tailscale" "stderr warning tee'd into LAUNCH_LOG"
 cleanup_sandbox
 

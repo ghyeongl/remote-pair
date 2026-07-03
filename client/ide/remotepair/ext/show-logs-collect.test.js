@@ -40,9 +40,9 @@ test("users can reveal logs and collect a readable diagnostic bundle (Q0380)", (
   assert.match(showLogs, /term\.sendText\("xpair logs --collect", true\)/);
 
   assert.match(cmdLogs, /--collect\)\s+collect=1/);
-  assert.ok(cmdLogs.includes('out="${RP_DIR}/logs/xpair-logs-${stamp}.tgz"'));
+  assert.ok(cmdLogs.includes('out="${RP_CLIENT_DIR}/logs/xpair-logs-${stamp}.tgz"'));
   assert.ok(
-    cmdLogs.includes('tar -czf "$out" -C "$(dirname "${RP_DIR}/logs")" "$(basename "${RP_DIR}/logs")"'),
+    cmdLogs.includes('tar -czf "$out" -C "$(dirname "${RP_CLIENT_DIR}/logs")" "$(basename "${RP_CLIENT_DIR}/logs")"'),
   );
   assert.match(cmdLogs, /printf '%s\\n' "\$out"/);
 });

@@ -35,7 +35,7 @@ CLIENT_ROOT="$SBX/proj"
 CLIENT_SUBDIR="$CLIENT_ROOT/sub"
 mkdir -p "$CLIENT_SUBDIR"
 # Inject the mapping into client.env (overwrites the FOLDER_MAPS="" written by new_sandbox)
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/proj\n' "$CLIENT_ROOT" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/proj\n' "$CLIENT_ROOT" > "$RP_CLIENT_DIR/client.env"
 make_all_mocks
 MOCK_DIRCHECK=__YES__ run_launcher "$CLIENT_SUBDIR"
 
@@ -55,7 +55,7 @@ new_sandbox
 NESTED_DIR="$SBX/a/b/c"
 mkdir -p "$NESTED_DIR"
 # FOLDER_MAPS contains a semicolon — wrapped in quotes so the shell does not interpret ; as a command separator
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS="%s/a::/x;%s/a/b::/y"\n' "$SBX" "$SBX" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS="%s/a::/x;%s/a/b::/y"\n' "$SBX" "$SBX" > "$RP_CLIENT_DIR/client.env"
 make_all_mocks
 MOCK_DIRCHECK=__YES__ run_launcher "$NESTED_DIR"
 
@@ -74,7 +74,7 @@ cleanup_sandbox
 new_sandbox
 PLAIN_DIR="$SBX/plain"
 mkdir -p "$PLAIN_DIR"
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s\n' "$PLAIN_DIR" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s\n' "$PLAIN_DIR" > "$RP_CLIENT_DIR/client.env"
 make_all_mocks
 MOCK_DIRCHECK=__YES__ run_launcher "$PLAIN_DIR"
 
