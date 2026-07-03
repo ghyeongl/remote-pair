@@ -6,7 +6,7 @@
 # empty state with this script, then launch the app, which will behave exactly as a clean install.
 #
 # What it does (client-side only — never touches the host):
-#   1. Clears legacy onboarding config. Current mountpoints live under /Volumes/<device>/<share>.
+#   1. Unmounts mount-method folder mappings under /Volumes/<share>.
 #   2. Clears the onboarding-produced keys in ~/.xpair/client/client.env (REMOTE_HOST, FOLDER_MAPS,
 #      SYNC_BACKEND, MOUNT_BACKEND) while preserving install-level keys (LAUNCHER, TERMINAL_APP).
 #   3. Leaves the SSH key (~/.ssh/id_ed25519) in place by default — onboarding reuses it. Pass
@@ -16,8 +16,8 @@
 set -euo pipefail
 
 RP_DIR="$HOME/.xpair/client"
+RP_HOST_DIR="$HOME/.xpair/host"
 CLIENT_ENV="$RP_DIR/client.env"
-MOUNTS_ROOT="$RP_DIR/mounts"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 YES=0
@@ -42,19 +42,58 @@ if [ "$YES" != 1 ]; then
   case "${ans:-n}" in [yY]*) ;; *) echo "Aborted."; exit 1 ;; esac
 fi
 
-# 1) Unmount anything currently mounted under the mounts root.
-if [ -d "$MOUNTS_ROOT" ]; then
+map_client_of() { printf '%s' "${1%%::*}"; }
+map_host_of() { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '%s' "$h"; }
+map_mode_for() {
+  local client="$1" e c IFS=';'
+  for e in ${FOLDER_MAP_MODES:-}; do
+    [ -n "$e" ] || continue
+    c="$(map_client_of "$e")"
+    [ "$c" = "$client" ] && { map_host_of "$e"; return; }
+  done
+  case "$client" in /Volumes/*) printf 'mount' ;; *) printf 'sync' ;; esac
+}
+
+unmount_path() {
+  local mp="$1"
+  [ -n "$mp" ] || return 0
+  echo "unmounting $mp"
+  diskutil unmount "$mp" >/dev/null 2>&1 \
+    || umount "$mp" >/dev/null 2>&1 \
+    || diskutil unmount force "$mp" >/dev/null 2>&1 \
+    || echo "  (could not unmount $mp — may already be detached)"
+}
+
+# 1) Unmount real mount-method mappings before clearing config.
+if [ -f "$CLIENT_ENV" ]; then
+  unset FOLDER_MAPS FOLDER_MAP_MODES
+  # shellcheck disable=SC1090
+  . "$CLIENT_ENV" >/dev/null 2>&1 || true
+  IFS=';'
+  for pair in ${FOLDER_MAPS:-}; do
+    [ -n "$pair" ] || continue
+    client_path="$(map_client_of "$pair")"
+    host_path="$(map_host_of "$pair")"
+    [ "$(map_mode_for "$client_path")" = mount ] || continue
+    if [ -n "$RPM" ]; then
+      "$RPM" unmount "$host_path" >/dev/null 2>&1 \
+        || "$RPM" unmount "$client_path" >/dev/null 2>&1 \
+        || unmount_path "$client_path"
+    else
+      unmount_path "$client_path"
+    fi
+  done
+  unset IFS
+fi
+
+# Legacy pre-split mount roots are retired, but clean up any still-attached volumes.
+for legacy_root in "$RP_HOST_DIR/mounts" "$RP_DIR/mounts"; do
   while IFS= read -r mp; do
     [ -n "$mp" ] || continue
-    echo "unmounting $mp"
-    { [ -n "$RPM" ] && "$RPM" unmount "$mp" >/dev/null 2>&1; } \
-      || umount "$mp" >/dev/null 2>&1 \
-      || diskutil unmount force "$mp" >/dev/null 2>&1 \
-      || echo "  (could not unmount $mp — may already be detached)"
-  done < <(/sbin/mount | awk -v r="$MOUNTS_ROOT" 'index($0, " on "r){s=index($0," on ")+4; e=index($0," (")-1; print substr($0,s,e-s+1)}')
-  rm -rf "${MOUNTS_ROOT:?}/"* 2>/dev/null || true
-  echo "cleared $MOUNTS_ROOT"
-fi
+    unmount_path "$mp"
+  done < <(/sbin/mount | awk -v r="$legacy_root" 'index($0, " on "r){s=index($0," on ")+4; e=index($0," (")-1; print substr($0,s,e-s+1)}')
+  [ -d "$legacy_root" ] && rmdir "$legacy_root"/* "$legacy_root" >/dev/null 2>&1 || true
+done
 
 # 2) Clear onboarding keys in client.env (preserve install-level keys + the file itself).
 if [ -f "$CLIENT_ENV" ]; then

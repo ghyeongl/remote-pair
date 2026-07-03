@@ -35,7 +35,7 @@ app; IDE data moved out of the old `client` name.
 | `backups/` | `host/backups`, `client/backups` | Backups are scoped to the installing role. |
 | IDE user-data | `ide/` | Renamed from the old `~/.xpair/client` IDE data dir. |
 | IDE server-data | `ide-server/` | Renamed from `~/.xpair/client-server`. |
-| Mount-method folders | `/Volumes/<device>/<sanitized-host-path>` | SMB-only, read-write by default. No `~/.xpair/*/mounts` runtime location. |
+| Mount-method folders | `/Volumes/<share>` or macOS suffixed variant | SMB-only, read-write by default. No `~/.xpair/*/mounts` runtime location. |
 
 ## `RP_DIR` Semantics
 
@@ -52,32 +52,33 @@ the Swift app continue to use `~/.xpair/host`.
 
 ## Mounts
 
-Mount mode is SMB-only. `xpair-mount` resolves the canonical mountpoint as:
+Mount mode is SMB-only. `xpair-mount` mounts with macOS NetFS, the same user-level
+path Finder uses for "Connect to Server":
 
 ```
-/Volumes/<sanitized REMOTE_HOST>/<sanitized full hostPath>
+smb://<smb-user>@<smb-host>/<share>
 ```
 
-The local mountpoint folder uses the full sanitized host path, not just the
-basename, so two host paths with the same basename do not collide. The SMB
-share in the mount URL still uses the basename of the shared folder. The
-sanitizer strips a leading slash, converts `/` to `_`, and replaces characters
-outside `[A-Za-z0-9._-]` with `_`. For example,
-`REMOTE_HOST=user@office-mac.local` and host path `/Users/alice/Projects/foo`
-produce:
+The SMB share is the basename of the host path. Xpair does not create any
+directory under `/Volumes`; NetFS asks automountd to create the volume mountpoint.
+After mounting, Xpair discovers the actual mountpoint by parsing `mount`, looking
+for:
 
 ```
-/Volumes/user_office-mac.local/Users_alice_Projects_foo
+//<smb-user>@<smb-host>/<share> on <path> (smbfs...)
 ```
 
-Mounts are read-write by default because `mount_smbfs` defaults to read-write;
-Xpair does not add `rdonly`.
+The first-choice path is usually `/Volumes/<share>`, but macOS may choose
+`/Volumes/<share>-1` or another suffix if the name is already taken. Xpair stores
+and prints the discovered path.
+
+Mounts are read-write by default; Xpair does not add `rdonly`.
 
 Before attach, the client runs an ensure-mounted guard: for mount-method
 `FOLDER_MAPS` entries, it checks whether the canonical
-`/Volumes/<device>/<sanitized-host-path>` path is mounted and best-effort runs
-`xpair-mount mount <hostPath>` if missing. Failures warn but do not block
-attach.
+`//<host>/<share>` SMB share is mounted and best-effort runs `xpair-mount mount
+<hostPath>` if missing. If macOS chose a suffixed mountpoint, the launcher uses
+the discovered path for that attach. Failures warn but do not block attach.
 
 ## Migration
 
@@ -93,15 +94,15 @@ attach.
 3. Rewrite stale mount-method mappings in `~/.xpair/client/client.env`.
    Any `FOLDER_MAPS` entry whose client path has explicit
    `FOLDER_MAP_MODES=<clientPath>::mount`, or whose client path is under a
-   legacy `~/.xpair/{host,client}/mounts/` root, is rewritten to the canonical
-   `/Volumes/<device>/<sanitized-host-path>` path. Matching `FOLDER_MAP_MODES`
+   legacy `~/.xpair/{host,client}/mounts/` root, is rewritten to the expected
+   `/Volumes/<share>` path. Matching `FOLDER_MAP_MODES`
    keys are rewritten too. Sync mappings and entries already under `/Volumes/`
    are left unchanged.
 
 If a legacy mountpoint path is still mounted, migration best-effort runs
-`umount` and removes empty leftover directories. Migration never fails the
-install for mount cleanup or env rewrite failures; attach-time ensure-mounted
-will recreate the canonical SMB mount on next attach.
+`umount`/`diskutil unmount` and removes empty leftover directories. Migration
+never fails the install for mount cleanup or env rewrite failures; attach-time
+ensure-mounted will recreate and discover the SMB mount on next attach.
 
 No compatibility symlink is created from `~/.xpair/host/mounts` to
 `~/.xpair/client/mounts`; both locations are retired for mount mode.

@@ -15,10 +15,21 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
-EDITOR_PORT="${EDITOR_PORT:-8080}"
 RP_DIR="${RP_DIR:-$HOME/.xpair/host}"
 RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
 RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
+if [ -f "$RP_CLIENT_DIR/client.env" ]; then
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
+  done
+else
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_HOST_DIR/$_f.env" ] && { set -a; . "$RP_HOST_DIR/$_f.env"; set +a; }
+  done
+fi
+EDITOR_PORT="${EDITOR_PORT:-8080}"
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
 BIND_ADDR="127.0.0.1"
 

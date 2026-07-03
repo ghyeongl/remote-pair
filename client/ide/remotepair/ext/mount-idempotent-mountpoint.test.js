@@ -22,12 +22,12 @@ function test(name, fn) {
 // line that onboarding-bridge.mount() parses. Without it the bridge sees code 0 + empty
 // mountpoint and reports a false mount failure, blocking add-mapping retries.
 test("already-mounted branch emits the Mountpoint line before returning", () => {
-  const start = mountCli.indexOf("if is_mounted");
+  const start = mountCli.indexOf('if [ -n "$discovered" ]; then');
   assert.notStrictEqual(start, -1, "already-mounted guard must exist");
   const ret = mountCli.indexOf("return 0", start);
   assert.notStrictEqual(ret, -1, "guard must return 0");
   const branch = mountCli.slice(start, ret);
-  assert.match(branch, /printf '  Mountpoint: %s\\n' "\$mountpoint"/,
+  assert.match(branch, /printf '  Mountpoint: %s\\n' "\$discovered"/,
     "already-mounted branch must print the Mountpoint: line before return 0");
 });
 

@@ -29,10 +29,17 @@ set -euo pipefail
 RP_DIR="${RP_DIR:-$HOME/.xpair/host}"
 RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
 RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
-for _f in common client; do
-  # shellcheck disable=SC1090
-  [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
-done
+if [ -f "$RP_CLIENT_DIR/client.env" ]; then
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
+  done
+else
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_HOST_DIR/$_f.env" ] && { set -a; . "$RP_HOST_DIR/$_f.env"; set +a; }
+  done
+fi
 # shellcheck disable=SC1090
 [ -f "$RP_HOST_DIR/host.env" ] && { set -a; . "$RP_HOST_DIR/host.env"; set +a; }
 REMOTE_HOST="${REMOTE_HOST:-}"

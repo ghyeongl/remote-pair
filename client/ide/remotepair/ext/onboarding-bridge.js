@@ -69,13 +69,6 @@ function invalidAccount(account) {
   return `invalid account: ${String(account || "").trim()}`;
 }
 
-function sanitizeMountComponent(value) {
-  return String(value || "")
-    .replace(/^\//, "")
-    .replace(/\//g, "_")
-    .replace(/[^A-Za-z0-9._-]/g, "_");
-}
-
 /** Resolve the xpair binary (installed to ~/.local/bin, else on PATH). */
 function rpBin() {
   const local = path.join(HOME, ".local", "bin", "xpair");
@@ -1575,21 +1568,26 @@ const bridge = {
     return { ok: false, path: "", err: "folder not found" };
   },
 
-  // Mappings — compute the default mountpoint the same way xpair-mount does, so the UI
-  // can pre-fill the field before the user clicks Mount.
-  //
-  // Mirrors xpair-mount default_mountpoint + sanitize_path exactly:
-  //   sanitize_path: strip leading '/', replace remaining '/' with '_',
-  //                  then replace every char not in [A-Za-z0-9._-] with '_'.
-  //   host_slug:     sanitize_path "$REMOTE_HOST".
-  //   folder_name:   sanitize_path "$hostPath".
-  //   result:        /Volumes/<host_slug>/<folder_name>
+  // Mappings — pre-fill with the NetFS/Finder mountpoint. macOS chooses
+  // /Volumes/<share> or a suffixed variant; when the share is already mounted,
+  // discover the real path from mount(8), otherwise return the first expected path.
   defaultMountpoint(hostPath) {
     const cfg = parseEnv(CLIENT_ENV);
     const remoteHost = cfg.REMOTE_HOST || "";
-    const hostSlug = sanitizeMountComponent(remoteHost);
-    const folderName = sanitizeMountComponent(String(hostPath || ""));
-    return path.join("/Volumes", hostSlug, folderName);
+    const smbHost = String(remoteHost).includes("@") ? String(remoteHost).split("@").pop() : String(remoteHost);
+    const shareName = path.posix.basename(String(hostPath || ""));
+    if (!shareName) return "/Volumes";
+    try {
+      const out = cp.execFileSync("mount", { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+      const marker = `@${smbHost}/${shareName} on `;
+      for (const line of String(out || "").split("\n")) {
+        if (!line.includes(marker) || !line.includes(" (smbfs")) continue;
+        const start = line.indexOf(" on ");
+        const end = line.indexOf(" (smbfs", start);
+        if (start >= 0 && end > start) return line.slice(start + 4, end);
+      }
+    } catch { /* best effort only */ }
+    return path.join("/Volumes", shareName);
   },
 
   // Mappings — actually mount a host folder. `xpair-mount` takes a SUBCOMMAND first, so via the

@@ -5,8 +5,7 @@ Instead of syncing a local copy, the client mounts the host folder directly so t
 source of truth: no sync daemon, no conflict files, no `.sync-conflict-*` clutter.
 
 **Status:** `client/cli/xpair-mount` is SMB-only. It supports mount, unmount, status, and help.
-SMB uses macOS `mount_smbfs`, which is built into macOS and does not require any third-party kernel
-extension.
+SMB uses macOS NetFS/Finder-style mounting and does not require any third-party kernel extension.
 
 ---
 
@@ -43,20 +42,21 @@ The share name is the basename of the shared folder by default. For example:
 
 | Host path | SMB share | Default client mountpoint |
 |---|---|---|
-| `/Users/alice/Projects/foo` | `foo` | `/Volumes/<device>/Users_alice_Projects_foo` |
-| `/Users/alice/work` | `work` | `/Volumes/<device>/Users_alice_work` |
+| `/Users/alice/Projects/foo` | `foo` | `/Volumes/foo` |
+| `/Users/alice/work` | `work` | `/Volumes/work` |
 
-`<device>` is the sanitized `REMOTE_HOST` value. Characters outside `[A-Za-z0-9._-]` are replaced
-with `_`. The local mountpoint folder is the full sanitized host path, while the SMB share name
-in the mount URL remains the basename of the shared folder. For
-`REMOTE_HOST=user@office-mac.local`, the default mountpoint for `/Users/alice/Projects/foo` is:
+Xpair does not create directories under `/Volumes`. It asks NetFS to mount
+`smb://<smb-user>@<smb-host>/<share>`, then discovers the actual mountpoint from
+the `mount` table:
 
 ```
-/Volumes/user_office-mac.local/Users_alice_Projects_foo
+//<smb-user>@<smb-host>/<share> on <path> (smbfs...)
 ```
 
-Mounts are read-write by default because `mount_smbfs` defaults to read-write. Xpair does not add
-`rdonly`.
+The first-choice path is usually `/Volumes/<share>`, but macOS may choose
+`/Volumes/<share>-1` or another suffix if the name is already taken. Xpair prints
+the discovered path as `Mountpoint: <path>`. Mounts are read-write by default;
+Xpair does not add `rdonly`.
 
 ---
 
@@ -73,7 +73,7 @@ xpair-mount --backend smb mount /Users/alice/Projects/foo
 xpair-mount status
 
 # Unmount by mountpoint or host path
-xpair-mount unmount /Volumes/user_office-mac.local/Users_alice_Projects_foo
+xpair-mount unmount /Volumes/foo
 xpair-mount unmount /Users/alice/Projects/foo
 
 # Help
@@ -83,23 +83,24 @@ xpair-mount help
 Default mountpoint:
 
 ```
-/Volumes/<sanitized-REMOTE_HOST>/<sanitized-full-hostPath>
+/Volumes/<share>
 ```
 
 After mounting, point a `FOLDER_MAPS` entry at the mountpoint so path mapping in `xpair-launch`
 resolves correctly:
 
 ```
-FOLDER_MAPS="/Volumes/user_office-mac.local/Users_alice_Projects_foo::/Users/alice/Projects/foo"
-FOLDER_MAP_MODES="/Volumes/user_office-mac.local/Users_alice_Projects_foo::mount"
+FOLDER_MAPS="/Volumes/foo::/Users/alice/Projects/foo"
+FOLDER_MAP_MODES="/Volumes/foo::mount"
 SYNC_BACKEND=mount
 MOUNT_BACKEND=smb
 ```
 
 `xpair-launch` also has a best-effort ensure-mounted guard: before attach, it scans mount-method
-folder maps and runs `xpair-mount mount <hostPath>` for any canonical
-`/Volumes/<device>/<sanitized-full-hostPath>` path that is not currently mounted. Failures warn but
-never block attach.
+folder maps, checks whether the mapped SMB share is already in the `mount`
+table, and runs `xpair-mount mount <hostPath>` when missing. If NetFS chooses a
+suffixed mountpoint, the launcher uses the discovered path for that attach.
+Failures warn but never block attach.
 
 ---
 

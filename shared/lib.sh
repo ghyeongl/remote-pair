@@ -62,17 +62,11 @@ _migrate_map_host_of() {
   printf '%s' "$h"
 }
 
-# Must match client/cli/xpair-mount sanitize_path exactly.
-_migrate_sanitize_path() {
-  printf '%s' "$1" | LC_ALL=C sed 's|^/||; s|/|_|g; s|[^A-Za-z0-9._-]|_|g'
-}
-
 _migrate_default_mountpoint() {
-  local remote_host="$1" host_path="$2" device share
-  device="$(_migrate_sanitize_path "$remote_host")"
-  share="$(_migrate_sanitize_path "$host_path")"
-  [ -n "$device" ] && [ -n "$share" ] || return 1
-  printf '/Volumes/%s/%s' "$device" "$share"
+  local host_path="$2" share
+  share="$(basename "$host_path")"
+  [ -n "$share" ] || return 1
+  printf '/Volumes/%s' "$share"
 }
 
 _migrate_rewrite_client_bin_paths() {
@@ -124,6 +118,23 @@ _migrate_cleanup_legacy_mountpoint() {
     d="$(dirname "$d")"
   done
   rmdir "$root" >/dev/null 2>&1 || true
+}
+
+_migrate_cleanup_legacy_mount_roots() {
+  local host_dir="$1" client_dir="$2" root mp
+  for root in "$host_dir/mounts" "$client_dir/mounts"; do
+    [ -d "$root" ] || continue
+    while IFS= read -r mp; do
+      [ -n "$mp" ] || continue
+      if _migrate_is_mounted "$mp"; then
+        umount "$mp" >/dev/null 2>&1 || diskutil unmount "$mp" >/dev/null 2>&1 || true
+        _migrate_note "best-effort unmounted legacy mountpoint $mp"
+      fi
+    done <<EOF
+$(mount 2>/dev/null | awk -v r="$root" 'index($0, " on "r){s=index($0," on ")+4; e=index($0," (")-1; print substr($0,s,e-s+1)}')
+EOF
+    rmdir "$root"/* "$root" >/dev/null 2>&1 || true
+  done
 }
 
 _migrate_rewrite_lookup() {
@@ -184,7 +195,7 @@ _migrate_client_mount_maps() {
           _migrate_note "rewrote mount mapping $client_path -> $new_client_path"
         else
           new_client_path="$client_path"
-          _migrate_note "skip mount mapping rewrite for $client_path: cannot compute /Volumes mountpoint"
+          _migrate_note "skip mount mapping rewrite for $client_path: cannot compute /Volumes share mountpoint"
         fi
       else
         _migrate_note "skip mount mapping rewrite for $client_path: REMOTE_HOST or host path missing"
@@ -330,6 +341,7 @@ migrate_layout() {
   # 3. Client helper paths: moved client CLIs now live under ~/.xpair/client/bin.
   _migrate_rewrite_client_bin_paths "$client_dir/client.env" || true
 
-  # 4. Mount maps: retired ~/.xpair/{host,client}/mounts paths now canonicalize to /Volumes.
+  # 4. Mount maps: retired ~/.xpair/{host,client}/mounts paths now canonicalize to /Volumes/<share>.
   _migrate_client_mount_maps "$client_dir/client.env" "$host_dir" "$client_dir" || true
+  _migrate_cleanup_legacy_mount_roots "$host_dir" "$client_dir" || true
 }

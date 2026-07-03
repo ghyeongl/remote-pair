@@ -9,7 +9,7 @@
 #                    resolution. Best for heavy interactive editing with claude locally.
 #
 # SMB-only backend (selectable as --backend smb for backward-compatible callers):
-#   smb   — macOS-native, NO kernel extension. Uses mount_smbfs which ships with macOS.
+#   smb   — macOS-native, NO kernel extension. Uses NetFS/Finder-style mounting.
 #           HOST PREREQUISITE: System Settings > General > Sharing > File Sharing must be
 #           enabled on the host, and the target folder must be in the shared list.
 #           The share name defaults to the top-level folder name (macOS auto-registers it).
@@ -30,10 +30,17 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 RP_DIR="${RP_DIR:-$HOME/.xpair/host}"
 RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
 RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
-for _f in common client; do
-  # shellcheck disable=SC1090
-  [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
-done
+if [ -f "$RP_CLIENT_DIR/client.env" ]; then
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
+  done
+else
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_HOST_DIR/$_f.env" ] && { set -a; . "$RP_HOST_DIR/$_f.env"; set +a; }
+  done
+fi
 # shellcheck disable=SC1090
 [ -f "$RP_HOST_DIR/host.env" ] && { set -a; . "$RP_HOST_DIR/host.env"; set +a; }
 REMOTE_HOST="${REMOTE_HOST:-}"
@@ -47,7 +54,7 @@ PAIRING_KEY="$RP_HOST_DIR/pairing_ed25519"
 SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
 ssh() { command ssh $SSH_ID "$@"; }
 
-# Default mountpoint root: /Volumes/<device>/<sanitized-full-hostpath>
+# Default NetFS mountpoint root. macOS chooses /Volumes/<share> or a suffixed variant.
 MOUNTS_ROOT="/Volumes"
 
 # Source the shared logger; no-op fallback for partially-updated clients.
@@ -85,7 +92,7 @@ fi
 
 # ── helpers ──
 # Mirror the main CLI's valid_host guard: reject empty, option-looking (-…), or any
-# host/user containing characters outside [A-Za-z0-9._-] before it reaches ssh/mount_smbfs.
+# host/user containing characters outside [A-Za-z0-9._-] before it reaches ssh/NetFS.
 # This helper re-sources client.env, so re-validate here (e.g. -oProxyCommand=… injection).
 valid_host() {
   local target="${1:-}" user="" host=""
@@ -138,36 +145,73 @@ require_host() {
   fi
 }
 
-# Sanitize a string into a safe directory-name component.
-sanitize_path() {
-  printf '%s' "$1" | LC_ALL=C sed 's|^/||; s|/|_|g; s|[^A-Za-z0-9._-]|_|g'
-}
-
-host_slug() {
-  sanitize_path "$REMOTE_HOST"
+# Detect SMB user on the host (SSH → whoami).
+smb_user() {
+  ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE_HOST" whoami 2>/dev/null || id -un 2>/dev/null || printf 'user'
 }
 
 share_name_for_hostpath() {
-  sanitize_path "$(basename "$1")"
+  basename "$1"
 }
 
-# Resolve default mountpoint for a given host path.
-default_mountpoint() {
-  local hostpath="$1"
-  printf '%s/%s/%s' "$MOUNTS_ROOT" "$(host_slug)" "$(sanitize_path "$hostpath")"
+expected_mountpoint() {
+  printf '%s/%s' "$MOUNTS_ROOT" "$(share_name_for_hostpath "$1")"
 }
 
-# Detect SMB user on the host (SSH → whoami).
-smb_user() {
-  ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE_HOST" whoami 2>/dev/null || printf '%s' "$USER"
+applescript_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-# Check if a path is currently mounted (appears in `mount` output).
+smb_mount_url() {
+  local user="$1" host="$2" share="$3"
+  printf 'smb://%s@%s/%s' "$user" "$host" "$share"
+}
+
+smb_mount_source() {
+  local user="$1" host="$2" share="$3"
+  printf '//%s@%s/%s' "$user" "$host" "$share"
+}
+
+discover_mountpoint_for_share() {
+  local user="$1" host="$2" share="$3" exact fallback
+  exact="$(smb_mount_source "$user" "$host" "$share") on "
+  fallback="@${host}/${share} on "
+  mount 2>/dev/null | awk -v exact="$exact" -v fallback="$fallback" '
+    index($0, exact) == 1 && index($0, " (smbfs") {
+      rest = substr($0, length(exact) + 1)
+      idx = index(rest, " (smbfs")
+      if (idx) { print substr(rest, 1, idx - 1); exit }
+    }
+    index($0, fallback) && index($0, " (smbfs") {
+      start = index($0, " on ")
+      rest = substr($0, start + 4)
+      idx = index(rest, " (smbfs")
+      if (idx) { print substr(rest, 1, idx - 1); exit }
+    }
+  ' || true
+}
+
+discover_mountpoint_for_hostpath() {
+  local hostpath="$1" user="${2:-}" share
+  share="$(share_name_for_hostpath "$hostpath")"
+  [ -n "$user" ] || user="$(smb_user)"
+  discover_mountpoint_for_share "$user" "$(smb_host)" "$share"
+}
+
 is_mounted() {
-  local mp="$1"
-  # Normalise trailing slash for consistent matching.
-  mp="${mp%/}"
-  mount 2>/dev/null | grep -qF " on ${mp} " || mount 2>/dev/null | grep -qF " on ${mp}("
+  [ -n "$(discover_mountpoint_for_hostpath "$1" 2>/dev/null)" ]
+}
+
+netfs_mount() {
+  local url="$1" escaped
+  if command -v osascript >/dev/null 2>&1; then
+    escaped="$(applescript_escape "$url")"
+    osascript -e "mount volume \"$escaped\""
+  elif command -v open >/dev/null 2>&1; then
+    open "$url"
+  else
+    return 127
+  fi
 }
 
 # ── subcommand: mount ──
@@ -182,67 +226,34 @@ cmd_mount() {
     exit 2
   fi
 
-  # Resolve the single canonical mountpoint.
-  local canonical_mountpoint; canonical_mountpoint="$(default_mountpoint "$hostpath")"
-  if [ -z "$mountpoint" ]; then
-    mountpoint="$canonical_mountpoint"
-  fi
-  mountpoint="${mountpoint%/}"   # strip trailing slash
-  if [ "$mountpoint" != "$canonical_mountpoint" ]; then
-    err "custom mountpoints are not supported; use the canonical path: $canonical_mountpoint"
+  if [ -n "$mountpoint" ]; then
+    err "custom mountpoints are not supported; macOS NetFS chooses the /Volumes mountpoint."
+    printf >&2 '  Expected first choice: %s\n' "$(expected_mountpoint "$hostpath")"
     exit 2
   fi
 
   # Guard: already mounted?
-  if is_mounted "$mountpoint"; then
-    ok "Already mounted at $mountpoint"
+  local smb_user_name share_name smb_url discovered
+  smb_user_name="$(smb_user)"
+  share_name="$(share_name_for_hostpath "$hostpath")"
+  discovered="$(discover_mountpoint_for_share "$smb_user_name" "$(smb_host)" "$share_name")"
+  if [ -n "$discovered" ]; then
+    ok "Already mounted at $discovered"
     # Emit the same Mountpoint: line the success path prints so onboarding-bridge.mount()
     # parses a non-empty mountpoint on an idempotent re-mount (else code 0 + empty → false failure).
-    printf '  Mountpoint: %s\n' "$mountpoint"
+    printf '  Mountpoint: %s\n' "$discovered"
     return 0
-  fi
-
-  # Guard: mountpoint exists and is non-empty?
-  if [ -d "$mountpoint" ] && [ -n "$(ls -A "$mountpoint" 2>/dev/null)" ]; then
-    warn "Mountpoint $mountpoint is non-empty."
-    printf >&2 '  Mounting over a non-empty directory can hide existing files.\n'
-    printf >&2 '  Proceed? [y/N]: '
-    local ans; read -r ans </dev/tty 2>/dev/null || ans=""
-    case "${ans:-n}" in [yY]*) ;; *) err "Aborted."; exit 1 ;; esac
-  fi
-
-  # Create the /Volumes device parent explicitly. There is no hidden-path fallback.
-  local device_dir; device_dir="$(dirname "$mountpoint")"
-  local created_device_dir=0
-  [ -d "$device_dir" ] || created_device_dir=1
-  if [ ! -d "$device_dir" ]; then
-    info "Creating device mount directory: $device_dir"
-    mkdir -p "$device_dir" || { err "Could not create $device_dir; mountpoints must live under /Volumes/<device>/<folder>"; exit 1; }
-  fi
-
-  # Create mountpoint directory if absent.
-  if [ ! -d "$mountpoint" ]; then
-    info "Creating mountpoint: $mountpoint"
-    mkdir -p "$mountpoint" || { err "Could not create $mountpoint"; [ "$created_device_dir" = 1 ] && rmdir "$device_dir" 2>/dev/null || true; exit 1; }
   fi
 
   case "$BACKEND" in
     smb)
-      local smb_user_name; smb_user_name="$(smb_user)"
-      # Derive SMB share name: top-level exported folder name (macOS File Sharing uses the
-      # last path component of the shared folder as the share name by default).
-      # e.g. /Users/alice/Projects → share "Projects"; /Users/alice → share "alice"
-      local share_name; share_name="$(basename "$hostpath")"
-      # Sub-path within the share (empty if hostpath IS the share root).
-      # macOS File Sharing shares the exact folder added in System Preferences, so the
-      # mountpoint maps to hostpath directly when share_name == basename(hostpath).
-      local smb_url="//${smb_user_name}@$(smb_host)/${share_name}"
-      info "Mounting via SMB: $smb_url → $mountpoint"
+      smb_url="$(smb_mount_url "$smb_user_name" "$(smb_host)" "$share_name")"
+      info "Mounting via SMB NetFS: $smb_url"
       printf >&2 '  Note: the host must have File Sharing enabled:\n'
       printf >&2 '    System Settings > General > Sharing > File Sharing\n'
       printf >&2 '  and "%s" must be in the shared folders list.\n' "$hostpath"
-      if ! mount_smbfs "$smb_url" "$mountpoint"; then
-        err "mount_smbfs failed."
+      if ! netfs_mount "$smb_url"; then
+        err "NetFS mount failed."
         # Probe the actual cause instead of leaving a bare failure: the #1 reason is File Sharing
         # being OFF on the host (the mount has nothing to connect to).
         case "$(host_smb_status)" in
@@ -254,18 +265,26 @@ cmd_mount() {
         printf >&2 '    1. Verify File Sharing is ON on the host (System Settings > General > Sharing).\n'
         printf >&2 '    2. Ensure the folder "%s" is shared (or a parent folder is shared).\n' "$hostpath"
         printf >&2 '    3. Check the share name: by default macOS uses the folder'"'"'s basename.\n'
-        # Clean up empty mountpoint we created.
-        rmdir "$mountpoint" 2>/dev/null || true
-        [ "$created_device_dir" = 1 ] && rmdir "$device_dir" 2>/dev/null || true
         exit 1
       fi
-      ok "Mounted $REMOTE_HOST:$hostpath at $mountpoint (SMB)"
+      local i
+      for i in 1 2 3 4 5; do
+        discovered="$(discover_mountpoint_for_share "$smb_user_name" "$(smb_host)" "$share_name")"
+        [ -n "$discovered" ] && break
+        sleep 0.2
+      done
+      if [ -z "$discovered" ]; then
+        err "SMB mount completed but the mountpoint could not be discovered from mount(8)."
+        printf >&2 '  Looked for: %s on <path> (smbfs...)\n' "$(smb_mount_source "$smb_user_name" "$(smb_host)" "$share_name")"
+        exit 1
+      fi
+      ok "Mounted $REMOTE_HOST:$hostpath at $discovered (SMB)"
       ;;
   esac
 
-  printf '  Mountpoint: %s\n' "$mountpoint"
+  printf '  Mountpoint: %s\n' "$discovered"
   printf '  Tip: add FOLDER_MAPS entry so editors resolve to this path:\n'
-  printf '    xpair config set folder-map <localPath>::%s\n' "$mountpoint"
+  printf '    xpair config set folder-map %s::%s\n' "$discovered" "$hostpath"
 }
 
 # ── subcommand: unmount ──
@@ -276,28 +295,28 @@ cmd_unmount() {
     exit 2
   fi
 
-  # If the target doesn't look like an absolute client path that exists as a directory,
-  # try to resolve it as a host path → default mountpoint.
   local mountpoint="$target"
-  if [ ! -d "$target" ]; then
-    mountpoint="$(default_mountpoint "$target")"
-    if [ ! -d "$mountpoint" ]; then
+  case "$target" in
+    "$MOUNTS_ROOT"/*) mountpoint="${target%/}" ;;
+    *)
+      require_host
+      mountpoint="$(discover_mountpoint_for_hostpath "$target")"
+      if [ -z "$mountpoint" ]; then
       err "Cannot find mountpoint for: $target"
-      printf >&2 '  Tried: %s\n' "$mountpoint"
+        printf >&2 '  Expected first choice: %s\n' "$(expected_mountpoint "$target")"
       printf >&2 '  Run: xpair-mount status\n'
       exit 1
     fi
-  fi
-  mountpoint="${mountpoint%/}"
+      ;;
+  esac
 
-  if ! is_mounted "$mountpoint"; then
+  if ! mount 2>/dev/null | grep -qF " on ${mountpoint} "; then
     warn "Nothing appears to be mounted at $mountpoint"
     exit 0
   fi
 
   info "Unmounting $mountpoint ..."
-  # Try umount first; fall back to diskutil unmount.
-  if ! umount "$mountpoint" 2>/dev/null && ! diskutil unmount "$mountpoint" 2>/dev/null; then
+  if ! diskutil unmount "$mountpoint" 2>/dev/null && ! umount "$mountpoint" 2>/dev/null; then
     err "umount failed for $mountpoint"
     printf >&2 '  If the volume is busy, try:\n'
     printf >&2 '    diskutil unmount force "%s"\n' "$mountpoint"
@@ -305,40 +324,25 @@ cmd_unmount() {
   fi
 
   # Verify detached.
-  if is_mounted "$mountpoint"; then
+  if mount 2>/dev/null | grep -qF " on ${mountpoint} "; then
     err "Unmount command ran but $mountpoint still appears mounted."
     exit 1
   fi
 
   ok "Unmounted $mountpoint"
-  # Remove empty mountpoint and /Volumes/<device> dirs (best-effort).
-  case "$mountpoint" in
-    "$MOUNTS_ROOT"/*/*)
-      local device_dir; device_dir="$(dirname "$mountpoint")"
-      rmdir "$mountpoint" 2>/dev/null && info "Removed empty mountpoint directory." || true
-      rmdir "$device_dir" 2>/dev/null && info "Removed empty device mount directory." || true
-      ;;
-    *)
-      rmdir "$mountpoint" 2>/dev/null && info "Removed empty mountpoint directory." || true
-      ;;
-  esac
 }
 
 # ── subcommand: status ──
 cmd_status() {
   info "Active Xpair mounts (via SMB):"
   local found=0
-  local device_filter=""
-  [ -n "${REMOTE_HOST:-}" ] && device_filter="$MOUNTS_ROOT/$(host_slug)"
-
-  # SMB mounts with our remote host or canonical /Volumes device path.
   local line
   while IFS= read -r line; do
     case "$line" in
       *smbfs*)
         if [ -n "$REMOTE_HOST" ]; then
           case "$line" in
-            *"$REMOTE_HOST"*|*"$device_filter"*) printf '  %s\n' "$line"; found=1 ;;
+            *"@$(smb_host)/"*) printf '  %s\n' "$line"; found=1 ;;
           esac
         else
           printf '  %s\n' "$line"; found=1

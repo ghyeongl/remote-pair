@@ -29,14 +29,14 @@ function test(name, fn) {
   }
 }
 
-test("onboarding bridge defaultMountpoint uses sanitized full host path", () => {
+test("onboarding bridge defaultMountpoint uses the SMB share-name path", () => {
   assert.equal(
     bridge.defaultMountpoint("/Users/alice/Projects/foo"),
-    "/Volumes/user_office-mac.local/Users_alice_Projects_foo",
+    "/Volumes/foo",
   );
   assert.equal(
     bridge.defaultMountpoint("/tmp/foo"),
-    "/Volumes/user_office-mac.local/tmp_foo",
+    "/Volumes/foo",
   );
 });
 
