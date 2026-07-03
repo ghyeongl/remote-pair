@@ -4,13 +4,15 @@ const path = require("node:path");
 
 const root = __dirname;
 const repoRoot = path.join(root, "..", "..", "..", "..");
-const app = fs.readFileSync(path.join(root, "onboarding-webview/src/App.tsx"), "utf8");
-const stepEngine = fs.readFileSync(
-  path.join(root, "onboarding-webview/src/components/onboarding/client/StepEngine.tsx"),
-  "utf8",
-);
+const clientApp = fs.readFileSync(path.join(root, "onboarding-webview/src/App.tsx"), "utf8");
+const onboardingMain = fs.readFileSync(path.join(root, "onboarding-main.cjs"), "utf8");
 const bridge = fs.readFileSync(path.join(root, "onboarding-bridge.js"), "utf8");
 const globals = fs.readFileSync(path.join(root, "onboarding-webview/src/global.d.ts"), "utf8");
+const hostApp = fs.readFileSync(path.join(repoRoot, "host/onboarding/src/App.tsx"), "utf8");
+const hostStepEngine = fs.readFileSync(
+  path.join(repoRoot, "host/onboarding/src/components/onboarding/host/StepEngine.tsx"),
+  "utf8",
+);
 const hostEngineGuard = fs.readFileSync(path.join(repoRoot, "host/app/EngineGuard.swift"), "utf8");
 
 let failed = 0;
@@ -25,38 +27,66 @@ function test(name, fn) {
   }
 }
 
-test("Q0545 host setup probes, installs, authenticates, and gates supported engines on the host", () => {
-  assert.match(app, /"Find your host"[\s\S]*"Connect"[\s\S]*"Set up host"[\s\S]*"Grant permissions"[\s\S]*"Choose engine"/);
-  assert.match(app, /w\.index === S\.ENGINE && !engineReady/);
-  assert.match(app, /const startsFromSavedHost = initialStep >= S\.CONNECT && initialStep <= S\.ENGINE;/);
-  assert.match(app, /const lockConfiguredEngine = startsFromSavedHost;/);
-  assert.doesNotMatch(app, /const lockConfiguredEngine = initialStep === S\.ENGINE && startsFromSavedHost;/);
-  assert.match(
-    app,
-    /<StepEngine[\s\S]*engine=\{engine\}[\s\S]*setEngine=\{setEngine\}[\s\S]*lockConfigured=\{lockConfiguredEngine\}[\s\S]*onReady=\{setEngineReady\}/,
+test("Q0545 client flow has no engine step, but native resume still checks host.env engine", () => {
+  assert.equal(
+    fs.existsSync(path.join(root, "onboarding-webview/src/components/onboarding/client/StepEngine.tsx")),
+    false,
   );
-  assert.match(app, /const ENGINE_IDS = new Set<EngineId>\(\["claude", "shell", "codex", "opencode"\]\)/);
-  assert.match(
-    app,
-    /function engineFromLocation\(\): EngineId \{[\s\S]*new URLSearchParams\(window\.location\.search\)\.get\("engine"\)[\s\S]*return isEngineId\(raw\) \? raw : "claude";/,
+  assert.doesNotMatch(clientApp, /S\.ENGINE|<StepEngine|hostEngineStatus|installHostEngine|setHostEngineAuth/);
+  assert.match(clientApp, /engine: S\.DISCOVER/);
+  assert.match(onboardingMain, /ENGINE: 'engine'/);
+  assert.match(onboardingMain, /const SESSION_ENGINES = new Set\(\['claude', 'shell', 'codex', 'opencode'\]\)/);
+  assert.match(onboardingMain, /configuredHostEngine\(host, probeBridge\)/);
+  assert.match(onboardingMain, /probeBridge\.hostEngineStatus\(engineToCheck\)/);
+});
+
+test("Q0545 engine guard failure surfaces the host-onboarding CTA, not a bare Discover", () => {
+  // R15-5: `?startStep=engine` must not be silently collapsed into a normal Discover landing — an
+  // already-paired host would just re-pair and re-hit the guard. App preserves the reason and threads
+  // an engineRecovery flag into StepDiscover, which renders a host-onboarding CTA (engine setup lives
+  // in the host app; the client has no engine step).
+  const discover = fs.readFileSync(
+    path.join(root, "onboarding-webview/src/components/onboarding/client/StepDiscover.tsx"),
+    "utf8",
   );
-  assert.match(app, /const \[engine, setEngine\] = useState<EngineId>\(\(\) => engineFromLocation\(\)\)/);
-  assert.doesNotMatch(app, /setEngine\(savedEngine\)/);
+  assert.match(clientApp, /function initialStartReason\(\)/);
+  assert.match(clientApp, /engineRecovery\] = useState\(\(\) => initialStartReason\(\) === "engine"\)/);
+  assert.match(clientApp, /<StepDiscover[\s\S]*engineRecovery=\{engineRecovery\}/);
+  assert.match(discover, /engineRecovery\?: boolean/);
+  assert.match(discover, /engineRecovery &&[\s\S]*discover\.engineRecovery\.title[\s\S]*openHostOnboarding/);
+});
 
-  assert.match(stepEngine, /const ENGINES:[\s\S]*id: "claude"[\s\S]*id: "codex"[\s\S]*id: "opencode"/);
-  assert.match(stepEngine, /lockConfigured\?: boolean/);
-  assert.match(stepEngine, /lockConfigured = false/);
-  assert.match(stepEngine, /window\.remotepair\.hostEngineStatus\(e\)/);
-  assert.match(stepEngine, /onReady\(r\.installed && r\.authed\)/);
-  assert.match(stepEngine, /void probe\(engine, !lockConfigured\)/);
-  assert.match(stepEngine, /allowReadyFallback && firstReady/);
-  assert.match(stepEngine, /window\.remotepair\.installHostEngine\(engine\)/);
-  assert.match(stepEngine, /window\.remotepair\.setHostEngineAuth\(engine, apiKey\.trim\(\)\)/);
-  assert.match(stepEngine, /await probe\(engine\)/);
+test("Q0545 host onboarding owns the 11-step engine setup gate", () => {
+  assert.match(hostApp, /const CONSENT_ANALYTICS_IDX = 2;/);
+  assert.match(hostApp, /const PERM_START = 3;/);
+  assert.match(hostApp, /const ENGINE_IDX = PERM_END \+ 1;/);
+  assert.match(hostApp, /const BROADCAST_IDX = ENGINE_IDX \+ 1;/);
+  assert.match(hostApp, /const DONE_IDX = BROADCAST_IDX \+ 1;/);
+  assert.match(hostApp, /const TOTAL = DONE_IDX \+ 1;/);
+  assert.match(hostApp, /w\.index === ENGINE_IDX && engines\.size === 0/);
+  assert.match(hostApp, /if \(target >= ENGINE_IDX\) \{[\s\S]*const readyEngines = await probeReadyEngines\(\);[\s\S]*if \(readyEngines\.size === 0\) \{[\s\S]*target = ENGINE_IDX;/);
+  // R10-6: skipping the engine step must still persist a default ENGINE (non-destructively) so
+  // xpair-launch doesn't fall back to the client/default engine on a host that never wrote one.
+  assert.match(hostApp, /else if \(target > ENGINE_IDX\)[\s\S]*persistEngineIfUnset\(primary\)/);
+  assert.match(hostApp, /w\.index === ENGINE_IDX && \([\s\S]*<StepEngine selected=\{engines\} setSelected=\{setEngines\} \/>/);
+});
 
+test("Q0545 host StepEngine probes, installs, authenticates, and persists supported engines", () => {
+  assert.match(hostStepEngine, /const ORDER: EngineKey\[\] = \["claude", "codex", "opencode", "shell"\]/);
+  assert.match(hostStepEngine, /window\.xpair\.engineStatus\(e\)/);
+  assert.match(hostStepEngine, /await window\.xpair\.setEngine\(e\)|await persistEngine\(primary\)|await persistEngine\(id\)/);
+  assert.match(hostStepEngine, /window\.xpair\.installEngine\(engine\)/);
+  assert.match(hostStepEngine, /window\.xpair\.setEngineAuth\(engine, apiKey\.trim\(\)\)/);
+  assert.match(hostStepEngine, /await probe\(engine\)/);
+  assert.match(hostStepEngine, /engine === "codex" \? "sk-\.\.\. \(OpenAI API key\)"/);
+});
+
+test("Q0545 bridge and host app engine guards still support host-side Codex setup", () => {
   assert.match(bridge, /const ENGINES = new Set\(\["claude", "codex", "opencode"\]\)/);
+  assert.match(bridge, /const SESSION_ENGINES = new Set\(\[\.\.\.ENGINES, "shell"\]\)/);
   assert.match(bridge, /remoteHost: e\.REMOTE_HOST \|\| "",[\s\S]*engine: e\.ENGINE \|\| "",/);
   assert.match(bridge, /const host = String\(parseEnv\(CLIENT_ENV\)\.REMOTE_HOST \|\| ""\)\.trim\(\)/);
+  assert.match(bridge, /async hostEnvEngine\(hostArg\)[\s\S]*cat|async hostEnvEngine\(hostArg\)[\s\S]*host\.env/);
   assert.match(bridge, /const probe = ENGINE_PROBE\[e\]/);
   assert.match(bridge, /run\("ssh", \[\.\.\.sshProbeOpts\(host, 6\), host, probe\]\)/);
   assert.match(bridge, /const PATH_PERSIST =/);
@@ -66,7 +96,7 @@ test("Q0545 host setup probes, installs, authenticates, and gates supported engi
   assert.match(bridge, /const r = await runSecretStdin\("ssh", \[\.\.\.sshProbeOpts\(host, 15\), host, writer\], apiKey\)/);
   assert.match(globals, /getConfig: \(\) => Promise<\{[\s\S]*remoteHost: string[\s\S]*engine: string/);
 
-  assert.match(hostEngineGuard, /static func isKnown\(_ engine: String\) -> Bool \{\s*engine == "claude" \|\| engine == "codex" \|\| engine == "opencode"\s*\}/);
+  assert.match(hostEngineGuard, /static func isKnown\(_ engine: String\) -> Bool \{\s*engine == "claude" \|\| engine == "codex" \|\| engine == "opencode" \|\| engine == "shell"\s*\}/);
   assert.match(hostEngineGuard, /static func status\(_ engine: String\) -> Status/);
   assert.match(hostEngineGuard, /static func install\(_ engine: String\) -> Result/);
   assert.match(hostEngineGuard, /private static let pathPersistScript/);

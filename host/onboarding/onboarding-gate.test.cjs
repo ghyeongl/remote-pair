@@ -1,17 +1,11 @@
-// Host onboarding step-gating tests.
-//
-// Each test encodes a requirements.md-backed IDEAL (예상) and asserts it against the actual
-// host onboarding source (현행). A failing test = the implementation does not yet match the ideal.
-// Run: `node host/onboarding/onboarding-gate.test.js`
-//
-// Provenance: derived from docs/verification (flow-tree 예상 verified against docs/requirements.md).
-
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
 const root = __dirname;
 const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
+const globalTypes = fs.readFileSync(path.join(root, "src/global.d.ts"), "utf8");
+const onboardingWindow = fs.readFileSync(path.resolve(root, "../app/OnboardingWindow.swift"), "utf8");
 
 let failed = 0;
 function test(name, fn) {
@@ -25,25 +19,48 @@ function test(name, fn) {
   }
 }
 
-// Q0443 / §1.5 — Permissions step must gate Next on required grants (AX + SR). [BACKED, expected GREEN]
-test("permissions step gates Next on AX + SR (Q0443)", () => {
-  assert.match(app, /perm\.ax === "granted" && perm\.sr === "granted"/);
-  assert.match(app, /w\.index === 1 && !ready/);
+test("single permission steps gate Next only on required real probes (US-003)", () => {
+  assert.match(app, /const inPerms = w\.index >= PERM_START && w\.index <= PERM_END/);
+  assert.match(app, /const currentPermKey = inPerms \? PERM_ORDER\[w\.index - PERM_START\] : null/);
+  assert.match(app, /currentPermKey !== null && perm\[currentPermKey\] === "granted"/);
+  assert.match(app, /inPerms && isRequiredPerm\(currentPermKey\) && !currentPermGranted/);
+  assert.match(app, /await window\.xpair\.getStatus\(\)/);
 });
 
-// Q0541 / §1.3 — Engine step must gate Next on engine installed+signed-in. [BACKED, expected GREEN]
-test("engine step gates Next on engineReady (Q0541)", () => {
-  assert.match(app, /w\.index === 2 && !engineReady/);
+test("engine step gates Next on >=1 installed+authed engine (US-003)", () => {
+  assert.match(app, /w\.index === ENGINE_IDX && engines\.size === 0/);
+  assert.match(app, /await window\.xpair\.engineStatus\(engine\)/);
+  assert.match(app, /s\.installed && s\.authed/);
 });
 
-// Q0543 / §1.5 — With NO connected client, host onboarding must HOLD at the connect step and must
-// NOT report completion. The Connect step (index 3) must gate Next/complete on a connected client.
-// [BACKED ideal; expected RED against current code — nextDisabled ignores index 3 → confirms defect]
-test("connect step holds until a client connects, does not complete clientless (Q0543)", () => {
+test("broadcast step hides Next until accepted and has no Skip (US-003)", () => {
+  assert.match(app, /w\.index === BROADCAST_IDX && broadcast !== "accepted"[\s\S]*\? undefined/);
+  assert.doesNotMatch(app, /shell\.skip|t\("shell\.skip"\)/);
+});
+
+test("cross-restart resume uses onboarding-step sidecar, not status/version SSoT (US-003)", () => {
+  assert.match(globalTypes, /getOnboardingStep: \(\) => Promise<number>/);
+  assert.match(globalTypes, /setOnboardingStep: \(n: number\) => Promise<void>/);
+  assert.match(app, /await window\.xpair\.getOnboardingStep\(\)/);
+  assert.match(app, /window\.xpair\.setOnboardingStep\(w\.index\)/);
+  assert.ok(
+    onboardingWindow.includes('private static let onboardingStepPath = "\\(RP_DIR)/onboarding-step.json"'),
+    "Swift bridge must use ~/.xpair/host/onboarding-step.json as the resume sidecar",
+  );
+  assert.match(onboardingWindow, /case "getOnboardingStep":[\s\S]*readOnboardingStep\(\)/);
+  assert.match(onboardingWindow, /case "setOnboardingStep":[\s\S]*writeOnboardingStep\(n\)/);
+  assert.doesNotMatch(onboardingWindow, /onboardingStepPath[\s\S]{0,300}STATUS_FILE/);
+  assert.doesNotMatch(onboardingWindow, /onboardingStepPath[\s\S]{0,300}APP_VERSION/);
+});
+
+test("grantOnly Set up starts at Welcome while runGate can resume persisted step", () => {
+  assert.match(globalTypes, /__rp_mode\?: 'runGate' \| 'grantOnly'/);
+  assert.match(onboardingWindow, /window\.__rp_mode = '\\\(modeName\)'/);
+  assert.match(app, /const resumeAllowed = injectedMode\(\) === "runGate"/);
   assert.match(
     app,
-    /w\.index === 3 &&[^)]*\b(connected|clients?\.length|hasClient)\b/i,
-    "Connect step (index 3) is not gated on a connected client — clientless completion is possible",
+    /const requested = requestedDeepLink > 0 \? requestedDeepLink : \(resumeAllowed \? persisted : 0\)/,
+    "grantOnly without a deep link must ignore persisted DONE_IDX and open Welcome",
   );
 });
 

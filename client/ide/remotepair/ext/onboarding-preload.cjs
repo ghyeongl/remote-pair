@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('remotepair', {
   // No dead end: when cliReady is false, the onboarding installs the bundled CLI (install.sh
   // --role client) instead of hard-blocking; only an install failure blocks (with Retry).
   installCli: () => rp('installCli'),
+  openHostOnboarding: () => rp('openHostOnboarding'),
   hostAppStatus: (host) => rp('hostAppStatus', [host]),
   clientVersion: () => rp('clientVersion'),
   setHost: (host) => rp('setHost', [host]),
@@ -27,6 +28,8 @@ contextBridge.exposeInMainWorld('remotepair', {
   installHostEngine: (engine) => rp('installHostEngine', [engine]),
   setHostEngineAuth: (engine, apiKey) => rp('setHostEngineAuth', [engine, apiKey]),
   addMapping: (clientPath, hostPath, method) => rp('addMapping', [clientPath, hostPath, method]),
+  removeMapping: (clientPath) => rp('removeMapping', [clientPath]),
+  resolveHostPath: (target, hostPath) => rp('resolveHostPath', [target, hostPath]),
   hostSmbStatus: () => rp('hostSmbStatus', []),
   setBackend: (sync, mount) => rp('setBackend', [sync, mount]),
   mount: (hostPath, mountpoint) => rp('mount', [hostPath, mountpoint]),
@@ -39,6 +42,8 @@ contextBridge.exposeInMainWorld('remotepair', {
   // host's grant status (status.json) so the Grant step can confirm AX/SR were granted on the
   // host's screen.
   discover: () => rp('discover'),
+  sendPairingRequest: (opts) => rp('sendPairingRequest', [opts]),
+  pairingStatus: (opts) => rp('pairingStatus', [opts]),
   installHost: (opts) => rp('installHost', [opts]),
   hostPermissions: (opts) => rp('hostPermissions', [opts]),
   hostKeyFingerprint: (host) => rp('hostKeyFingerprint', [host]),

@@ -84,6 +84,25 @@ function withSpawnSpy(fn) {
     }
   });
 
+  await check("sshReachable accepts pairing-persisted user-qualified ssh targets", async () => {
+    await withSpawnSpy(async (calls) => {
+      const result = await bridge.sshReachable("alice@test-host_1.example");
+      assert.equal(result.reachable, true);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cmd, "ssh");
+      assert.ok(calls[0].args.includes("alice@test-host_1.example"));
+    });
+  });
+
+  await check("sshReachable rejects unsafe user-qualified ssh targets before spawning", async () => {
+    await withSpawnSpy(async (calls) => {
+      const result = await bridge.sshReachable("alice;touch-pwn@test-host");
+      assert.deepEqual(calls, []);
+      assert.equal(result.reachable, false);
+      assert.match(result.err, /invalid host/);
+    });
+  });
+
   await check("SSH ControlMaster scope is tagged once per app launch", async () => {
     assert.match(onboardingMain, /if \(!process\.env\.RP_SSH_CM_TAG\) process\.env\.RP_SSH_CM_TAG = String\(process\.pid\)/);
     assert.match(extension, /"\/tmp\/rp-cm-" \+ \(process\.env\.RP_SSH_CM_TAG \|\| "x"\) \+ "-%C"/);

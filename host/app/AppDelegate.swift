@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         ensureDirs()
+        XpairAuthorizedKeys.expirePendingProofs()
         // Telemetry consent flags — both default OFF (opt-in). Registered so a never-toggled key reads false
         // (zero network calls by default). Toggled in SettingsWindow.
         UserDefaults.standard.register(defaults: [
@@ -56,6 +57,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self           // rebuilt each time via menuNeedsUpdate
         statusItem.menu = menu
         rebuildMenu()
+        NotificationCenter.default.addObserver(forName: .bonjourPairingInfoChanged,
+                                               object: nil,
+                                               queue: .main) { [weak self] _ in
+            guard isHostRole else { return }
+            self?.advertiser.refreshAdvertising()
+        }
 
         log("launched (XpairHost v\(APP_VERSION), repo=\(GH_REPO))")
 
@@ -70,7 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Events) AND Screen Recording (screen-share + approve OCR). If either is ungranted, show the
         // in-process onboarding window and DO NOT start serving until the React flow completes (both
         // granted). Dismissing the window while still ungranted terminates the app (enforced in
-        // OnboardingWindow.windowWillClose). `allGranted()` = axTrusted() && srGranted().
+        // OnboardingWindow.windowWillClose). `allGranted()` = axTrusted() && srGranted() && loginGranted()
+        // (Remote Login must be on — it's the transport every client session rides on).
         if !Permissions.allGranted() {
             log(.warn, "Accessibility/Screen Recording not granted — showing onboarding (serving gated)")
             // Pre-register the app in the Accessibility + Screen Recording TCC lists so the user only
@@ -80,12 +88,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Permissions.request("sr")
             let ob = OnboardingWindow(onComplete: { [weak self] in
                 self?.onboarding = nil
-                self?.startServing()
+                // Dismissing the run gate after AX/SR are granted but BEFORE a client pairs must still
+                // leave the host pairable: start serving AND (re)open a Connect/Broadcast pairing window
+                // exactly like the already-granted launch path. windowWillClose called endWindow(), so
+                // without this the host advertises presence but no live pairing metadata and every client
+                // filters it out.
+                self?.startServingAndOpenPairingIfNeeded()
             })
             onboarding = ob
             ob.show()
         } else {
-            startServing()
+            startServingAndOpenPairingIfNeeded()
+        }
+    }
+
+    /// startServing() + open a grant-only Connect/Broadcast window when the host has no paired client yet,
+    /// so it advertises a LIVE pairing window (serviceInstanceID/hostNonce/pairPort) that clients can
+    /// discover. Shared by the launch-already-granted path and the run-gate dismiss path.
+    private func startServingAndOpenPairingIfNeeded() {
+        startServing()
+        if isHostRole && !PairingManager.shared.hasPairedClient() {
+            let ob = OnboardingWindow(mode: .grantOnly, initialStep: "connect",
+                                      onComplete: { [weak self] in self?.grantWindow = nil })
+            grantWindow = ob
+            ob.show()
         }
     }
 

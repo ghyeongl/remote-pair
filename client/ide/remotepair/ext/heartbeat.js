@@ -32,13 +32,30 @@ const RP_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 const INTERVAL_MS = 30 * 1000;
 const CONNECT_TIMEOUT = "6";
-// REMOTE_HOST must be a bare ssh host alias / hostname (mirrors HOST_RE in onboarding-bridge.js).
+// Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i, WITHOUT IdentitiesOnly:
+// the key can exist locally from an unproven pairing attempt (not yet authorized on the host), so
+// adding -i must still leave the ssh-agent + default identities available — IdentitiesOnly=yes would
+// restrict auth to only these files and break a client whose working host auth is agent-only. Neither
+// key present → [] (ssh defaults/agent).
+const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
+const PERSONAL_KEY = path.join(HOME, ".ssh", "id_ed25519");
+function idArgs() {
+  try {
+    const a = [];
+    if (fs.existsSync(PAIRING_KEY)) a.push("-i", PAIRING_KEY);
+    if (fs.existsSync(PERSONAL_KEY)) a.push("-i", PERSONAL_KEY);
+    return a;
+  } catch { /* ignore */ }
+  return [];
+}
+// REMOTE_HOST must be an ssh alias / hostname, optionally `user@host` (mirrors
+// SSH_TARGET_RE in onboarding-bridge.js).
 // The CLI/extension paths reject option-looking hosts before spawning ssh; the heartbeat read
 // REMOTE_HOST straight from client.env, so a stale/corrupt/hostile value would be passed to ssh as
 // an option. The leading `(?!-)` is essential: a bare `[A-Za-z0-9._-]+` still admits `-p2222`/`-V`
 // (the `-` is in the class), which ssh parses as an option, not the destination — defeating the
-// guard. Reject a leading dash, matching onboarding-bridge.js.
-const HOST_RE = /^(?!-)[A-Za-z0-9._-]+$/;
+// guard. Reject a leading dash in either the user or host part, matching onboarding-bridge.js.
+const HOST_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
 
 /** Sanitize to the host-side filename charset: every char outside [A-Za-z0-9._-] → '_'. */
 function sanitize(s) {
@@ -104,6 +121,7 @@ function writeOnce() {
       [
         "-o", "BatchMode=yes",
         "-o", `ConnectTimeout=${CONNECT_TIMEOUT}`,
+        ...idArgs(),
         host,
         "mkdir -p ~/.xpair/host/clients && cat > ~/.xpair/host/clients/" + id + ".json",
       ],
@@ -141,7 +159,7 @@ function stopHeartbeat() {
     const richPath = `${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`;
     const child = cp.spawn(
       "ssh",
-      ["-o", "BatchMode=yes", host, "rm -f ~/.xpair/host/clients/" + id + ".json"],
+      ["-o", "BatchMode=yes", ...idArgs(), host, "rm -f ~/.xpair/host/clients/" + id + ".json"],
       { windowsHide: true, stdio: ["ignore", "ignore", "ignore"], env: { ...process.env, PATH: richPath } },
     );
     child.on("error", () => { /* best-effort — ignore */ });

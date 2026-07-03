@@ -25,7 +25,7 @@ enum EngineGuard {
         "export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; "
 
     static func isKnown(_ engine: String) -> Bool {
-        engine == "claude" || engine == "codex" || engine == "opencode"
+        engine == "claude" || engine == "codex" || engine == "opencode" || engine == "shell"
     }
 
     // MARK: - probe
@@ -180,6 +180,18 @@ enum EngineGuard {
         } catch {
             return Result(ok: false, err: "\(error)")
         }
+    }
+
+    /// Write ENGINE=<id> ONLY if host.env does not already record a non-empty one. Used when onboarding
+    /// SKIPS the engine step (some engine is already installed+authed): xpair-launch reads host.env's
+    /// ENGINE, so it must find one — but we must NOT clobber a choice the user made in a previous run.
+    static func persistIfUnset(_ engine: String) -> Result {
+        if let raw = try? String(contentsOfFile: hostEnvPath, encoding: .utf8),
+           raw.split(separator: "\n", omittingEmptySubsequences: false)
+               .contains(where: { $0.hasPrefix("ENGINE=") && $0 != "ENGINE=" }) {
+            return Result(ok: true, err: "")   // already recorded — leave the user's choice intact
+        }
+        return persist(engine)
     }
 
     // MARK: - login-shell runner

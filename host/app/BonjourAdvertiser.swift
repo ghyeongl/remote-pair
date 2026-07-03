@@ -4,7 +4,9 @@
 // can discover it via Bonjour (NWBrowser / `dns-sd -B`) for `xpair discover`.
 // A legacy `_remotepair._tcp` advertisement is kept for older clients. TXT record carries:
 //   hn   = friendly hostname        v   = app version (Config.swift APP_VERSION)
-//   role = currentRole() (host|both)  fp = ed25519 host-key fingerprint (HostKey.swift, for TOFU)
+//   role = currentRole() (host|both)  user = host GUI account
+//   fp = ed25519 host-key fingerprint (HostKey.swift, for TOFU)
+//   sid/nonce/pp = transient pairing-window serviceInstanceID, hostNonce, UDP port (US-004)
 //
 // This is ADVERTISE-ONLY. Bonjour requires a bound TCP port to advertise, so incoming
 // connections here are accepted and immediately cancelled — nothing is served on this port.
@@ -20,7 +22,24 @@ final class BonjourAdvertiser {
     static let serviceType = "_xpair._tcp"
     static let legacyServiceType = "_remotepair._tcp"
     private static var serviceTypes: [String] { [serviceType, legacyServiceType] }
+    private static let pairingLock = NSLock()
+    private static var _pairingInfo: PairingAdvertiseInfo?
     private var listeners: [NWListener] = []
+
+    static func setPairingInfo(_ info: PairingAdvertiseInfo?) {
+        pairingLock.lock()
+        _pairingInfo = info
+        pairingLock.unlock()
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .bonjourPairingInfoChanged, object: nil)
+        }
+    }
+
+    private static func pairingInfo() -> PairingAdvertiseInfo? {
+        pairingLock.lock()
+        defer { pairingLock.unlock() }
+        return _pairingInfo
+    }
 
     /// Idempotent: (re)start the advertiser unless it is already up. Safe to call every tick.
     func ensureAdvertising() {
@@ -50,7 +69,13 @@ final class BonjourAdvertiser {
         txt["v"] = APP_VERSION
         let role = currentRole()
         txt["role"] = role.isEmpty ? "host" : role
+        txt["user"] = NSUserName()
         if let fp = hostKeyFingerprint() { txt["fp"] = fp }
+        if let p = BonjourAdvertiser.pairingInfo() {
+            txt["sid"] = p.serviceInstanceID
+            txt["nonce"] = p.hostNonce
+            txt["pp"] = String(p.pairPort)
+        }
 
         for serviceType in BonjourAdvertiser.serviceTypes {
             do {
@@ -76,5 +101,9 @@ final class BonjourAdvertiser {
     func stop() {
         listeners.forEach { $0.cancel() }
         listeners.removeAll()
+    }
+
+    func refreshAdvertising() {
+        start()
     }
 }

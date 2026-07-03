@@ -5,10 +5,8 @@ const path = require("node:path");
 const root = path.resolve(__dirname, "../..");
 const launcher = fs.readFileSync(path.join(root, "client/cli/xpair-launch"), "utf8");
 const cli = fs.readFileSync(path.join(root, "client/cli/xpair"), "utf8");
-const clientEngineStep = fs.readFileSync(
-  path.join(root, "client/ide/remotepair/ext/onboarding-webview/src/components/onboarding/client/StepEngine.tsx"),
-  "utf8",
-);
+// Engine selection moved to host-owned setup; the client no longer has a StepEngine picker. The
+// supported session engines are now verified via the launcher, the xpair CLI, and the onboarding bridge.
 const bridge = fs.readFileSync(path.join(root, "client/ide/remotepair/ext/onboarding-bridge.js"), "utf8");
 
 let passed = 0;
@@ -28,7 +26,6 @@ function test(name, fn) {
 function assertEngine(id, label, sourceBundle) {
   assert.match(sourceBundle.launcher, new RegExp(`${id.replace("-", "[-]?")}`), `${id} must be handled by xpair-launch`);
   assert.match(sourceBundle.cli, new RegExp(`${id.replace("-", "[-]?")}`), `${id} must be accepted by xpair CLI config/launch`);
-  assert.match(sourceBundle.ui, new RegExp(`id:\\s*["']${id}["'][\\s\\S]*label:\\s*["'][^"']*${label}`), `${id} must appear in the session picker UI`);
   assert.match(sourceBundle.bridge, new RegExp(`${id.replace("-", "[-]?")}`), `${id} must be validated by the onboarding bridge`);
 }
 
@@ -36,7 +33,6 @@ test("Q0540 terminal/session creation supports Claude, Shell, Codex, and explici
   const sources = {
     launcher,
     cli,
-    ui: clientEngineStep,
     bridge,
   };
 

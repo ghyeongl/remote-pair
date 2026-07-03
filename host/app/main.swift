@@ -6,6 +6,16 @@
 
 import Cocoa
 
+if CommandLine.arguments.contains("--pairing-self-test") {
+    do {
+        try PairingSecuritySelfTest.run()
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("pairing security self-test failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 // §10: install local crash dumps before anything else so even startup crashes are captured.
 // ensureDirs() first — the signal-path handler writes to an fd opened under $LOG_DIR at install.
 ensureDirs()

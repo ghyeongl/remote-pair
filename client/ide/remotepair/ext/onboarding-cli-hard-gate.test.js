@@ -4,11 +4,12 @@ const path = require("node:path");
 
 const root = __dirname;
 const app = fs.readFileSync(path.join(root, "onboarding-webview/src/App.tsx"), "utf8");
-const stepConnect = fs.readFileSync(
-  path.join(root, "onboarding-webview/src/components/onboarding/client/StepConnect.tsx"),
+const stepDiscover = fs.readFileSync(
+  path.join(root, "onboarding-webview/src/components/onboarding/client/StepDiscover.tsx"),
   "utf8",
 );
 const bridge = fs.readFileSync(path.join(root, "onboarding-bridge.js"), "utf8");
+const onboardingMain = fs.readFileSync(path.join(root, "onboarding-main.cjs"), "utf8");
 const extension = fs.readFileSync(path.join(root, "extension.js"), "utf8");
 const cli = fs.readFileSync(path.join(root, "../../../cli/xpair"), "utf8");
 
@@ -26,7 +27,7 @@ function test(name, fn) {
   }
 }
 
-test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a hard gate before CLI-dependent flows", () => {
+test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a native pre-workbench hard gate", () => {
   assert.match(
     bridge,
     /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*if \(!bin\)[\s\S]*xpair CLI not found at ~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)/,
@@ -39,50 +40,22 @@ test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a hard gate before CLI-d
   );
 
   assert.match(
-    app,
-    /const CLI_DEPENDENT_STEPS:[\s\S]*S\.DISCOVER,[\s\S]*S\.CONNECT,[\s\S]*S\.ENGINE,[\s\S]*S\.MAPPINGS,/,
-    "Discover, Connect, Engine, and Mappings must be marked CLI-dependent",
+    onboardingMain,
+    /const cli = await probeBridge\.cliReady\(\)[\s\S]*if \(!cli \|\| cli\.ready !== true\) return START_STEP\.WELCOME/,
+    "firstFailingGuard must stop at Welcome when the CLI is missing",
   );
   assert.match(
-    app,
-    /const cliGateActive = CLI_DEPENDENT_STEPS\.has\(w\.index\) && cliMissing;/,
-    "CLI gate must activate only on CLI-dependent steps when xpair is missing",
+    onboardingMain,
+    /catch \{\s*return START_STEP\.WELCOME\s*\}[\s\S]*probeBridge\.sshReachable\(host\)/,
+    "CLI probe failures must happen before any remote host probe",
   );
   assert.match(
-    app,
-    /const nextDisabled =[\s\S]*cliGateActive[\s\S]*w\.index === S\.DISCOVER[\s\S]*w\.index === S\.CONNECT/,
-    "Next must be disabled by the CLI gate before manual/connect work can proceed",
+    stepDiscover,
+    /const cli = await window\.remotepair\.cliReady\(\)[\s\S]*if \(!cli\.ready\)[\s\S]*window\.remotepair\.installCli\(\)[\s\S]*const res = await window\.remotepair\.discover\(\)/,
+    "the renderer must install/gate the CLI before discovery so fresh clients do not see a false empty scan",
   );
-  assert.match(
-    app,
-    /waiting for xpair CLI/,
-    "blocked CLI-dependent steps must show a waiting reason",
-  );
-  assert.match(
-    app,
-    /xpair CLI install failed/,
-    "failed CLI install must show a failure reason",
-  );
-  assert.match(
-    app,
-    /onClick=\{\(\) => void installCliNow\(\)\}/,
-    "failed CLI install must wire Retry back to installCliNow",
-  );
-  assert.match(
-    app,
-    />\s*Retry\s*<\/Button>/,
-    "failed CLI install must expose a retry path instead of silently continuing",
-  );
-  assert.match(
-    stepConnect,
-    /if \(!autoCheck \|\| autoCheckStarted\.current \|\| state !== "idle" \|\| !host\.trim\(\) \|\| cliBlocked\) return;/,
-    "auto-check must wait for the CLI gate before consuming its one-shot ref",
-  );
-  assert.match(
-    stepConnect,
-    /\}, \[autoCheck, host, state, cliBlocked\]\);/,
-    "auto-check must re-run when cliBlocked flips false",
-  );
+  assert.match(stepDiscover, /setScanError\(res\.err\)/, "discover errors must be surfaced");
+  assert.doesNotMatch(app, /CLI_DEPENDENT_STEPS|cliGateActive|installCliNow|StepConnect/);
 
   assert.match(
     extension,
