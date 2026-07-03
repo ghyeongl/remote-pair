@@ -26,10 +26,10 @@ export type Mapping = {
 };
 
 // FALLBACK ONLY: when a mapping has no stored method (FOLDER_MAP_MODES), infer it from the
-// path convention. Mount mappings created by the default mount backend live under this root;
+// path convention. SMB mount mappings land under /Volumes/<device>/<share>;
 // everything else is treated as sync.
 function inferMethod(clientPath: string): MappingMode {
-  return clientPath.includes("/.xpair/host/mounts/") ? "mount" : "sync";
+  return clientPath.startsWith("/Volumes/") ? "mount" : "sync";
 }
 
 function parseModes(raw: string): Map<string, MappingMode> {
