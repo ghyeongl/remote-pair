@@ -44,6 +44,24 @@ fi
 
 map_client_of() { printf '%s' "${1%%::*}"; }
 map_host_of() { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '%s' "$h"; }
+map_mode_infer() {
+  local d="$1" host="${REMOTE_HOST:-}" inferred=""
+  case "$d" in /Volumes/*) : ;; *) printf 'sync'; return ;; esac
+  [ -n "$host" ] || { printf 'sync'; return; }
+  host="${host#*@}"
+  inferred="$(mount 2>/dev/null | awk -v d="$d" -v h="$host" '
+    index($0, " (smbfs") {
+      start = index($0, " on "); if (!start) next
+      src = substr($0, 1, start - 1)
+      rest = substr($0, start + 4)
+      idx = index(rest, " (smbfs"); if (!idx) next
+      mp = substr(rest, 1, idx - 1)
+      if (!(index(src, "@" h "/") || index(src, "//" h "/") == 1)) next
+      if (d == mp || index(d, mp "/") == 1) { print "mount"; exit }
+    }
+  ' || true)"
+  [ "$inferred" = mount ] && printf 'mount' || printf 'sync'
+}
 map_mode_for() {
   local client="$1" e c IFS=';'
   for e in ${FOLDER_MAP_MODES:-}; do
@@ -51,7 +69,7 @@ map_mode_for() {
     c="$(map_client_of "$e")"
     [ "$c" = "$client" ] && { map_host_of "$e"; return; }
   done
-  case "$client" in /Volumes/*) printf 'mount' ;; *) printf 'sync' ;; esac
+  map_mode_infer "$client"
 }
 
 unmount_path() {

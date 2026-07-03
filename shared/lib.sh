@@ -164,6 +164,45 @@ _migrate_env_set() {
   { grep -v "^$key=" "$file" 2>/dev/null || true; printf '%s=%q\n' "$key" "$value"; } > "$tmp" && mv "$tmp" "$file"
 }
 
+_migrate_env_key_nonempty() {
+  local file="$1" key="$2" value
+  [ -f "$file" ] || return 1
+  value="$( ( unset "$key"; set -a; . "$file" >/dev/null 2>&1 || true; eval "printf '%s' \"\${$key:-}\"" ) )"
+  [ -n "$value" ]
+}
+
+_migrate_client_env_has_real_config() {
+  local file="$1"
+  _migrate_env_key_nonempty "$file" REMOTE_HOST || _migrate_env_key_nonempty "$file" FOLDER_MAPS
+}
+
+_migrate_merge_legacy_client_env() {
+  local legacy="$1" dst="$2" tmp
+  [ -f "$legacy" ] || return 0
+  mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+  [ -f "$dst" ] || : > "$dst"
+  tmp="$dst.tmp.$$"
+  awk '
+    FNR == NR {
+      print
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/=.*/, "", key)
+      if (key ~ /^[A-Z_][A-Z0-9_]*$/) seen[key] = 1
+      next
+    }
+    {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/=.*/, "", key)
+      if (key ~ /^[A-Z_][A-Z0-9_]*$/ && !seen[key]) {
+        print
+        seen[key] = 1
+      }
+    }
+  ' "$dst" "$legacy" > "$tmp" && mv "$tmp" "$dst" && rm -f "$legacy"
+}
+
 _migrate_client_mount_maps() {
   local client_env="$1" host_dir="$2" client_dir="$3"
   [ -f "$client_env" ] || return 0
@@ -220,9 +259,28 @@ _migrate_client_mount_maps() {
     [ -n "$rewritten_client" ] || rewritten_client="$mode_client"
     new_modes="${new_modes:+$new_modes;}$rewritten_client::$mode_value"
   done
+  while IFS= read -r mode_client; do
+    [ -n "$mode_client" ] || continue
+    rewritten_client="$(_migrate_rewrite_lookup "$mode_client" "$rewrites" 2>/dev/null || true)"
+    [ -n "$rewritten_client" ] || continue
+    _migrate_mode_for_client "$rewritten_client" "$new_modes" >/dev/null 2>&1 && continue
+    new_modes="${new_modes:+$new_modes;}$rewritten_client::mount"
+  done <<EOF
+$force_mount_rewrites
+EOF
 
   _migrate_env_set "$client_env" FOLDER_MAPS "$new_maps" || return 0
   [ "$new_modes" = "$folder_map_modes" ] || _migrate_env_set "$client_env" FOLDER_MAP_MODES "$new_modes" || true
+}
+
+_manifest_is_shared_cli() {
+  local p="$1" name
+  [ -n "${XPAIR_PRESERVE_SHARED_CLI:-}" ] || return 1
+  [ -n "${LOCAL_BIN:-}" ] || return 1
+  case "$p" in "$LOCAL_BIN"/*) : ;; *) return 1 ;; esac
+  name="$(basename "$p")"
+  case "$name" in xpair|xpair-askpass|xpair-desktop|xpair-editor|xpair-mount|xpair-launch) return 0 ;; esac
+  return 1
 }
 
 # ── add a line to .gitignore (only if absent) + record ──
@@ -242,9 +300,9 @@ manifest_revert() {
   # awk reverses identically on both BSD and GNU.
   awk '{ lines[NR] = $0 } END { for (i = NR; i >= 1; i--) print lines[i] }' "$MANIFEST" | while IFS=$'\t' read -r action a b; do
     case "$action" in
-      FILE)      [ -e "$a" ] && rm -f "$a" && echo "  rm   $a" ;;
+      FILE)      if _manifest_is_shared_cli "$a"; then echo "  keep shared CLI $a"; else [ -e "$a" ] && rm -f "$a" && echo "  rm   $a"; fi ;;
       TREE)      [ -e "$a" ] && rm -rf "$a" && echo "  rm -rf $a" ;;
-      BACKUP)    [ -e "$b" ] && cp -p "$b" "$a" && rm -f "$b" && echo "  restore $a" ;;
+      BACKUP)    if _manifest_is_shared_cli "$a"; then echo "  keep shared CLI $a"; else [ -e "$b" ] && cp -p "$b" "$a" && rm -f "$b" && echo "  restore $a"; fi ;;
       MKDIR)     rmdir "$a" 2>/dev/null && echo "  rmdir $a" || true ;;
       GITIGNORE) local gi="$CLAUDE_DIR/.gitignore"
                  if [ -f "$gi" ]; then
@@ -307,11 +365,18 @@ migrate_layout() {
     fi
   fi
 
-  # 2. Move legacy client runtime state out of ~/.xpair/host when the new marker is absent.
-  if [ -d "$host_dir" ] && [ ! -e "$client_dir/client.env" ]; then
-    local did_move=0 f name
+  # 2. Move legacy client runtime state out of ~/.xpair/host. A telemetry-only
+  # ~/.xpair/client/client.env is not a real runtime marker; merge legacy config into it.
+  if [ -d "$host_dir" ]; then
+    local did_move=0 f name legacy_client_env_mode=""
+    if [ -e "$host_dir/client.env" ]; then
+      if [ ! -e "$client_dir/client.env" ]; then
+        legacy_client_env_mode=move; did_move=1
+      elif ! _migrate_client_env_has_real_config "$client_dir/client.env"; then
+        legacy_client_env_mode=merge; did_move=1
+      fi
+    fi
     for f in \
-      "$host_dir/client.env" \
       "$host_dir/session-names" \
       "$host_dir/.force-onboarding" \
       "$host_dir/bin/xpair-launch" \
@@ -325,7 +390,10 @@ migrate_layout() {
     done
     if [ "$did_move" = 1 ]; then
       mkdir -p "$client_dir" 2>/dev/null && chmod 700 "$client_dir" 2>/dev/null || true
-      _move_if_present "$host_dir/client.env" "$client_dir/client.env"
+      case "$legacy_client_env_mode" in
+        move) _move_if_present "$host_dir/client.env" "$client_dir/client.env" ;;
+        merge) _migrate_merge_legacy_client_env "$host_dir/client.env" "$client_dir/client.env" && _migrate_note "merged legacy client.env into $client_dir/client.env" ;;
+      esac
       _move_if_present "$host_dir/session-names" "$client_dir/session-names"
       _move_if_present "$host_dir/.force-onboarding" "$client_dir/.force-onboarding"
       _move_if_present "$host_dir/.manifest-client" "$client_dir/.manifest-client"

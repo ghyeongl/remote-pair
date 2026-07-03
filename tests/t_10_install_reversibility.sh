@@ -62,13 +62,12 @@ it "install/launcher-installed"
 [ -x "$(CLIENT_RUNTIME_DIR)/bin/xpair-launch" ] && _pass "launcher installed" \
   || _fail "launcher missing: $(CLIENT_RUNTIME_DIR)/bin/xpair-launch"
 
-it "install/manifest-records-cli"
+it "install/manifest-skips-shared-cli"
 MAN="$(MANIFEST_CLIENT)"
 if [ -f "$MAN" ]; then _pass "manifest exists: $MAN"
 else _fail "manifest missing: $MAN"; fi
 MAN_TXT="$(cat "$MAN" 2>/dev/null)"
-# CLI FILE record (fresh install, so FILE rather than BACKUP)
-assert_contains "$MAN_TXT" "FILE	$HOME/.local/bin/xpair" "CLI recorded as FILE in manifest"
+assert_absent "$MAN_TXT" "$HOME/.local/bin/xpair" "shared CLI is not role-manifest recorded"
 
 # ────────────────────────────────────────────────────────────────────────────
 # UNINSTALL (no --purge) → reverse-order restore from manifest
@@ -135,6 +134,15 @@ assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_CLIENT_DIR/client.env" "client.env r
 assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_CLIENT_DIR/common.env" "client common.env recorded in client manifest"
 assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_CLIENT_DIR/role" "client role recorded in client manifest"
 assert_absent "$CLIENT_MAN_TXT" "$RP_HOST_DIR/host.env" "client manifest does not own host.env"
+assert_absent "$CLIENT_MAN_TXT" "$HOME/.local/bin/xpair" "shared xpair CLI is not recorded in client manifest"
+
+run_uninstall --role client
+it "both-install/client-uninstall-keeps-shared-cli"
+assert_rc "$RP_RC" 0 "client-role uninstall after both install rc=0 :: stderr=[$RP_ERR]"
+[ -x "$HOME/.local/bin/xpair" ] && _pass "shared xpair CLI remains for host role" \
+  || _fail "shared xpair CLI removed while host role remains"
+assert_contains "$RP_OUT" "Keeping shared CLIs (other role remains)" "shared uninstaller guard preserves shared CLIs"
+assert_absent "$RP_OUT" "rm   $HOME/.local/bin/xpair" "manifest/manual cleanup did not remove shared xpair CLI"
 cleanup_sandbox
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -151,6 +159,34 @@ ROLE_TXT="$(cat "$RP_HOST_DIR/role" 2>/dev/null)"
 assert_eq "$ROLE_TXT" "client" "host role marker written for access-only app gating"
 CLIENT_MAN_TXT="$(cat "$RP_CLIENT_DIR/.manifest-client" 2>/dev/null)"
 assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_HOST_DIR/role" "client-only host role marker owned by client manifest"
+cleanup_sandbox
+
+new_sandbox
+make_client_mocks
+mkdir -p "$RP_HOST_DIR"
+printf 'host\n' > "$RP_HOST_DIR/role"
+printf 'HOST_ONLY=1\n' > "$RP_HOST_DIR/host.env"
+run_install --role client --no-sync
+
+it "client-install/existing-host-role-writes-both"
+assert_rc "$RP_RC" 0 "client install over existing host rc=0 :: stderr=[$RP_ERR]"
+assert_eq "$(cat "$RP_HOST_DIR/role" 2>/dev/null)" "both" "host role marker is not downgraded to client"
+assert_eq "$(cat "$RP_CLIENT_DIR/role" 2>/dev/null)" "both" "client role marker records co-located both role"
+cleanup_sandbox
+
+new_sandbox
+make_client_mocks
+mkdir -p "$RP_HOST_DIR" "$RP_CLIENT_DIR" "$SBX/host-bin" "$SBX/client-bin"
+printf 'LOCAL_BIN=%q\nAQUA_SOCK=/tmp/host-aqua.sock\n' "$SBX/host-bin" > "$RP_HOST_DIR/common.env"
+printf 'LOCAL_BIN=%q\nAQUA_SOCK=/tmp/client-aqua.sock\n' "$SBX/client-bin" > "$RP_CLIENT_DIR/common.env"
+run_install --role host --no-native --no-sync
+
+it "host-install/uses-host-common-env"
+assert_rc "$RP_RC" 0 "host install rc=0 :: stderr=[$RP_ERR]"
+[ -x "$SBX/host-bin/xpair" ] && _pass "host install wrote shared CLI under host LOCAL_BIN" \
+  || _fail "host install did not use host LOCAL_BIN"
+[ ! -e "$SBX/client-bin/xpair" ] && _pass "host install did not inherit client LOCAL_BIN" \
+  || _fail "host install incorrectly used client LOCAL_BIN"
 cleanup_sandbox
 
 # ────────────────────────────────────────────────────────────────────────────

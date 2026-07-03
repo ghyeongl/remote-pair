@@ -22,7 +22,9 @@ const telemetry = require("./telemetry.js");
 const HOME = os.homedir();
 const RP_CLIENT_DIR = path.join(HOME, ".xpair/client");
 const RP_HOST_DIR = path.join(HOME, ".xpair/host");
-const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
+const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
+const LEGACY_CLIENT_ENV = path.join(RP_HOST_DIR, "client.env");
+const CLIENT_ENV = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV;
 const SSH_KEY = path.join(HOME, ".ssh", "id_ed25519");
 // Dedicated xpair pairing key — used ONLY for pairing (request signature), the SSH proof, and the
 // paired runtime (launch/heartbeat/RD). Kept OUTSIDE ~/.ssh so it never collides with the user's

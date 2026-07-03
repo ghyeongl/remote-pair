@@ -141,7 +141,7 @@ remove_orphaned_pairing_key() {
 confirm "Wipe xpair client state, binaries, Quick Action, and cask from this Mac?"
 
 legacy_client_only=0
-if [ ! -d "$HOME/.xpair/client" ] && { [ -e "$HOME/.xpair/host/client.env" ] || [ -e "$HOME/.xpair/host/.manifest-client" ]; } \
+if [ ! -e "$HOME/.xpair/client/client.env" ] && { [ -e "$HOME/.xpair/host/client.env" ] || [ -e "$HOME/.xpair/host/.manifest-client" ]; } \
   && [ ! -e "$HOME/.xpair/host/host.env" ] && [ ! -e "$HOME/.xpair/host/.manifest-host" ]; then
   legacy_client_only=1
 fi

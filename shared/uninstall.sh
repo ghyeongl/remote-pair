@@ -26,6 +26,29 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$ROLE" in host|client|both|all) : ;; *) echo "invalid --role: $ROLE (host|client|both|all)" >&2; exit 2 ;; esac
+export XPAIR_CONFIG_ROLE="$ROLE"
+. "$HERE/config.sh"
+
+other_role_remains=0
+case "$ROLE" in
+  host)
+    client_role_marker="$(cat "$RP_CLIENT_DIR/role" 2>/dev/null || true)"
+    if [ -f "$RP_CLIENT_DIR/.manifest-client" ] || [ "$client_role_marker" = client ] || [ "$client_role_marker" = both ] || [ -f "$RP_CLIENT_DIR/client.env" ]; then
+      other_role_remains=1
+    fi
+    ;;
+  client)
+    host_role_marker="$(cat "$RP_HOST_DIR/role" 2>/dev/null || true)"
+    if [ -f "$RP_HOST_DIR/.manifest-host" ] || [ "$host_role_marker" = host ] || [ "$host_role_marker" = both ] || [ -f "$RP_HOST_DIR/host.env" ]; then
+      other_role_remains=1
+    fi
+    ;;
+esac
+if [ "$other_role_remains" = 1 ]; then
+  export XPAIR_PRESERVE_SHARED_CLI=1
+else
+  unset XPAIR_PRESERVE_SHARED_CLI
+fi
 
 # Collect selected role manifest(s). all = every manifest across both runtime dirs.
 shopt -s nullglob 2>/dev/null || true
@@ -55,6 +78,21 @@ for m in "${mans[@]}"; do
   rm -f "$m"
 done
 [ "$found" = 0 ] && { say "No installed manifest found for role=$ROLE — already removed."; }
+
+if [ -n "${XPAIR_PRESERVE_SHARED_CLI:-}" ]; then
+  say "Keeping shared CLIs (other role remains)"
+else
+  say "Removing shared CLIs"
+  for p in \
+    "$LOCAL_BIN/xpair" \
+    "$LOCAL_BIN/xpair-askpass" \
+    "$LOCAL_BIN/xpair-desktop" \
+    "$LOCAL_BIN/xpair-editor" \
+    "$LOCAL_BIN/xpair-mount" \
+    "$LOCAL_BIN/xpair-launch"; do
+    [ -e "$p" ] && rm -f "$p" && echo "  rm   $p"
+  done
+fi
 
 if [ "$PURGE" = 1 ]; then
   case "$ROLE" in

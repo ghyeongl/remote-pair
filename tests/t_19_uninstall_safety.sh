@@ -57,6 +57,19 @@ assert_absent "$RP_OUT" "rm -f $HOME/.xpair/host/pairing_ed25519" "client wipe l
 cleanup_sandbox
 
 new_sandbox
+mkdir -p "$HOME/.xpair/client/User" "$HOME/.xpair/host"
+rm -f "$HOME/.xpair/client/client.env"
+rm -f "$HOME/.xpair/host/host.env" "$HOME/.xpair/host/.manifest-host"
+printf 'legacy ide data\n' > "$HOME/.xpair/client/User/settings.json"
+printf 'REMOTE_HOST=legacy-host\n' > "$HOME/.xpair/host/client.env"
+run_client_uninstall
+it "client/legacy-detection-by-client-env"
+assert_rc "$RP_RC" 0 "pre-split client uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$RP_OUT" "Removing legacy pre-split client-only state" "legacy client-only cleanup is detected without client/client.env"
+assert_contains "$RP_OUT" "rm -rf $HOME/.xpair/host" "legacy host/client.env cleanup runs despite IDE data dir"
+cleanup_sandbox
+
+new_sandbox
 rm -rf "$HOME/.xpair/host"
 mkdir -p "$HOME/.xpair/client" "$HOME/.xpair/host"
 rm -f "$HOME/.xpair/host/host.env"
@@ -80,6 +93,7 @@ it "host/keeps-shared-cli-when-client-remains"
 assert_rc "$RP_RC" 0 "host uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
 assert_contains "$RP_OUT" "Keeping shared client CLIs" "host wipe detects remaining client install"
 assert_absent "$RP_OUT" "rm -f $HOME/.local/bin/xpair" "host wipe does not remove shared xpair CLI"
+assert_contains "$RP_OUT" "pkill -f RemotePairHost" "host wipe stops legacy RemotePairHost process"
 cleanup_sandbox
 
 new_sandbox

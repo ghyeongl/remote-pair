@@ -55,6 +55,31 @@ it "migration/host-files-untouched"
 
 cleanup_sandbox
 
+new_sandbox
+mkdir -p "$RP_CLIENT_DIR" "$RP_HOST_DIR"
+printf 'TELEMETRY_INSTALL_TS=12345\nTELEMETRY_ANON_ID=abc\n' > "$RP_CLIENT_DIR/client.env"
+LEGACY_MOUNT_NO_MODE="$RP_HOST_DIR/mounts/legacy-host/no-mode"
+printf 'REMOTE_HOST=legacy-host\nFOLDER_MAPS="%s::/Users/alice/no-mode"\nENGINE=codex\n' "$LEGACY_MOUNT_NO_MODE" > "$RP_HOST_DIR/client.env"
+
+. "$_REPO_ROOT/shared/config.sh"
+. "$_REPO_ROOT/shared/lib.sh"
+migrate_layout >/dev/null 2>&1 || true
+
+it "migration/telemetry-only-client-env-merged"
+MERGED_ENV="$(cat "$RP_CLIENT_DIR/client.env" 2>/dev/null)"
+assert_contains "$MERGED_ENV" "TELEMETRY_INSTALL_TS=12345" "telemetry stamp is preserved"
+assert_contains "$MERGED_ENV" "REMOTE_HOST=legacy-host" "legacy REMOTE_HOST merged into telemetry-only client.env"
+assert_contains "$MERGED_ENV" "ENGINE=codex" "legacy ENGINE merged into telemetry-only client.env"
+[ ! -e "$RP_HOST_DIR/client.env" ] && _pass "legacy host/client.env removed after merge" \
+  || _fail "legacy host/client.env still present after merge"
+
+unset REMOTE_HOST FOLDER_MAPS FOLDER_MAP_MODES ENGINE
+. "$RP_CLIENT_DIR/client.env"
+it "migration/path-inferred-mount-writes-mode"
+assert_contains "$FOLDER_MAPS" "/Volumes/no-mode::/Users/alice/no-mode" "legacy mount path-convention map rewrites to /Volumes"
+assert_contains "$FOLDER_MAP_MODES" "/Volumes/no-mode::mount" "legacy mount path-convention migration writes explicit mount mode"
+cleanup_sandbox
+
 CONFIG_SWIFT="$(cat "$_REPO_ROOT/host/app/Config.swift")"
 INSTALLER_SWIFT="$(cat "$_REPO_ROOT/host/app/Installer.swift")"
 it "config/legacy-client-env-fallback"

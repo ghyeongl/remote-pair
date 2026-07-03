@@ -223,6 +223,26 @@ assert_absent "$MLOG" "xpair-mount|unmount|/Users/alice/sync" "reset skips sync 
 assert_contains "$(cat "$RP_CLIENT_DIR/client.env")" "REMOTE_HOST=" "reset clears REMOTE_HOST"
 cleanup_sandbox
 
+# ── reset-onboarding must not infer a plain external drive under /Volumes as mount ──
+new_sandbox
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS="/Volumes/ExternalSSD/work::/Users/alice/work"\nFOLDER_MAP_MODES=\n' > "$RP_CLIENT_DIR/client.env"
+cat > "$MOCKBIN/mount" <<'EOF'
+#!/bin/bash
+echo '/dev/disk4s1 on /Volumes/ExternalSSD (apfs, local, nodev)'
+EOF
+cat > "$MOCKBIN/xpair-mount" <<'EOF'
+#!/bin/bash
+{ printf 'xpair-mount'; for a in "$@"; do printf '|%s' "$a"; done; printf '\n'; } >> "$MOCKLOG"
+exit 0
+EOF
+chmod +x "$MOCKBIN/mount" "$MOCKBIN/xpair-mount"
+RP_OUT="$(PATH="$MOCKBIN:$PATH" HOME="$HOME" bash "$_REPO_ROOT/client/cli/reset-onboarding.sh" --yes 2>"$RP_ERRFILE")"; RP_RC=$?
+MLOG="$(cat "$MOCKLOG" 2>/dev/null)"
+it "reset-onboarding/non-smb-volumes-sync"
+assert_rc "$RP_RC" 0 "reset onboarding succeeds for non-SMB /Volumes mapping"
+assert_absent "$MLOG" "xpair-mount|unmount|/Users/alice/work" "reset does not unmount non-SMB /Volumes mapping"
+cleanup_sandbox
+
 # ── hot self-update compatibility: client CLIs fall back to legacy host/client.env ──
 new_sandbox
 rm -f "$RP_CLIENT_DIR/client.env"

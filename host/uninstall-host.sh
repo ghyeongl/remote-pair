@@ -298,6 +298,7 @@ fi
 
 say "Stopping host processes"
 run_quiet pkill -f XpairHost
+run_quiet pkill -f RemotePairHost
 run_quiet pkill -f tmux-aqua
 
 say "Removing xpair state"

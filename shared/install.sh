@@ -36,6 +36,8 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown arg: $1" >&2; exit 2 ;;
 esac; done
 case "$ROLE" in host|client|both) : ;; *) echo "invalid --role: $ROLE (host|client|both)" >&2; exit 2 ;; esac
+export XPAIR_CONFIG_ROLE="$ROLE"
+. "$HERE/config.sh"
 HOST_MANIFEST="$RP_HOST_DIR/.manifest-host"
 CLIENT_MANIFEST="$RP_CLIENT_DIR/.manifest-client"
 
@@ -47,6 +49,13 @@ use_host_manifest() { MANIFEST="$HOST_MANIFEST"; BACKUP_DIR="$RP_HOST_DIR/backup
 use_client_manifest() { MANIFEST="$CLIENT_MANIFEST"; BACKUP_DIR="$RP_CLIENT_DIR/backups"; }
 use_shared_manifest() { if is_client; then use_client_manifest; else use_host_manifest; fi; }
 use_host_role_manifest() { if is_host; then use_host_manifest; else use_client_manifest; fi; }
+
+install_unrecorded_file() {
+  local src="$1" dst="$2" mode="${3:-}"
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  if [ -n "$mode" ]; then chmod "$mode" "$dst"; fi
+}
 
 manifest_init_used() {
   if is_host; then use_host_manifest; manifest_init; fi
@@ -69,6 +78,15 @@ _write_env() {
   } > "$f"
 }
 write_config() {
+  local existing_host_role="" existing_client_role="" effective_role="$ROLE"
+  [ -f "$RP_HOST_DIR/role" ] && existing_host_role="$(cat "$RP_HOST_DIR/role" 2>/dev/null || true)"
+  [ -f "$RP_CLIENT_DIR/role" ] && existing_client_role="$(cat "$RP_CLIENT_DIR/role" 2>/dev/null || true)"
+  if is_host && { [ "$existing_client_role" = client ] || [ "$existing_client_role" = both ] || [ -f "$RP_CLIENT_DIR/.manifest-client" ]; }; then
+    effective_role=both
+  elif is_client && { [ "$existing_host_role" = host ] || [ "$existing_host_role" = both ] || [ -f "$RP_HOST_DIR/.manifest-host" ]; }; then
+    effective_role=both
+  fi
+
   if is_host; then
     use_host_manifest; mk_dir "$RP_HOST_DIR"; chmod 700 "$RP_HOST_DIR"
   fi
@@ -78,7 +96,7 @@ write_config() {
   # Swift gates host self-install by ~/.xpair/host/role. Even a client-only
   # install writes it so an app left on disk stays access-only.
   use_host_role_manifest; mk_dir "$RP_HOST_DIR"; chmod 700 "$RP_HOST_DIR"
-  printf '%s\n' "$ROLE" | write_file "$RP_HOST_DIR/role" 644
+  printf '%s\n' "$effective_role" | write_file "$RP_HOST_DIR/role" 644
   if is_host; then
     use_host_manifest; _write_env "$HOST_COMMON_ENV" "${COMMON_KEYS[@]}"
     use_host_manifest; _write_env "$HOST_ENV" "${HOST_KEYS[@]}"
@@ -86,17 +104,31 @@ write_config() {
   if is_client; then
     use_client_manifest; _write_env "$CLIENT_COMMON_ENV" "${COMMON_KEYS[@]}"
     use_client_manifest; _write_env "$CLIENT_ENV" "${CLIENT_KEYS[@]}"
-    use_client_manifest; printf '%s\n' "$ROLE" | write_file "$RP_CLIENT_DIR/role" 644
+    use_client_manifest; printf '%s\n' "$effective_role" | write_file "$RP_CLIENT_DIR/role" 644
   fi
 }
 
 reload_runtime_env_after_migration() {
   set -a
   local f
-  for f in "$RP_HOST_DIR/common.env" "$RP_HOST_DIR/host.env" "$RP_CLIENT_DIR/common.env" "$RP_CLIENT_DIR/client.env"; do
+  local runtime_env_files
+  if [ "$ROLE" = host ]; then
+    runtime_env_files="$RP_CLIENT_DIR/common.env
+$RP_CLIENT_DIR/client.env
+$RP_HOST_DIR/common.env
+$RP_HOST_DIR/host.env"
+  else
+    runtime_env_files="$RP_HOST_DIR/common.env
+$RP_HOST_DIR/host.env
+$RP_CLIENT_DIR/common.env
+$RP_CLIENT_DIR/client.env"
+  fi
+  while IFS= read -r f; do
     # shellcheck disable=SC1090
     [ -f "$f" ] && . "$f"
-  done
+  done <<EOF
+$runtime_env_files
+EOF
   set +a
 
   RP_ORG="${RP_ORG:-com.x10lab}"
@@ -169,7 +201,7 @@ record NOTE "installed role=$ROLE at $(date '+%F %T') on $(hostname -s)"
 # ── Common: umbrella CLI → PATH + log directory ──
 use_shared_manifest
 say "xpair CLI → $LOCAL_BIN"
-install_file "$CLIENT_DIR/xpair" "$LOCAL_BIN/xpair" 755
+install_unrecorded_file "$CLIENT_DIR/xpair" "$LOCAL_BIN/xpair" 755
 case ":$PATH:" in *":$LOCAL_BIN:"*) : ;; *) warn "$LOCAL_BIN is not in PATH — add it to your shell rc" ;; esac
 if is_client; then
   mk_dir "$CLIENT_LOG_DIR"; chmod 700 "$CLIENT_LOG_DIR"
@@ -351,27 +383,27 @@ if is_client; then
   # ── Web-tab launchers: editor (M4 code-server) + desktop (M5 Screen Sharing). manifest-recorded → reversible. ──
   if [ -f "$CLIENT_DIR/xpair-editor" ]; then
     say "[client] editor launcher → $LOCAL_BIN/xpair-editor"
-    install_file "$CLIENT_DIR/xpair-editor" "$LOCAL_BIN/xpair-editor" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-editor" "$LOCAL_BIN/xpair-editor" 755
   else
     warn "client/cli/xpair-editor not found — skipping ('xpair editor' unavailable)"
   fi
   if [ -f "$CLIENT_DIR/xpair-desktop" ]; then
     say "[client] desktop launcher → $LOCAL_BIN/xpair-desktop"
-    install_file "$CLIENT_DIR/xpair-desktop" "$LOCAL_BIN/xpair-desktop" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-desktop" "$LOCAL_BIN/xpair-desktop" 755
   else
     warn "client/cli/xpair-desktop not found — skipping ('xpair desktop' unavailable)"
   fi
   # ── Mount-based file access (alternative to Syncthing — see docs/m-mount.md). manifest-recorded → reversible. ──
   if [ -f "$CLIENT_DIR/xpair-mount" ]; then
     say "[client] mount launcher → $LOCAL_BIN/xpair-mount"
-    install_file "$CLIENT_DIR/xpair-mount" "$LOCAL_BIN/xpair-mount" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-mount" "$LOCAL_BIN/xpair-mount" 755
   else
     warn "client/cli/xpair-mount not found — skipping ('xpair mount' unavailable)"
   fi
   # ── askpass helper (sibling launcher used by 'xpair install-host' over SSH). ──
   if [ -f "$CLIENT_DIR/xpair-askpass" ]; then
     say "[client] askpass helper → $LOCAL_BIN/xpair-askpass"
-    install_file "$CLIENT_DIR/xpair-askpass" "$LOCAL_BIN/xpair-askpass" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-askpass" "$LOCAL_BIN/xpair-askpass" 755
   else
     warn "client/cli/xpair-askpass not found — skipping (SSH askpass prompts unavailable)"
   fi

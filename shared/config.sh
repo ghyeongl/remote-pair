@@ -30,11 +30,17 @@ MANIFEST="$RP_HOST_DIR/.install-manifest"; BACKUP_DIR="$RP_HOST_DIR/backups"
 LOG_DIR="$RP_HOST_DIR/logs"
 CLIENT_LOG_DIR="$RP_CLIENT_DIR/logs"
 
-# Load role files (only those that exist)
-for _f in "$HOST_COMMON_ENV" "$HOST_ENV" "$CLIENT_COMMON_ENV" "$CLIENT_ENV"; do
+# Load role files (only those that exist). Host-role tooling sources the host common file last so
+# shared keys such as LOCAL_BIN/AQUA_SOCK are not inherited from a co-located client install.
+case "${XPAIR_CONFIG_ROLE:-}" in
+  host) _role_env_files=("$CLIENT_COMMON_ENV" "$CLIENT_ENV" "$HOST_COMMON_ENV" "$HOST_ENV") ;;
+  *)    _role_env_files=("$HOST_COMMON_ENV" "$HOST_ENV" "$CLIENT_COMMON_ENV" "$CLIENT_ENV") ;;
+esac
+for _f in "${_role_env_files[@]}"; do
   # shellcheck disable=SC1090
   [ -f "$_f" ] && { set -a; . "$_f"; set +a; }
 done
+unset _role_env_files
 
 # ── Host identity (org-level defaults, no personal values) ──
 RP_ORG="${RP_ORG:-com.x10lab}"

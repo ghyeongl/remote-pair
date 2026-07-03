@@ -32,4 +32,9 @@ it "ext-js/suite-discovered"
 [ "$count" -gt 0 ] && _pass "found $count *.test.js under client/ide/remotepair/ext" \
                    || _fail "no *.test.js found under $EXT_DIR"
 
+BRIDGE_JS="$(cat "$EXT_DIR/onboarding-bridge.js")"
+it "ext-js/onboarding-bridge-legacy-client-env"
+assert_contains "$BRIDGE_JS" 'const LEGACY_CLIENT_ENV = path.join(RP_HOST_DIR, "client.env")' "bridge defines legacy client.env fallback path"
+assert_contains "$BRIDGE_JS" 'const CLIENT_ENV = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV' "bridge prefers split client.env and falls back to legacy host/client.env"
+
 finish
