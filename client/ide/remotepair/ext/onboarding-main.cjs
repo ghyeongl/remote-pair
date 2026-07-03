@@ -26,11 +26,12 @@ try { heartbeat = require('./heartbeat.js') } catch { /* heartbeat optional */ }
 
 const WEBVIEW_INDEX = path.join(__dirname, 'onboarding-webview', 'dist', 'index.html')
 const PRELOAD = path.join(__dirname, 'onboarding-preload.cjs')
+const RP_CLIENT_DIR = path.join(os.homedir(), '.xpair/client')
 
 /** Sentinel that forces onboarding on the next launch (written by the IDE's "Re-run setup"
  *  command, which can't pass an env var across an app quit+relaunch). Deleted once onboarding
  *  actually opens, so it forces exactly one run. */
-const FORCE_ONBOARDING_SENTINEL = path.join(os.homedir(), '.xpair/host', '.force-onboarding')
+const FORCE_ONBOARDING_SENTINEL = path.join(RP_CLIENT_DIR, '.force-onboarding')
 
 /** @returns {boolean} true if the force-onboarding sentinel file exists. */
 function forceOnboardingSentinelExists() {
@@ -56,7 +57,7 @@ const SESSION_ENGINES = new Set(['claude', 'shell', 'codex', 'opencode'])
 const LAUNCH_ENGINE_FALLBACK = 'claude'
 
 function readClientEnv() {
-  const file = path.join(os.homedir(), '.xpair/host', 'client.env')
+  const file = path.join(RP_CLIENT_DIR, 'client.env')
   let txt = ''
   try { txt = fs.readFileSync(file, 'utf8') } catch { return {} }
   const env = {}

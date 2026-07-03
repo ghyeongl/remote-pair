@@ -25,8 +25,8 @@ const { URL } = require("url");
 
 // --- paths / keys ----------------------------------------------------------
 
-const RP_DIR = path.join(os.homedir(), ".xpair/host");
-const CLIENT_ENV = path.join(RP_DIR, "client.env");
+const RP_CLIENT_DIR = path.join(os.homedir(), ".xpair/client");
+const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
 
 // client.env keys (FROZEN — see spec "Telemetry Setup").
 const K_ANON_ID = "TELEMETRY_ANON_ID"; // distinct_id = install_id (UUID v4, disk-persisted)
@@ -147,7 +147,7 @@ function upsertEnv(key, val) {
   });
   if (!found) lines.push(`${key}="${val}"`);
   try {
-    fs.mkdirSync(RP_DIR, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
     fs.writeFileSync(CLIENT_ENV, lines.join("\n").replace(/\n+$/, "\n"));
   } catch (_e) {
     /* best effort */

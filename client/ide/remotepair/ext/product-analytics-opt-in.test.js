@@ -14,7 +14,7 @@ process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 delete process.env.RP_POSTHOG_KEY;
 
-const rpDir = path.join(tmpHome, ".xpair/host");
+const rpDir = path.join(tmpHome, ".xpair/client");
 const clientEnv = path.join(rpDir, "client.env");
 fs.mkdirSync(rpDir, { recursive: true });
 

@@ -20,15 +20,16 @@ const http = require("http");
 const telemetry = require("./telemetry.js");
 
 const HOME = os.homedir();
-const RP_DIR = path.join(HOME, ".xpair/host");
-const CLIENT_ENV = path.join(RP_DIR, "client.env");
+const RP_CLIENT_DIR = path.join(HOME, ".xpair/client");
+const RP_HOST_DIR = path.join(HOME, ".xpair/host");
+const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
 const SSH_KEY = path.join(HOME, ".ssh", "id_ed25519");
 // Dedicated xpair pairing key — used ONLY for pairing (request signature), the SSH proof, and the
 // paired runtime (launch/heartbeat/RD). Kept OUTSIDE ~/.ssh so it never collides with the user's
 // personal id_ed25519: the host installs ONLY this key as the restricted, fingerprint-bound
 // forced-command line, so the xpair-ssh-gate always runs and the proof completes. Generated
 // unencrypted (owned by us) → signed raw, no ssh-agent needed.
-const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
+const PAIRING_KEY = path.join(RP_HOST_DIR, "pairing_ed25519");
 const SSH_KNOWN_HOSTS = path.join(HOME, ".ssh", "known_hosts");
 const SSH_KNOWN_HOSTS_DEFAULTS = [
   SSH_KNOWN_HOSTS,
@@ -66,6 +67,13 @@ function validAccount(account) {
 
 function invalidAccount(account) {
   return `invalid account: ${String(account || "").trim()}`;
+}
+
+function sanitizeMountComponent(value) {
+  return String(value || "")
+    .replace(/^\//, "")
+    .replace(/\//g, "_")
+    .replace(/[^A-Za-z0-9._-]/g, "_");
 }
 
 /** Resolve the xpair binary (installed to ~/.local/bin, else on PATH). */
@@ -938,8 +946,8 @@ async function signWithAgent(pubBlob, transcript) {
 
 async function ensurePairingKey() {
   try {
-    fs.mkdirSync(RP_DIR, { recursive: true });
-    fs.chmodSync(RP_DIR, 0o700);
+    fs.mkdirSync(RP_HOST_DIR, { recursive: true });
+    fs.chmodSync(RP_HOST_DIR, 0o700);
   } catch { /* best-effort dir perms */ }
   if (!fs.existsSync(PAIRING_KEY)) {
     await run("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", PAIRING_KEY, "-C", "xpair-pairing", "-q"]);
@@ -1212,7 +1220,7 @@ function upsertEnv(key, val) {
   });
   if (!found) lines.push(`${key}="${val}"`);
   try {
-    fs.mkdirSync(RP_DIR, { recursive: true });
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true });
     fs.writeFileSync(CLIENT_ENV, lines.join("\n").replace(/\n+$/, "\n"));
   } catch {
     /* best effort */
@@ -1573,18 +1581,15 @@ const bridge = {
   // Mirrors xpair-mount default_mountpoint + sanitize_path exactly:
   //   sanitize_path: strip leading '/', replace remaining '/' with '_',
   //                  then replace every char not in [A-Za-z0-9._-] with '_'.
-  //   host_slug:     replace every char not in [A-Za-z0-9._-] with '_'.
-  //   result:        ~/.xpair/host/mounts/<host_slug>/<path_slug>
+  //   host_slug:     sanitize_path "$REMOTE_HOST".
+  //   share_name:    sanitize_path "$(basename "$hostPath")".
+  //   result:        /Volumes/<host_slug>/<share_name>
   defaultMountpoint(hostPath) {
     const cfg = parseEnv(CLIENT_ENV);
     const remoteHost = cfg.REMOTE_HOST || "";
-    const hostSlug = remoteHost.replace(/[^A-Za-z0-9._-]/g, "_");
-    const pathSlug = hostPath
-      .replace(/^\//, "")          // strip leading /
-      .replace(/\//g, "_")         // remaining / → _
-      .replace(/[^A-Za-z0-9._-]/g, "_"); // non-safe chars → _
-    const mountsRoot = path.join(RP_DIR, "mounts");
-    return path.join(mountsRoot, hostSlug, pathSlug);
+    const hostSlug = sanitizeMountComponent(remoteHost);
+    const shareName = sanitizeMountComponent(path.basename(String(hostPath || "")));
+    return path.join("/Volumes", hostSlug, shareName);
   },
 
   // Mappings — actually mount a host folder. `xpair-mount` takes a SUBCOMMAND first, so via the

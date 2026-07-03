@@ -43,7 +43,7 @@ test("Q0380/Q0400 Show Logs reveals logs and collects a readable diagnostic bund
   assert.match(showLogs, /executeCommand\("revealFileInOS", dirUri\)/);
   assert.match(showLogs, /openExternal\(dirUri\)/, "Show Logs must fall back to opening the log folder");
   assert.match(showLogs, /Collect logs \(\-\-collect\)/);
-  assert.match(showLogs, /Xpair logs are in ~\/\.xpair\/host\/logs/);
+  assert.match(showLogs, /Xpair logs are in ~\/\.xpair\/client\/logs/);
   assert.match(showLogs, /bug report/);
   assert.match(showLogs, /createTerminal\("Xpair . Collect Logs"\)/);
   assert.match(showLogs, /sendText\("xpair logs --collect", true\)/);

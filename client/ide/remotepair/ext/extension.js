@@ -99,19 +99,21 @@ function rdTransientRetryDelayMs(attempt) {
 
 // --- logging (US-006) ------------------------------------------------------
 // Conforms to docs/logging.md: line format `[<ISO>] [<LEVEL>] [ide] [<session>] <msg>`,
-// file persist to ~/.xpair/host/logs/ide.log (mode 0700), rotate-on-open at 5 MB
+// file persist to ~/.xpair/client/logs/ide.log (mode 0700), rotate-on-open at 5 MB
 // (keep .1/.2, max 3 files), level threshold REMOTEPAIR_LOG > info, redaction before sink.
 
-const LOG_DIR = path.join(os.homedir(), ".xpair/host", "logs");
+const RP_CLIENT_DIR = path.join(os.homedir(), ".xpair/client");
+const RP_HOST_DIR = path.join(os.homedir(), ".xpair/host");
+const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
-const CLIENT_ENV_FILE = path.join(os.homedir(), ".xpair/host", "client.env");
+const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
 // WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
 // on the host), so adding -i must still leave the ssh-agent + default identities available —
 // IdentitiesOnly=yes would restrict auth to only these files and break a client whose working host auth
 // is agent-only. Neither present → [] (ssh uses its defaults). Only the pairing PROOF login (bridge)
 // forces the key alone.
-const PAIRING_KEY_FILE = path.join(os.homedir(), ".xpair/host", "pairing_ed25519");
+const PAIRING_KEY_FILE = path.join(RP_HOST_DIR, "pairing_ed25519");
 const PERSONAL_KEY_FILE = path.join(os.homedir(), ".ssh", "id_ed25519");
 function pairingIdArgs() {
   try {
@@ -259,7 +261,7 @@ function readClientEnvValue(keyName) {
   return null;
 }
 
-/** Read REMOTE_HOST from ~/.xpair/host/client.env (KEY=VALUE lines). */
+/** Read REMOTE_HOST from ~/.xpair/client/client.env (KEY=VALUE lines). */
 function readRemoteHost() {
   // env override wins (useful for testing), then the client.env file.
   const fromEnv = process.env.REMOTE_HOST;
@@ -1192,7 +1194,7 @@ async function connectHost(panel) {
   const host = getValidHost();
   if (!host) {
     vscode.window.showWarningMessage(
-      "Xpair: REMOTE_HOST is not set (or invalid) in ~/.xpair/host/client.env."
+      "Xpair: REMOTE_HOST is not set (or invalid) in ~/.xpair/client/client.env."
     );
     return;
   }
@@ -1403,7 +1405,7 @@ async function setupLayout(context, force) {
 // --- FOLDER_MAPS parser ----------------------------------------------------
 
 /**
- * Read FOLDER_MAPS from ~/.xpair/host/client.env.
+ * Read FOLDER_MAPS from ~/.xpair/client/client.env.
  * Format: "clientDir::hostDir" pairs separated by ";".
  * Returns an array of { clientDir, hostDir } objects (may be empty).
  */
@@ -1491,7 +1493,7 @@ function unquoteShellWord(s) {
 }
 
 function readFolderMaps() {
-  const envPath = path.join(os.homedir(), ".xpair/host", "client.env");
+  const envPath = CLIENT_ENV_FILE;
   let raw;
   try {
     raw = fs.readFileSync(envPath, "utf8");
@@ -1745,7 +1747,7 @@ async function showLogs() {
   // Offer to collect logs into a shareable tarball for a bug report.
   const COLLECT = "Collect logs (--collect)";
   const picked = await vscode.window.showInformationMessage(
-    "Xpair logs are in ~/.xpair/host/logs. Collect them into a tarball for a bug report?",
+    "Xpair logs are in ~/.xpair/client/logs. Collect them into a tarball for a bug report?",
     COLLECT
   );
   if (picked === COLLECT) {
@@ -1778,8 +1780,8 @@ function runSetup() {
   // that onboarding-main.cjs's firstFailingGuard() honors (and clears on next open). Path MUST
   // match FORCE_ONBOARDING_SENTINEL in onboarding-main.cjs.
   try {
-    fs.mkdirSync(path.join(os.homedir(), ".xpair/host"), { recursive: true });
-    fs.writeFileSync(path.join(os.homedir(), ".xpair/host", ".force-onboarding"), "");
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true });
+    fs.writeFileSync(path.join(RP_CLIENT_DIR, ".force-onboarding"), "");
   } catch (e) {
     const detail = e && e.message ? e.message : String(e);
     log(`runSetup: could not write force-onboarding sentinel: ${detail}`, "warn");
@@ -1813,8 +1815,8 @@ function endSessionReonboard() {
       }
       log("endSessionReonboard: re-onboarding on next launch (sessions persist)");
       try {
-        fs.mkdirSync(path.join(os.homedir(), ".xpair/host"), { recursive: true });
-        fs.writeFileSync(path.join(os.homedir(), ".xpair/host", ".force-onboarding"), "");
+        fs.mkdirSync(RP_CLIENT_DIR, { recursive: true });
+        fs.writeFileSync(path.join(RP_CLIENT_DIR, ".force-onboarding"), "");
       } catch (e) {
         const detail = e && e.message ? e.message : String(e);
         log(`endSessionReonboard: sentinel write failed: ${detail}`, "warn");

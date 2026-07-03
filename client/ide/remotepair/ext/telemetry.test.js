@@ -6,7 +6,7 @@
 //   2) with consent OFF (default), capture()/sentryCapture() perform ZERO https.request.
 //
 // HOME is redirected to a throwaway dir BEFORE telemetry.js loads so the test never touches the
-// real ~/.xpair/host/client.env (module computes RP_DIR/CLIENT_ENV at load time).
+// real ~/.xpair/client/client.env (module computes RP_CLIENT_DIR/CLIENT_ENV at load time).
 
 const assert = require("node:assert");
 const fs = require("node:fs");
@@ -19,7 +19,7 @@ const http = require("node:http");
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "rp-telemetry-test-"));
 process.env.HOME = TMP_HOME;
 process.env.USERPROFILE = TMP_HOME; // win parity (harmless on posix)
-const RP_DIR = path.join(TMP_HOME, ".xpair/host");
+const RP_DIR = path.join(TMP_HOME, ".xpair/client");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
 fs.mkdirSync(RP_DIR, { recursive: true });
 

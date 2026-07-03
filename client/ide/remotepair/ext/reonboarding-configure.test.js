@@ -104,7 +104,7 @@ function greenBridge(overrides = {}) {
 
 test("Q0473/Q0493/Q0494 force-onboarding sentinel reopens onboarding once without clearing sessions", async () => {
   await withTempHome(async (home, onboardingMain) => {
-    const rpDir = path.join(home, ".xpair/host");
+    const rpDir = path.join(home, ".xpair/client");
     fs.mkdirSync(rpDir, { recursive: true });
     fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\nFOLDER_MAPS=/c::/h\nENGINE=codex\n");
     assert.equal(
@@ -139,7 +139,7 @@ test("Q0473/Q0493/Q0494 force-onboarding sentinel reopens onboarding once withou
 
 test("Q0473/Q0493/Q0494 per-launch guard parachutes to the first failing step", async () => {
   await withTempHome(async (home, onboardingMain) => {
-    const rpDir = path.join(home, ".xpair/host");
+    const rpDir = path.join(home, ".xpair/client");
     fs.mkdirSync(rpDir, { recursive: true });
     fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\nENGINE=codex\n");
 
@@ -200,7 +200,7 @@ test("Q0473/Q0493/Q0494 per-launch guard parachutes to the first failing step", 
 
 test("Q0473/Q0493/Q0494 no engine named anywhere checks the launcher's claude fallback", async () => {
   await withTempHome(async (home, onboardingMain) => {
-    const rpDir = path.join(home, ".xpair/host");
+    const rpDir = path.join(home, ".xpair/client");
     fs.mkdirSync(rpDir, { recursive: true });
     fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\n");
 
@@ -229,7 +229,7 @@ test("Q0473/Q0493/Q0494 no engine named anywhere checks the launcher's claude fa
 
 test("Q0473/Q0493/Q0494 LOCAL_MODE no longer bypasses native remote guards", async () => {
   await withTempHome(async (home, onboardingMain) => {
-    const rpDir = path.join(home, ".xpair/host");
+    const rpDir = path.join(home, ".xpair/client");
     fs.mkdirSync(rpDir, { recursive: true });
     fs.writeFileSync(path.join(rpDir, "client.env"), "REMOTE_HOST=host-mac\nENGINE=codex\nLOCAL_MODE=1\n");
 
@@ -255,7 +255,7 @@ test("Q0473/Q0493/Q0494 LOCAL_MODE no longer bypasses native remote guards", asy
 
 test("Q0473/Q0493/Q0494 extension Re-run setup schedules next-launch onboarding and asks for restart", async () => {
   assert.match(extension, /vscode\.commands\.registerCommand\("remotepair\.runSetup", \(\) => runSetup\(\)\)/);
-  assert.match(extension, /fs\.writeFileSync\(path\.join\(os\.homedir\(\), "\.xpair\/host", "\.force-onboarding"\), ""\)/);
+  assert.match(extension, /fs\.writeFileSync\(path\.join\(RP_CLIENT_DIR, "\.force-onboarding"\), ""\)/);
   assert.match(extension, /Xpair setup will run when you restart the app\./);
   assert.match(extension, /"Restart now"/);
   assert.match(extension, /vscode\.commands\.executeCommand\("workbench\.action\.quit"\)/);
