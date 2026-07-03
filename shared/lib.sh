@@ -54,6 +54,153 @@ write_file() {
   if [ -n "$mode" ]; then chmod "$mode" "$dst"; fi
 }
 
+# ── client-runtime split migration helpers ──
+_migrate_map_client_of() { printf '%s' "${1%%::*}"; }
+_migrate_map_host_of() {
+  local p="$1" h="${1#*::}"
+  [ "$h" = "$p" ] && h="$p"
+  printf '%s' "$h"
+}
+
+# Must match client/cli/xpair-mount sanitize_path exactly.
+_migrate_sanitize_path() {
+  printf '%s' "$1" | LC_ALL=C sed 's|^/||; s|/|_|g; s|[^A-Za-z0-9._-]|_|g'
+}
+
+_migrate_default_mountpoint() {
+  local remote_host="$1" host_path="$2" device share
+  device="$(_migrate_sanitize_path "$remote_host")"
+  share="$(_migrate_sanitize_path "$(basename "$host_path")")"
+  [ -n "$device" ] && [ -n "$share" ] || return 1
+  printf '/Volumes/%s/%s' "$device" "$share"
+}
+
+_migrate_mode_for_client() {
+  local client_path="$1" modes="$2" e c IFS=';'
+  for e in $modes; do
+    [ -n "$e" ] || continue
+    c="$(_migrate_map_client_of "$e")"
+    [ "$c" = "$client_path" ] && { _migrate_map_host_of "$e"; return; }
+  done
+  return 1
+}
+
+_migrate_legacy_mount_root() {
+  local client_path="$1" host_dir="$2" client_dir="$3" root
+  for root in "$host_dir/mounts" "$client_dir/mounts"; do
+    case "$client_path" in "$root"|"$root"/*) printf '%s' "$root"; return 0 ;; esac
+  done
+  return 1
+}
+
+_migrate_is_mounted() {
+  local mp="${1%/}"
+  mount 2>/dev/null | grep -qF " on ${mp} " || mount 2>/dev/null | grep -qF " on ${mp}("
+}
+
+_migrate_cleanup_legacy_mountpoint() {
+  local mp="$1" root="$2" d
+  [ -n "$mp" ] && [ -n "$root" ] || return 0
+  if _migrate_is_mounted "$mp"; then
+    umount "$mp" >/dev/null 2>&1 || true
+    _migrate_note "best-effort unmounted legacy mountpoint $mp"
+  fi
+  d="$mp"
+  while [ "$d" != "$root" ] && [ "$d" != "/" ] && [ -n "$d" ]; do
+    rmdir "$d" >/dev/null 2>&1 || break
+    d="$(dirname "$d")"
+  done
+  rmdir "$root" >/dev/null 2>&1 || true
+}
+
+_migrate_rewrite_lookup() {
+  local old="$1" rewrites="$2" from to
+  while IFS="$(printf '\t')" read -r from to; do
+    [ -n "$from" ] || continue
+    [ "$from" = "$old" ] && { printf '%s' "$to"; return 0; }
+  done <<EOF
+$rewrites
+EOF
+  return 1
+}
+
+_migrate_line_contains() {
+  local needle="$1" haystack="$2" line
+  while IFS= read -r line; do
+    [ "$line" = "$needle" ] && return 0
+  done <<EOF
+$haystack
+EOF
+  return 1
+}
+
+_migrate_env_set() {
+  local file="$1" key="$2" value="$3" tmp
+  tmp="$file.tmp.$$"
+  { grep -v "^$key=" "$file" 2>/dev/null || true; printf '%s=%q\n' "$key" "$value"; } > "$tmp" && mv "$tmp" "$file"
+}
+
+_migrate_client_mount_maps() {
+  local client_env="$1" host_dir="$2" client_dir="$3"
+  [ -f "$client_env" ] || return 0
+
+  local remote_host folder_maps folder_map_modes
+  remote_host="$( ( unset REMOTE_HOST; . "$client_env" >/dev/null 2>&1 || true; printf '%s' "${REMOTE_HOST:-}" ) )"
+  folder_maps="$( ( unset FOLDER_MAPS SYNC_ROOTS; . "$client_env" >/dev/null 2>&1 || true; printf '%s' "${FOLDER_MAPS:-${SYNC_ROOTS:-}}" ) )"
+  folder_map_modes="$( ( unset FOLDER_MAP_MODES; . "$client_env" >/dev/null 2>&1 || true; printf '%s' "${FOLDER_MAP_MODES:-}" ) )"
+
+  [ -n "$folder_maps" ] || return 0
+
+  local new_maps="" rewrites="" force_mount_rewrites="" pair client_path host_path mode legacy_root new_client_path IFS=';'
+  for pair in $folder_maps; do
+    [ -n "$pair" ] || continue
+    client_path="$(_migrate_map_client_of "$pair")"
+    host_path="$(_migrate_map_host_of "$pair")"
+    mode="$(_migrate_mode_for_client "$client_path" "$folder_map_modes" 2>/dev/null || true)"
+    legacy_root="$(_migrate_legacy_mount_root "$client_path" "$host_dir" "$client_dir" 2>/dev/null || true)"
+    new_client_path="$client_path"
+
+    if { [ "$mode" = "mount" ] || [ -n "$legacy_root" ]; } && [ "${client_path#/Volumes/}" = "$client_path" ]; then
+      if [ -n "$remote_host" ] && [ -n "$host_path" ]; then
+        if new_client_path="$(_migrate_default_mountpoint "$remote_host" "$host_path" 2>/dev/null)"; then
+          rewrites="${rewrites}${client_path}	${new_client_path}
+"
+          [ -n "$legacy_root" ] && force_mount_rewrites="${force_mount_rewrites}${client_path}
+"
+          [ -n "$legacy_root" ] && _migrate_cleanup_legacy_mountpoint "$client_path" "$legacy_root"
+          _migrate_note "rewrote mount mapping $client_path -> $new_client_path"
+        else
+          new_client_path="$client_path"
+          _migrate_note "skip mount mapping rewrite for $client_path: cannot compute /Volumes mountpoint"
+        fi
+      else
+        _migrate_note "skip mount mapping rewrite for $client_path: REMOTE_HOST or host path missing"
+      fi
+    fi
+
+    new_maps="${new_maps:+$new_maps;}$new_client_path::$host_path"
+  done
+
+  [ "$new_maps" != "$folder_maps" ] || return 0
+
+  local new_modes="" entry mode_client mode_value rewritten_client
+  IFS=';'
+  for entry in $folder_map_modes; do
+    [ -n "$entry" ] || continue
+    mode_client="$(_migrate_map_client_of "$entry")"
+    mode_value="$(_migrate_map_host_of "$entry")"
+    rewritten_client="$(_migrate_rewrite_lookup "$mode_client" "$rewrites" 2>/dev/null || true)"
+    if [ -n "$rewritten_client" ] && _migrate_line_contains "$mode_client" "$force_mount_rewrites"; then
+      mode_value="mount"
+    fi
+    [ -n "$rewritten_client" ] || rewritten_client="$mode_client"
+    new_modes="${new_modes:+$new_modes;}$rewritten_client::$mode_value"
+  done
+
+  _migrate_env_set "$client_env" FOLDER_MAPS "$new_maps" || return 0
+  [ "$new_modes" = "$folder_map_modes" ] || _migrate_env_set "$client_env" FOLDER_MAP_MODES "$new_modes" || true
+}
+
 # ── add a line to .gitignore (only if absent) + record ──
 add_gitignore() {
   local line="$1" gi="$CLAUDE_DIR/.gitignore"
@@ -167,21 +314,6 @@ migrate_layout() {
     fi
   fi
 
-  # 3. Mounts: do not move live/non-empty mounts; FOLDER_MAPS rewrite is deferred.
-  # ponytail: Phase 1 only installs a compat symlink for empty mounts; live FOLDER_MAPS rewrites wait for the mount phase.
-  local host_mounts client_mounts
-  host_mounts="$host_dir/mounts"
-  client_mounts="$client_dir/mounts"
-  if [ -d "$host_mounts" ] && [ ! -L "$host_mounts" ]; then
-    if [ -z "$(find "$host_mounts" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
-      mkdir -p "$client_mounts" 2>/dev/null || true
-      if rmdir "$host_mounts" 2>/dev/null && ln -s "$client_mounts" "$host_mounts" 2>/dev/null; then
-        _migrate_note "linked empty mounts $host_mounts -> $client_mounts"
-      else
-        _migrate_note "skip empty mounts compat symlink: update failed"
-      fi
-    else
-      _migrate_note "left non-empty mounts in place at $host_mounts"
-    fi
-  fi
+  # 3. Mount maps: retired ~/.xpair/{host,client}/mounts paths now canonicalize to /Volumes.
+  _migrate_client_mount_maps "$client_dir/client.env" "$host_dir" "$client_dir" || true
 }

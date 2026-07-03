@@ -179,7 +179,7 @@
           {
             "id": "remotepair.setup.connect",
             "title": "Connect to your host",
-            "description": "Xpair drives a remote macOS host (default REMOTE_HOST from ~/.xpair/host/client.env). Click below to open the host filesystem over SSH.\n[Connect to Host](command:remotepair.connectHost)",
+            "description": "Xpair drives a remote macOS host (default REMOTE_HOST from ~/.xpair/client/client.env). Click below to open the host filesystem over SSH.\n[Connect to Host](command:remotepair.connectHost)",
             "media": {
               "markdown": "media/walkthrough-connect.md"
             }

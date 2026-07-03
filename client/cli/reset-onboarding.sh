@@ -6,7 +6,7 @@
 # empty state with this script, then launch the app, which will behave exactly as a clean install.
 #
 # What it does (client-side only — never touches the host):
-#   1. Unmounts any Xpair mounts under ~/.xpair/client/mounts and removes the leftover dirs.
+#   1. Clears legacy onboarding config. Current mountpoints live under /Volumes/<device>/<share>.
 #   2. Clears the onboarding-produced keys in ~/.xpair/client/client.env (REMOTE_HOST, FOLDER_MAPS,
 #      SYNC_BACKEND, MOUNT_BACKEND) while preserving install-level keys (LAUNCHER, TERMINAL_APP).
 #   3. Leaves the SSH key (~/.ssh/id_ed25519) in place by default — onboarding reuses it. Pass

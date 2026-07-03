@@ -335,7 +335,7 @@ id,depth,동작,예상,tree_flag,verdict,req_section,evidence,dup_status
 13342,5,Manage 메뉴에서 Settings를 선택함,같은 Settings editor로 이동,route to: 13341,UNSPECIFIED,-,no direct requirement,
 13343,5,command palette에서 Xpair Open Settings를 실행함,같은 Settings editor로 이동,route to: 13341,UNSPECIFIED,-,no requirement on this UI detail,
 13350,5,Show Logs를 실행하지 않음,"로그 폴더 reveal, collect 없음",terminate,UNSPECIFIED,-,no direct requirement,
-13351,5,Show Logs를 실행함,`~/.xpair/host/logs`를 만들고 OS file manager로 연다,continue,UNSPECIFIED,-,no direct requirement,
+13351,5,Show Logs를 실행함,`~/.xpair/client/logs`를 만들고 OS file manager로 연다,continue,UNSPECIFIED,-,no direct requirement,
 13352,5,collect logs 확인 메시지가 표시됨,사용자가 tarball 수집 여부를 선택한다,continue,BACKED,§1.12 Q0380 Q0400,collect logs after a crash or failed setup,
 13353,5,collect terminal에서 command 결과가 나옴,"성공이면 bug report용 tarball 위치가 출력되고, 실패면 terminal 오류로 끝난다",continue,BACKED,§1.12 Q0380 Q0400,send a readable diagnostic bundle,
 21110,5,Finder 선택이 folder가 아니거나 사라짐,Quick Action이 실행되지 않거나 CLI가 `folder not found`로 종료,terminate,UNSPECIFIED,-,no direct requirement,

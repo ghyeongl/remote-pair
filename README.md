@@ -144,7 +144,7 @@ To browse and edit those files from the client, **mount the host folder**. In Xp
 
 ```bash
 xpair launch <host-folder>   # start / attach a session for a folder on the host
-xpair mount                  # mount a host folder locally (smb/sshfs) to browse + edit it
+xpair mount                  # mount a host folder locally over SMB to browse + edit it
 ```
 
 ---
@@ -162,7 +162,7 @@ xpair status           # app PID, host server, heartbeat age
 xpair doctor           # check SSH auth, host app, tmux-aqua on host
 xpair desktop open     # open the host screen via macOS Screen Sharing (vnc://)
 xpair editor start     # launch the in-app code-server editor (loopback)
-xpair mount            # mount a host folder directly (smb/sshfs)
+xpair mount            # mount a host folder directly over SMB
 xpair notify           # pull recent host notifications (Stop / approve / …)
 xpair logs [--host -f] # tail launcher/app logs (or host logs over ssh)
 xpair config set host my-mac-mini
