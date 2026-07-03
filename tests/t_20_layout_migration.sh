@@ -9,7 +9,7 @@ printf 'legacy ide data\n' > "$HOME/.xpair/client/User/settings.json"
 LEGACY_MOUNT="$HOME/.xpair/host/mounts/legacy-host/old-proj"
 SYNC_MAP="$HOME/sync-copy"
 VOLUMES_MAP="/Volumes/legacy-host/already"
-printf 'REMOTE_HOST=user@office-mac.local\nFOLDER_MAPS="%s::/Users/alice/Projects/old-proj;%s::/Users/alice/sync;%s::/Users/alice/already"\nFOLDER_MAP_MODES="%s::mount;%s::sync;%s::mount"\n' \
+printf 'REMOTE_HOST=user@office-mac.local\nLAUNCHER=$HOME/.xpair/host/bin/xpair-launch\nFOLDER_MAPS="%s::/Users/alice/Projects/old-proj;%s::/Users/alice/sync;%s::/Users/alice/already"\nFOLDER_MAP_MODES="%s::mount;%s::sync;%s::mount"\n' \
   "$LEGACY_MOUNT" "$SYNC_MAP" "$VOLUMES_MAP" \
   "$LEGACY_MOUNT" "$SYNC_MAP" "$VOLUMES_MAP" > "$HOME/.xpair/host/client.env"
 printf 'HOST_ONLY=1\n' > "$HOME/.xpair/host/host.env"
@@ -32,16 +32,20 @@ it "migration/client-env-moved"
   || _fail "legacy host/client.env still present"
 
 it "migration/mount-maps-rewritten-to-volumes"
-unset REMOTE_HOST FOLDER_MAPS FOLDER_MAP_MODES
+unset REMOTE_HOST LAUNCHER FOLDER_MAPS FOLDER_MAP_MODES
 . "$HOME/.xpair/client/client.env"
-assert_contains "$FOLDER_MAPS" "/Volumes/user_office-mac.local/old-proj::/Users/alice/Projects/old-proj" "legacy mount map rewrites to canonical /Volumes path"
+assert_contains "$FOLDER_MAPS" "/Volumes/user_office-mac.local/Users_alice_Projects_old-proj::/Users/alice/Projects/old-proj" "legacy mount map rewrites to canonical /Volumes path"
 assert_absent "$FOLDER_MAPS" "$LEGACY_MOUNT::/Users/alice/Projects/old-proj" "legacy mount clientPath removed from FOLDER_MAPS"
-assert_contains "$FOLDER_MAP_MODES" "/Volumes/user_office-mac.local/old-proj::mount" "FOLDER_MAP_MODES key rewritten with mount method"
+assert_contains "$FOLDER_MAP_MODES" "/Volumes/user_office-mac.local/Users_alice_Projects_old-proj::mount" "FOLDER_MAP_MODES key rewritten with mount method"
 assert_absent "$FOLDER_MAP_MODES" "$LEGACY_MOUNT::mount" "legacy mount clientPath removed from FOLDER_MAP_MODES"
 assert_contains "$FOLDER_MAPS" "$SYNC_MAP::/Users/alice/sync" "sync mapping left unchanged"
 assert_contains "$FOLDER_MAP_MODES" "$SYNC_MAP::sync" "sync mode left unchanged"
 assert_contains "$FOLDER_MAPS" "$VOLUMES_MAP::/Users/alice/already" "already-/Volumes mapping left unchanged"
 assert_contains "$FOLDER_MAP_MODES" "$VOLUMES_MAP::mount" "already-/Volumes mode left unchanged"
+
+it "migration/client-bin-paths-rewritten"
+assert_eq "$LAUNCHER" "$HOME/.xpair/client/bin/xpair-launch" "migrated LAUNCHER resolves to client bin"
+assert_contains "$(cat "$HOME/.xpair/client/client.env")" 'LAUNCHER=$HOME/.xpair/client/bin/xpair-launch' "migrated client.env rewrites literal HOME launcher path"
 
 it "migration/host-files-untouched"
 [ -f "$HOME/.xpair/host/host.env" ] && _pass "host.env left in host runtime dir" \

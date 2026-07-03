@@ -43,15 +43,16 @@ The share name is the basename of the shared folder by default. For example:
 
 | Host path | SMB share | Default client mountpoint |
 |---|---|---|
-| `/Users/alice/Projects/foo` | `foo` | `/Volumes/<device>/foo` |
-| `/Users/alice/work` | `work` | `/Volumes/<device>/work` |
+| `/Users/alice/Projects/foo` | `foo` | `/Volumes/<device>/Users_alice_Projects_foo` |
+| `/Users/alice/work` | `work` | `/Volumes/<device>/Users_alice_work` |
 
 `<device>` is the sanitized `REMOTE_HOST` value. Characters outside `[A-Za-z0-9._-]` are replaced
-with `_`. For `REMOTE_HOST=user@office-mac.local`, the default mountpoint for
-`/Users/alice/Projects/foo` is:
+with `_`. The local mountpoint folder is the full sanitized host path, while the SMB share name
+in the mount URL remains the basename of the shared folder. For
+`REMOTE_HOST=user@office-mac.local`, the default mountpoint for `/Users/alice/Projects/foo` is:
 
 ```
-/Volumes/user_office-mac.local/foo
+/Volumes/user_office-mac.local/Users_alice_Projects_foo
 ```
 
 Mounts are read-write by default because `mount_smbfs` defaults to read-write. Xpair does not add
@@ -72,7 +73,7 @@ xpair-mount --backend smb mount /Users/alice/Projects/foo
 xpair-mount status
 
 # Unmount by mountpoint or host path
-xpair-mount unmount /Volumes/user_office-mac.local/foo
+xpair-mount unmount /Volumes/user_office-mac.local/Users_alice_Projects_foo
 xpair-mount unmount /Users/alice/Projects/foo
 
 # Help
@@ -82,22 +83,23 @@ xpair-mount help
 Default mountpoint:
 
 ```
-/Volumes/<sanitized-REMOTE_HOST>/<sanitized-basename(hostPath)>
+/Volumes/<sanitized-REMOTE_HOST>/<sanitized-full-hostPath>
 ```
 
 After mounting, point a `FOLDER_MAPS` entry at the mountpoint so path mapping in `xpair-launch`
 resolves correctly:
 
 ```
-FOLDER_MAPS="/Volumes/user_office-mac.local/foo::/Users/alice/Projects/foo"
-FOLDER_MAP_MODES="/Volumes/user_office-mac.local/foo::mount"
+FOLDER_MAPS="/Volumes/user_office-mac.local/Users_alice_Projects_foo::/Users/alice/Projects/foo"
+FOLDER_MAP_MODES="/Volumes/user_office-mac.local/Users_alice_Projects_foo::mount"
 SYNC_BACKEND=mount
 MOUNT_BACKEND=smb
 ```
 
 `xpair-launch` also has a best-effort ensure-mounted guard: before attach, it scans mount-method
-folder maps and runs `xpair-mount mount <hostPath>` for any canonical `/Volumes/<device>/<share>`
-path that is not currently mounted. Failures warn but never block attach.
+folder maps and runs `xpair-mount mount <hostPath>` for any canonical
+`/Volumes/<device>/<sanitized-full-hostPath>` path that is not currently mounted. Failures warn but
+never block attach.
 
 ---
 

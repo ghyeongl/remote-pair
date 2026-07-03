@@ -284,7 +284,7 @@ else
   # role installer writes .manifest-host; the self-installer writes .install-manifest. The
   # shared uninstaller globs both, so we must too, or rm -rf ~/.xpair drops the only record.
   shopt -s nullglob
-  inline_mans=("$HOME"/.xpair/host/.manifest-host "$HOME/.xpair/host/.install-manifest")
+  inline_mans=("$HOME/.xpair/host/.manifest-host" "$HOME/.xpair/host/.manifest-both" "$HOME/.xpair/host/.install-manifest")
   shopt -u nullglob
   if [ "${#inline_mans[@]}" -gt 0 ]; then
     say "No shared manifest reverter found; using inline manifest revert (${#inline_mans[@]} manifest(s))."

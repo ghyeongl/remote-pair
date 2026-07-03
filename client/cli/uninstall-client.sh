@@ -119,6 +119,12 @@ remove_client_app() {
   fi
 }
 
+host_install_remains() {
+  [ -f "$HOME/.xpair/host/.manifest-host" ] && return 0
+  [ -f "$HOME/.xpair/host/host.env" ] && return 0
+  return 1
+}
+
 confirm "Wipe xpair client state, binaries, Quick Action, and cask from this Mac?"
 
 legacy_client_only=0
@@ -142,16 +148,20 @@ if [ "$legacy_client_only" = 1 ]; then
   run rm -rf "$HOME/.xpair/host"
 fi
 
-say "Removing installed CLIs"
-for p in \
-  "$HOME/.local/bin/xpair" \
-  "$HOME/.local/bin/xpair-askpass" \
-  "$HOME/.local/bin/xpair-desktop" \
-  "$HOME/.local/bin/xpair-editor" \
-  "$HOME/.local/bin/xpair-mount" \
-  "$HOME/.local/bin/xpair-launch"; do
-  run rm -f "$p"
-done
+if host_install_remains; then
+  say "Keeping shared CLIs (host install remains)"
+else
+  say "Removing installed CLIs"
+  for p in \
+    "$HOME/.local/bin/xpair" \
+    "$HOME/.local/bin/xpair-askpass" \
+    "$HOME/.local/bin/xpair-desktop" \
+    "$HOME/.local/bin/xpair-editor" \
+    "$HOME/.local/bin/xpair-mount" \
+    "$HOME/.local/bin/xpair-launch"; do
+    run rm -f "$p"
+  done
+fi
 # mosh / mosh-client are installed via install_file (manifest-recorded, backup-aware): the shared
 # manifest reverter above already removes our copies and RESTORES any pre-existing user-owned binary
 # from backup. Do NOT rm them unconditionally here — that would clobber a user's own mosh.

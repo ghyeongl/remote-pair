@@ -47,7 +47,7 @@ PAIRING_KEY="$RP_HOST_DIR/pairing_ed25519"
 SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
 ssh() { command ssh $SSH_ID "$@"; }
 
-# Default mountpoint root: /Volumes/<device>/<share>
+# Default mountpoint root: /Volumes/<device>/<sanitized-full-hostpath>
 MOUNTS_ROOT="/Volumes"
 
 # Source the shared logger; no-op fallback for partially-updated clients.
@@ -154,7 +154,7 @@ share_name_for_hostpath() {
 # Resolve default mountpoint for a given host path.
 default_mountpoint() {
   local hostpath="$1"
-  printf '%s/%s/%s' "$MOUNTS_ROOT" "$(host_slug)" "$(share_name_for_hostpath "$hostpath")"
+  printf '%s/%s/%s' "$MOUNTS_ROOT" "$(host_slug)" "$(sanitize_path "$hostpath")"
 }
 
 # Detect SMB user on the host (SSH → whoami).

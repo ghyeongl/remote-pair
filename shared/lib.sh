@@ -70,9 +70,22 @@ _migrate_sanitize_path() {
 _migrate_default_mountpoint() {
   local remote_host="$1" host_path="$2" device share
   device="$(_migrate_sanitize_path "$remote_host")"
-  share="$(_migrate_sanitize_path "$(basename "$host_path")")"
+  share="$(_migrate_sanitize_path "$host_path")"
   [ -n "$device" ] && [ -n "$share" ] || return 1
   printf '/Volumes/%s/%s' "$device" "$share"
+}
+
+_migrate_rewrite_client_bin_paths() {
+  local file="$1" tmp home_pat home_repl
+  [ -f "$file" ] || return 0
+  tmp="$file.tmp.$$"
+  home_pat="$(printf '%s' "$HOME" | sed 's/[&]/\\&/g')"
+  home_repl="$home_pat"
+  sed \
+    -e 's#\$HOME/\.xpair/host/bin/#$HOME/.xpair/client/bin/#g' \
+    -e 's#~/\.xpair/host/bin/#~/.xpair/client/bin/#g' \
+    -e "s#${home_pat}/\\.xpair/host/bin/#${home_repl}/.xpair/client/bin/#g" \
+    "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
 _migrate_mode_for_client() {
@@ -314,6 +327,9 @@ migrate_layout() {
     fi
   fi
 
-  # 3. Mount maps: retired ~/.xpair/{host,client}/mounts paths now canonicalize to /Volumes.
+  # 3. Client helper paths: moved client CLIs now live under ~/.xpair/client/bin.
+  _migrate_rewrite_client_bin_paths "$client_dir/client.env" || true
+
+  # 4. Mount maps: retired ~/.xpair/{host,client}/mounts paths now canonicalize to /Volumes.
   _migrate_client_mount_maps "$client_dir/client.env" "$host_dir" "$client_dir" || true
 }

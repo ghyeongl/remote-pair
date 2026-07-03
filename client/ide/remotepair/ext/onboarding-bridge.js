@@ -1582,14 +1582,14 @@ const bridge = {
   //   sanitize_path: strip leading '/', replace remaining '/' with '_',
   //                  then replace every char not in [A-Za-z0-9._-] with '_'.
   //   host_slug:     sanitize_path "$REMOTE_HOST".
-  //   share_name:    sanitize_path "$(basename "$hostPath")".
-  //   result:        /Volumes/<host_slug>/<share_name>
+  //   folder_name:   sanitize_path "$hostPath".
+  //   result:        /Volumes/<host_slug>/<folder_name>
   defaultMountpoint(hostPath) {
     const cfg = parseEnv(CLIENT_ENV);
     const remoteHost = cfg.REMOTE_HOST || "";
     const hostSlug = sanitizeMountComponent(remoteHost);
-    const shareName = sanitizeMountComponent(path.basename(String(hostPath || "")));
-    return path.join("/Volumes", hostSlug, shareName);
+    const folderName = sanitizeMountComponent(String(hostPath || ""));
+    return path.join("/Volumes", hostSlug, folderName);
   },
 
   // Mappings — actually mount a host folder. `xpair-mount` takes a SUBCOMMAND first, so via the

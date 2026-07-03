@@ -42,6 +42,19 @@ assert_absent "$RP_OUT" "rm -rf $HOME/.xpair/host" "client dry-run does not wipe
 cleanup_sandbox
 
 new_sandbox
+mkdir -p "$HOME/.xpair/client" "$HOME/.xpair/host" "$HOME/.local/bin"
+printf 'REMOTE_HOST=test-host\n' > "$HOME/.xpair/client/client.env"
+printf 'HOST_ONLY=1\n' > "$HOME/.xpair/host/host.env"
+printf 'NOTE\thost remains\t\n' > "$HOME/.xpair/host/.manifest-host"
+printf 'cli\n' > "$HOME/.local/bin/xpair"
+run_client_uninstall
+it "client/keeps-shared-cli-when-host-remains"
+assert_rc "$RP_RC" 0 "client uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$RP_OUT" "Keeping shared CLIs (host install remains)" "client wipe detects remaining host install"
+assert_absent "$RP_OUT" "rm -f $HOME/.local/bin/xpair" "client wipe does not remove shared xpair CLI"
+cleanup_sandbox
+
+new_sandbox
 mkdir -p "$HOME/.xpair/client" "$HOME/.local/bin"
 printf 'client\n' > "$HOME/.xpair/client/role"
 printf 'NOTE\tclient remains\t\n' > "$HOME/.xpair/client/.manifest-client"
@@ -51,6 +64,23 @@ it "host/keeps-shared-cli-when-client-remains"
 assert_rc "$RP_RC" 0 "host uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
 assert_contains "$RP_OUT" "Keeping shared client CLIs" "host wipe detects remaining client install"
 assert_absent "$RP_OUT" "rm -f $HOME/.local/bin/xpair" "host wipe does not remove shared xpair CLI"
+cleanup_sandbox
+
+new_sandbox
+ORIG_HOST_UNINSTALL="$HOST_UNINSTALL"
+mkdir -p "$SBX/standalone/host" "$HOME/.xpair/host"
+cp "$ORIG_HOST_UNINSTALL" "$SBX/standalone/host/uninstall-host.sh"
+HOST_UNINSTALL="$SBX/standalone/host/uninstall-host.sh"
+LEGACY_BOTH_FILE="$HOME/.local/bin/legacy-both-host"
+mkdir -p "$(dirname "$LEGACY_BOTH_FILE")"
+printf 'legacy both\n' > "$LEGACY_BOTH_FILE"
+printf 'FILE\t%s\t\n' "$LEGACY_BOTH_FILE" > "$HOME/.xpair/host/.manifest-both"
+run_host_uninstall -y --dry-run --force
+HOST_UNINSTALL="$ORIG_HOST_UNINSTALL"
+it "host/inline-reverts-legacy-manifest-both"
+assert_rc "$RP_RC" 0 "standalone host uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$RP_OUT" "using inline manifest revert" "standalone host wipe uses inline fallback"
+assert_contains "$RP_OUT" "rm -f $LEGACY_BOTH_FILE" "inline fallback consumes .manifest-both actions"
 cleanup_sandbox
 
 if [ "$(uname)" != Darwin ]; then

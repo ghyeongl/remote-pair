@@ -211,7 +211,7 @@ sanitize_mount_component() {
 }
 default_mountpoint_for_hostpath() {
   local hostpath="$1"
-  printf '/Volumes/%s/%s' "$(sanitize_mount_component "$REMOTE_HOST")" "$(sanitize_mount_component "$(basename "$hostpath")")"
+  printf '/Volumes/%s/%s' "$(sanitize_mount_component "$REMOTE_HOST")" "$(sanitize_mount_component "$hostpath")"
 }
 is_mounted_path() {
   local mp="$1"

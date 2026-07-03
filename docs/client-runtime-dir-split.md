@@ -35,7 +35,7 @@ app; IDE data moved out of the old `client` name.
 | `backups/` | `host/backups`, `client/backups` | Backups are scoped to the installing role. |
 | IDE user-data | `ide/` | Renamed from the old `~/.xpair/client` IDE data dir. |
 | IDE server-data | `ide-server/` | Renamed from `~/.xpair/client-server`. |
-| Mount-method folders | `/Volumes/<device>/<share>` | SMB-only, read-write by default. No `~/.xpair/*/mounts` runtime location. |
+| Mount-method folders | `/Volumes/<device>/<sanitized-host-path>` | SMB-only, read-write by default. No `~/.xpair/*/mounts` runtime location. |
 
 ## `RP_DIR` Semantics
 
@@ -55,25 +55,29 @@ the Swift app continue to use `~/.xpair/host`.
 Mount mode is SMB-only. `xpair-mount` resolves the canonical mountpoint as:
 
 ```
-/Volumes/<sanitized REMOTE_HOST>/<sanitized basename(hostPath)>
+/Volumes/<sanitized REMOTE_HOST>/<sanitized full hostPath>
 ```
 
-The sanitizer strips a leading slash, converts `/` to `_`, and replaces
-characters outside `[A-Za-z0-9._-]` with `_`. For example,
+The local mountpoint folder uses the full sanitized host path, not just the
+basename, so two host paths with the same basename do not collide. The SMB
+share in the mount URL still uses the basename of the shared folder. The
+sanitizer strips a leading slash, converts `/` to `_`, and replaces characters
+outside `[A-Za-z0-9._-]` with `_`. For example,
 `REMOTE_HOST=user@office-mac.local` and host path `/Users/alice/Projects/foo`
 produce:
 
 ```
-/Volumes/user_office-mac.local/foo
+/Volumes/user_office-mac.local/Users_alice_Projects_foo
 ```
 
 Mounts are read-write by default because `mount_smbfs` defaults to read-write;
 Xpair does not add `rdonly`.
 
 Before attach, the client runs an ensure-mounted guard: for mount-method
-`FOLDER_MAPS` entries, it checks whether the canonical `/Volumes/<device>/<share>`
-path is mounted and best-effort runs `xpair-mount mount <hostPath>` if missing.
-Failures warn but do not block attach.
+`FOLDER_MAPS` entries, it checks whether the canonical
+`/Volumes/<device>/<sanitized-host-path>` path is mounted and best-effort runs
+`xpair-mount mount <hostPath>` if missing. Failures warn but do not block
+attach.
 
 ## Migration
 
@@ -90,9 +94,9 @@ Failures warn but do not block attach.
    Any `FOLDER_MAPS` entry whose client path has explicit
    `FOLDER_MAP_MODES=<clientPath>::mount`, or whose client path is under a
    legacy `~/.xpair/{host,client}/mounts/` root, is rewritten to the canonical
-   `/Volumes/<device>/<share>` path. Matching `FOLDER_MAP_MODES` keys are
-   rewritten too. Sync mappings and entries already under `/Volumes/` are left
-   unchanged.
+   `/Volumes/<device>/<sanitized-host-path>` path. Matching `FOLDER_MAP_MODES`
+   keys are rewritten too. Sync mappings and entries already under `/Volumes/`
+   are left unchanged.
 
 If a legacy mountpoint path is still mounted, migration best-effort runs
 `umount` and removes empty leftover directories. Migration never fails the

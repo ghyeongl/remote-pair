@@ -296,6 +296,51 @@ is_mapped() { local d="$1" c pair IFS=';'; for pair in $FOLDER_MAPS; do [ -n "$p
 # Does any mapping use the mount (SMB) method? (the per-mapping trigger for SMB readiness gating)
 has_mount_mapping() { local pair c IFS=';'; for pair in $FOLDER_MAPS; do [ -n "$pair" ] || continue; c="$(map_client_of "$pair")"; [ "$(map_mode_of "$c")" = mount ] && return 0; done; return 1; }
 
+is_mounted_path() {
+  local mp="$1"
+  mp="${mp%/}"
+  mount 2>/dev/null | grep -qF " on ${mp} " || mount 2>/dev/null | grep -qF " on ${mp}("
+}
+
+resolve_xpair_mount_tool() {
+  if [ -x "$LOCAL_BIN/xpair-mount" ]; then
+    printf '%s\n' "$LOCAL_BIN/xpair-mount"
+  elif [ -x "$RP_CLIENT_DIR/bin/xpair-mount" ]; then
+    printf '%s\n' "$RP_CLIENT_DIR/bin/xpair-mount"
+  elif command -v xpair-mount >/dev/null 2>&1; then
+    command -v xpair-mount
+  else
+    return 1
+  fi
+}
+
+ensure_launch_arg_mount_best_effort() {
+  local target="$1" pair client_path host_path tool out IFS=';'
+  case "$target" in /Volumes/*) : ;; *) return 0 ;; esac
+  [ -n "${REMOTE_HOST:-}" ] || return 0
+  [ -n "${FOLDER_MAPS:-}" ] || return 0
+
+  for pair in $FOLDER_MAPS; do
+    [ -n "$pair" ] || continue
+    client_path="$(map_client_of "$pair")"
+    case "$target" in "$client_path"|"$client_path"/*) : ;; *) continue ;; esac
+    [ "$(map_mode_of "$client_path")" = mount ] || continue
+    is_mounted_path "$client_path" && return 0
+    tool="$(resolve_xpair_mount_tool 2>/dev/null)" || {
+      warn "xpair-mount not found; cannot ensure mount-method folder map before launch"
+      return 0
+    }
+    host_path="$(map_host_of "$pair")"
+    if out="$("$tool" --backend smb mount "$host_path" 2>&1)"; then
+      [ -n "$out" ] && printf '%s\n' "$out"
+    else
+      warn "could not mount $host_path at $client_path before launch; continuing"
+      [ -n "$out" ] && printf '%s\n' "$out" >&2
+    fi
+    return 0
+  done
+}
+
 # Best-effort probe of the host's File Sharing (SMB) state over SSH → echoes on|off|unknown.
 # No sudo: reads launchctl's disabled-override db (authoritative for the System Settings toggle),
 # then falls back to the LaunchDaemon plist. Any failure ⇒ unknown (never blocks).
@@ -789,6 +834,7 @@ cmd_launch() {
     else echo "unknown engine: $engine (use claude|claudecode|shell|codex|opencode)" >&2; return 2
     fi
   fi
+  ensure_launch_arg_mount_best_effort "${dir:-$PWD}"
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || { echo "folder not found" >&2; return 1; }
   [ -n "$REMOTE_HOST" ] || { echo "no host configured — set one in Xpair.app or: xpair config set host <ssh-host>" >&2; return 1; }
   local should_probe_remote=0
@@ -1114,6 +1160,25 @@ cmd_approve() {
 # xpair logs [--host] [-f] [-n N] [--collect]
 #   default: tail all local logs (glob $LOG_DIR/*.log).
 #   --host: tail host logs over ssh.  -f: follow.  --collect: tar+gzip $LOG_DIR for bug reports.
+local_host_capable() {
+  [ -f "$RP_HOST_DIR/.manifest-host" ] && return 0
+  [ -f "$RP_HOST_DIR/host.env" ] && return 0
+  if [ -f "$RP_HOST_DIR/role" ]; then
+    case "$(cat "$RP_HOST_DIR/role" 2>/dev/null || true)" in host|both) return 0 ;; esac
+  fi
+  local d
+  for d in /Applications "$HOME/Applications"; do
+    [ -d "$d/$APP_NAME.app" ] && return 0
+    [ -d "$d/$FORWARD_APP.app" ] && return 0
+  done
+  return 1
+}
+
+local_log_dirs() {
+  printf '%s\n' "${RP_CLIENT_DIR}/logs"
+  local_host_capable && printf '%s\n' "${RP_HOST_DIR}/logs"
+}
+
 cmd_logs() {
   local host=0 follow=0 n=200 collect=0
   while [ $# -gt 0 ]; do case "$1" in
@@ -1126,10 +1191,15 @@ cmd_logs() {
 
   # --collect: tar+gzip $LOG_DIR → $LOG_DIR/xpair-logs-<stamp>.tgz and print path
   if [ "$collect" = 1 ]; then
-    local stamp out
+    local stamp out roots=() rel
     stamp="$(date +%Y%m%d-%H%M%S)"
     out="${RP_CLIENT_DIR}/logs/xpair-logs-${stamp}.tgz"
-    tar -czf "$out" -C "$(dirname "${RP_CLIENT_DIR}/logs")" "$(basename "${RP_CLIENT_DIR}/logs")" 2>/dev/null \
+    mkdir -p "${RP_CLIENT_DIR}/logs"
+    while IFS= read -r rel; do
+      [ -d "$rel" ] || continue
+      roots+=("${rel#"$HOME/.xpair/"}")
+    done < <(local_log_dirs)
+    tar -czf "$out" -C "$HOME/.xpair" ${roots[@]+"${roots[@]}"} 2>/dev/null \
       || { warn "collect: tar failed"; return 1; }
     printf '%s\n' "$out"
     return
@@ -1143,14 +1213,21 @@ cmd_logs() {
     return
   fi
 
-  # Local: glob all *.log files in $LOG_DIR (covers cli.log, xpair.log, launchd captures, etc.)
-  local log_dir="${RP_CLIENT_DIR}/logs"
+  # Local: include client logs, plus host logs when this machine has the host role/app.
+  local log_files=() log_dir f label=""
+  while IFS= read -r log_dir; do
+    [ -d "$log_dir" ] || continue
+    for f in "$log_dir"/*.log; do
+      [ -e "$f" ] && log_files+=("$f")
+    done
+    label="${label:+$label, }$log_dir"
+  done < <(local_log_dirs)
   if [ "$follow" = 1 ]; then
-    # shellcheck disable=SC2086
-    exec tail -n "$n" -F "$log_dir"/*.log 2>/dev/null
+    [ "${#log_files[@]}" -gt 0 ] || { echo "(no local logs at ${label:-${RP_CLIENT_DIR}/logs})"; return 0; }
+    exec tail -n "$n" -F "${log_files[@]}" 2>/dev/null
   else
-    # shellcheck disable=SC2086
-    tail -n "$n" "$log_dir"/*.log 2>/dev/null || echo "(no local logs at $log_dir)"
+    [ "${#log_files[@]}" -gt 0 ] || { echo "(no local logs at ${label:-${RP_CLIENT_DIR}/logs})"; return 0; }
+    tail -n "$n" "${log_files[@]}" 2>/dev/null
   fi
 }
 
