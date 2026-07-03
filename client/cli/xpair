@@ -209,6 +209,14 @@ EOF
 # Is there a tty for interactive prompts?
 have_tty() { [ -t 0 ] || [ -e /dev/tty ]; }
 
+client_role_marker() {
+  if [ -f "$RP_CLIENT_DIR/role" ]; then
+    cat "$RP_CLIENT_DIR/role" 2>/dev/null || true
+  elif [ -f "$RP_HOST_DIR/role" ]; then
+    cat "$RP_HOST_DIR/role" 2>/dev/null || true
+  fi
+}
+
 # Upsert KEY in client.env (persists mappings/config)
 rp_set() {
   local k="$1" v="$2" f="$CLIENT_ENV"
@@ -753,9 +761,9 @@ cmd_onboard() {
 
   local ans=""
 
-  # Detect client role marker: ~/.xpair/client/role — host|client|both (absent = host default, mirrors Installer.swift logic)
+  # Detect client role marker: split marker first, then legacy host-side marker from pre-split clients.
   local _rp_role=""
-  [ -f "$RP_CLIENT_DIR/role" ] && _rp_role="$(cat "$RP_CLIENT_DIR/role" 2>/dev/null || true)"
+  _rp_role="$(client_role_marker)"
   local _is_client=0 _is_host=0
   case "$_rp_role" in
     client) _is_client=1 ;;

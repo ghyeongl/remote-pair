@@ -6,7 +6,7 @@
 //   2) with consent OFF (default), capture()/sentryCapture() perform ZERO https.request.
 //
 // HOME is redirected to a throwaway dir BEFORE telemetry.js loads so the test never touches the
-// real ~/.xpair/client/client.env (module computes RP_CLIENT_DIR/CLIENT_ENV at load time).
+// real ~/.xpair/client/telemetry.env (module computes RP_CLIENT_DIR/TELEMETRY_ENV at load time).
 
 const assert = require("node:assert");
 const fs = require("node:fs");
@@ -15,17 +15,18 @@ const path = require("node:path");
 const https = require("node:https");
 const http = require("node:http");
 
-// --- isolate HOME so we own client.env --------------------------------------
+// --- isolate HOME so we own telemetry.env -----------------------------------
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "rp-telemetry-test-"));
 process.env.HOME = TMP_HOME;
 process.env.USERPROFILE = TMP_HOME; // win parity (harmless on posix)
 const RP_DIR = path.join(TMP_HOME, ".xpair/client");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
+const TELEMETRY_ENV = path.join(RP_DIR, "telemetry.env");
 fs.mkdirSync(RP_DIR, { recursive: true });
 
 function writeEnv(obj) {
   fs.writeFileSync(
-    CLIENT_ENV,
+    TELEMETRY_ENV,
     Object.entries(obj)
       .map(([k, v]) => `${k}="${v}"`)
       .join("\n") + "\n",
@@ -192,6 +193,21 @@ check("firstRunStamp is idempotent and consent-independent", () => {
   assert.ok(ts1 > 0, "firstRunStamp should produce a positive epoch");
   const ts2 = t.firstRunStamp();
   assert.strictEqual(ts1, ts2, "second firstRunStamp must not overwrite the base");
+  assert.ok(fs.existsSync(TELEMETRY_ENV), "firstRunStamp should create telemetry.env");
+  assert.ok(!fs.existsSync(CLIENT_ENV), "firstRunStamp must not create client.env");
+});
+
+check("setConsent persists telemetry flags without creating client.env", () => {
+  try {
+    fs.rmSync(TELEMETRY_ENV, { force: true });
+    fs.rmSync(CLIENT_ENV, { force: true });
+  } catch (_e) {}
+  const consent = t.setConsent(true, false);
+  assert.deepStrictEqual(consent, { telemetry: true, crashReport: false });
+  const raw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(raw.includes('TELEMETRY_CONSENT="true"'), "telemetry consent should land in telemetry.env");
+  assert.ok(raw.includes('CRASH_REPORT_CONSENT="false"'), "crash consent should land in telemetry.env");
+  assert.ok(!fs.existsSync(CLIENT_ENV), "setConsent must not create client.env");
 });
 
 // --- teardown ---------------------------------------------------------------

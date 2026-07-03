@@ -50,6 +50,60 @@ else
   unset XPAIR_PRESERVE_SHARED_CLI
 fi
 
+manifest_role_for_path() {
+  local m="$1" b
+  b="$(basename "$m")"
+  case "$b" in
+    .manifest-client) printf 'client'; return ;;
+    .manifest-host|.install-manifest) printf 'host'; return ;;
+  esac
+  case "$m" in
+    "$RP_CLIENT_DIR"/*) printf 'client' ;;
+    *) printf 'host' ;;
+  esac
+}
+
+source_common_for_role() {
+  local r="$1" f=""
+  LOCAL_BIN="$HOME/.local/bin"
+  AQUA_SOCK="/tmp/aqua-tmux.sock"
+  case "$r" in
+    host) f="$HOST_COMMON_ENV" ;;
+    client) f="$CLIENT_COMMON_ENV" ;;
+  esac
+  # shellcheck disable=SC1090
+  [ -n "$f" ] && [ -f "$f" ] && { set -a; . "$f"; set +a; }
+  return 0
+}
+
+selected_local_bins() {
+  local roles="" r f lb seen=""
+  case "$ROLE" in
+    host) roles="host" ;;
+    client) roles="client" ;;
+    both|all) roles="host client" ;;
+  esac
+  for r in $roles; do
+    case "$r" in
+      host) f="$HOST_COMMON_ENV" ;;
+      client) f="$CLIENT_COMMON_ENV" ;;
+    esac
+    lb="$HOME/.local/bin"
+    if [ -f "$f" ]; then
+      lb="$( ( LOCAL_BIN="$HOME/.local/bin"; set -a; . "$f" >/dev/null 2>&1 || true; set +a; printf '%s' "$LOCAL_BIN" ) )"
+    fi
+    case "
+$seen
+" in
+      *"
+$lb
+"*) : ;;
+      *) seen="${seen}${lb}
+"; printf '%s\n' "$lb" ;;
+    esac
+  done
+}
+
 # Collect selected role manifest(s). all = every manifest across both runtime dirs.
 shopt -s nullglob 2>/dev/null || true
 case "$ROLE" in
@@ -74,6 +128,7 @@ for m in "${mans[@]}"; do
   [ -f "$m" ] || continue
   found=1
   say "Removing: $(basename "$m") (reverse-order revert)"
+  source_common_for_role "$(manifest_role_for_path "$m")"
   MANIFEST="$m"; manifest_revert
   rm -f "$m"
 done
@@ -83,15 +138,20 @@ if [ -n "${XPAIR_PRESERVE_SHARED_CLI:-}" ]; then
   say "Keeping shared CLIs (other role remains)"
 else
   say "Removing shared CLIs"
-  for p in \
-    "$LOCAL_BIN/xpair" \
-    "$LOCAL_BIN/xpair-askpass" \
-    "$LOCAL_BIN/xpair-desktop" \
-    "$LOCAL_BIN/xpair-editor" \
-    "$LOCAL_BIN/xpair-mount" \
-    "$LOCAL_BIN/xpair-launch"; do
-    [ -e "$p" ] && rm -f "$p" && echo "  rm   $p"
-  done
+  while IFS= read -r lb; do
+    [ -n "$lb" ] || continue
+    for p in \
+      "$lb/xpair" \
+      "$lb/xpair-askpass" \
+      "$lb/xpair-desktop" \
+      "$lb/xpair-editor" \
+      "$lb/xpair-mount" \
+      "$lb/xpair-launch"; do
+      [ -e "$p" ] && rm -f "$p" && echo "  rm   $p"
+    done
+  done <<EOF
+$(selected_local_bins)
+EOF
 fi
 
 if [ "$PURGE" = 1 ]; then

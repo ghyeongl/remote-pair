@@ -2205,7 +2205,7 @@ const bridge = {
     if ("reason" in p) p.reason = telemetry.normalizeReason(p.reason);
     if ("path" in p) p.path = telemetry.normalizePath(p.path);
     // host_connected cardinality = ONCE PER INSTALL (Insight A/B count installs, not IDE
-    // restarts). The same shared client.env stamp is honored by extension.js probeHost(), so a
+    // restarts). The same shared telemetry.env stamp is honored by extension.js probeHost(), so a
     // host_connected fires at most once whether the webview or the extension observes it first.
     if (event === telemetry.EVENTS.HOST_CONNECTED && !telemetry.claimHostConnectedOnce()) {
       return { ok: true }; // already counted this install — drop the duplicate.

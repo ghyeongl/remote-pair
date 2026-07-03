@@ -196,6 +196,25 @@ cleanup_sandbox
 
 new_sandbox
 make_client_mocks
+mkdir -p "$RP_HOST_DIR" "$RP_CLIENT_DIR"
+rm -f "$RP_HOST_DIR/host.env"
+printf 'client\n' > "$RP_CLIENT_DIR/role"
+printf 'REMOTE_HOST=client-host\n' > "$RP_CLIENT_DIR/client.env"
+printf 'NOTE\tclient existing\t\n' > "$RP_CLIENT_DIR/.manifest-client"
+run_install --role host --no-native --no-sync
+
+it "host-install/existing-client-runtime-stays-host-manifest"
+assert_rc "$RP_RC" 0 "host install over existing client runtime rc=0 :: stderr=[$RP_ERR]"
+assert_eq "$(cat "$RP_HOST_DIR/role" 2>/dev/null)" "both" "host role marker records co-located both role"
+assert_eq "$(cat "$RP_CLIENT_DIR/role" 2>/dev/null)" "client" "host install does not rewrite client role marker"
+HOST_MAN_TXT="$(cat "$RP_HOST_DIR/.manifest-host" 2>/dev/null)"
+CLIENT_MAN_TXT="$(cat "$RP_CLIENT_DIR/.manifest-client" 2>/dev/null)"
+assert_contains "$HOST_MAN_TXT" "FILE	$RP_HOST_DIR/host.env" "host env recorded in host manifest"
+assert_absent "$CLIENT_MAN_TXT" "$RP_HOST_DIR/host.env" "host install does not record host env in client manifest"
+cleanup_sandbox
+
+new_sandbox
+make_client_mocks
 mkdir -p "$RP_HOST_DIR" "$RP_CLIENT_DIR" "$SBX/host-bin" "$SBX/client-bin"
 printf 'LOCAL_BIN=%q\nAQUA_SOCK=/tmp/host-aqua.sock\n' "$SBX/host-bin" > "$RP_HOST_DIR/common.env"
 printf 'LOCAL_BIN=%q\nAQUA_SOCK=/tmp/client-aqua.sock\n' "$SBX/client-bin" > "$RP_CLIENT_DIR/common.env"
@@ -207,6 +226,44 @@ assert_rc "$RP_RC" 0 "host install rc=0 :: stderr=[$RP_ERR]"
   || _fail "host install did not use host LOCAL_BIN"
 [ ! -e "$SBX/client-bin/xpair" ] && _pass "host install did not inherit client LOCAL_BIN" \
   || _fail "host install incorrectly used client LOCAL_BIN"
+cleanup_sandbox
+
+it "install/migration-before-remote-host-prompt"
+INSTALL_TXT="$(cat "$INSTALL_SRC")"
+MIGRATE_LINE="$(printf '%s\n' "$INSTALL_TXT" | grep -n '^migrate_layout || warn "layout migration skipped some steps; continuing"$' | head -1 | cut -d: -f1)"
+PROMPT_LINE="$(printf '%s\n' "$INSTALL_TXT" | grep -n 'read -r -p "Remote host' | head -1 | cut -d: -f1)"
+if [ -n "$MIGRATE_LINE" ] && [ -n "$PROMPT_LINE" ] && [ "$MIGRATE_LINE" -lt "$PROMPT_LINE" ]; then
+  _pass "migrate_layout runs before interactive REMOTE_HOST prompt"
+else
+  _fail "migrate_layout must run before interactive REMOTE_HOST prompt (migrate=$MIGRATE_LINE prompt=$PROMPT_LINE)"
+fi
+
+new_sandbox
+mkdir -p "$RP_HOST_DIR"
+printf 'client\n' > "$RP_HOST_DIR/role"
+XPAIR_DEFS="$SBX/xpair-defs.sh"
+sed '/^case "${1:-help}"/,$d' "$_REPO_ROOT/client/cli/xpair" > "$XPAIR_DEFS"
+# shellcheck disable=SC1090
+. "$XPAIR_DEFS"
+
+it "client-cli/legacy-host-role-fallback"
+assert_eq "$(client_role_marker)" "client" "client CLI falls back to legacy host role marker"
+cleanup_sandbox
+
+new_sandbox
+mkdir -p "$RP_HOST_DIR" "$RP_CLIENT_DIR" "$SBX/host-bin" "$SBX/client-bin"
+printf 'LOCAL_BIN=%q\n' "$SBX/host-bin" > "$RP_HOST_DIR/common.env"
+printf 'LOCAL_BIN=%q\n' "$SBX/client-bin" > "$RP_CLIENT_DIR/common.env"
+printf 'host cli\n' > "$SBX/host-bin/xpair"; chmod +x "$SBX/host-bin/xpair"
+printf 'client cli\n' > "$SBX/client-bin/xpair"; chmod +x "$SBX/client-bin/xpair"
+printf 'NOTE\thost\t\n' > "$RP_HOST_DIR/.manifest-host"
+printf 'NOTE\tclient\t\n' > "$RP_CLIENT_DIR/.manifest-client"
+run_uninstall --role all
+
+it "uninstall-all/removes-each-role-local-bin"
+assert_rc "$RP_RC" 0 "uninstall --role all with different role LOCAL_BIN rc=0 :: stderr=[$RP_ERR]"
+[ -e "$SBX/host-bin/xpair" ] && _fail "host LOCAL_BIN xpair remaining" || _pass "host LOCAL_BIN xpair removed"
+[ -e "$SBX/client-bin/xpair" ] && _fail "client LOCAL_BIN xpair remaining" || _pass "client LOCAL_BIN xpair removed"
 cleanup_sandbox
 
 # ────────────────────────────────────────────────────────────────────────────

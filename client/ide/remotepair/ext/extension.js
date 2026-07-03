@@ -2022,7 +2022,7 @@ function activate(context) {
     renderHostButton();
     // Edge-trigger telemetry: only on a change to/from reachable (prev !== current).
     // host_connected cardinality = ONCE PER INSTALL (Insight A/B count installs, not IDE
-    // restarts): claimHostConnectedOnce() is a shared client.env stamp honored by BOTH this
+    // restarts): claimHostConnectedOnce() is a shared telemetry.env stamp honored by BOTH this
     // probe and the webview check() emitter, so only the first observed reachability across the
     // whole install emits. host_connect_failed stays edge-triggered (per-failure is intended).
     if (ok && prev !== true) {

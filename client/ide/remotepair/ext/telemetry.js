@@ -27,8 +27,10 @@ const { URL } = require("url");
 
 const RP_CLIENT_DIR = path.join(os.homedir(), ".xpair/client");
 const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
+const LEGACY_CLIENT_ENV = path.join(os.homedir(), ".xpair/host/client.env");
+const TELEMETRY_ENV = path.join(RP_CLIENT_DIR, "telemetry.env");
 
-// client.env keys (FROZEN — see spec "Telemetry Setup").
+// telemetry.env keys (FROZEN — see spec "Telemetry Setup").
 const K_ANON_ID = "TELEMETRY_ANON_ID"; // distinct_id = install_id (UUID v4, disk-persisted)
 const K_TELEMETRY_CONSENT = "TELEMETRY_CONSENT"; // gates PostHog
 const K_CRASH_CONSENT = "CRASH_REPORT_CONSENT"; // gates Sentry
@@ -43,7 +45,7 @@ const K_SENTRY_DSN = "SENTRY_DSN"; // Sentry DSN; absent => Sentry no-op
 // observes reachability.
 const K_HOST_CONNECTED_STAMP = "TELEMETRY_HOST_CONNECTED_AT"; // epoch ms of first host_connected
 
-// Cloud EU default (endpoint-agnostic: swappable to self-host via POSTHOG_HOST in client.env).
+// Cloud EU default (endpoint-agnostic: swappable to self-host via POSTHOG_HOST in telemetry.env).
 const DEFAULT_POSTHOG_HOST = "https://eu.i.posthog.com";
 const CAPTURE_PATH = "/capture/";
 
@@ -101,12 +103,12 @@ const PATH_SET = new Set(Object.values(PATHS));
 
 // --- env file I/O ----------------------------------------------------------
 
-/** Parse client.env (KEY=VALUE, optional quotes) into a flat object. Never throws. */
-function readEnv() {
+/** Parse KEY=VALUE env files into a flat object. Never throws. */
+function readEnvFile(file) {
   const env = {};
   let raw;
   try {
-    raw = fs.readFileSync(CLIENT_ENV, "utf8");
+    raw = fs.readFileSync(file, "utf8");
   } catch (_e) {
     return env;
   }
@@ -128,11 +130,16 @@ function readEnv() {
   return env;
 }
 
-/** Upsert KEY="value" in client.env (creates the file/dir if missing). Never throws. */
+/** Parse telemetry.env (KEY=VALUE, optional quotes) into a flat object. Never throws. */
+function readEnv() {
+  return readEnvFile(TELEMETRY_ENV);
+}
+
+/** Upsert KEY="value" in telemetry.env (creates the file/dir if missing). Never throws. */
 function upsertEnv(key, val) {
   let lines = [];
   try {
-    lines = fs.readFileSync(CLIENT_ENV, "utf8").split("\n");
+    lines = fs.readFileSync(TELEMETRY_ENV, "utf8").split("\n");
   } catch (_e) {
     /* file may not exist yet */
   }
@@ -148,7 +155,10 @@ function upsertEnv(key, val) {
   if (!found) lines.push(`${key}="${val}"`);
   try {
     fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(CLIENT_ENV, lines.join("\n").replace(/\n+$/, "\n"));
+    try {
+      fs.chmodSync(RP_CLIENT_DIR, 0o700);
+    } catch (_e) {}
+    fs.writeFileSync(TELEMETRY_ENV, lines.join("\n").replace(/\n+$/, "\n"));
   } catch (_e) {
     /* best effort */
   }
@@ -163,7 +173,8 @@ function defaultRedact(msg) {
   try {
     const home = os.homedir();
     if (home && home.length > 1) s = s.split(home).join("~");
-    const host = (readEnv().REMOTE_HOST || "").trim();
+    const clientEnvFile = fs.existsSync(CLIENT_ENV) ? CLIENT_ENV : LEGACY_CLIENT_ENV;
+    const host = (readEnvFile(clientEnvFile).REMOTE_HOST || "").trim();
     if (host && host.length > 1) s = s.split(host).join("<host>");
   } catch (_e) {
     /* fall through with whatever masking succeeded */

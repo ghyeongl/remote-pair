@@ -15,12 +15,12 @@ process.env.USERPROFILE = tmpHome;
 delete process.env.RP_POSTHOG_KEY;
 
 const rpDir = path.join(tmpHome, ".xpair/client");
-const clientEnv = path.join(rpDir, "client.env");
+const telemetryEnv = path.join(rpDir, "telemetry.env");
 fs.mkdirSync(rpDir, { recursive: true });
 
 function writeEnv(obj) {
   fs.writeFileSync(
-    clientEnv,
+    telemetryEnv,
     Object.entries(obj)
       .map(([key, value]) => `${key}="${value}"`)
       .join("\n") + "\n",

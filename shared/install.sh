@@ -164,15 +164,15 @@ EOF
   RP_REPO_ROOT="${RP_REPO_ROOT:-$REPO_ROOT}"
 }
 
+migrate_layout || warn "layout migration skipped some steps; continuing"
+reload_runtime_env_after_migration
+
 # ── 0. Input ──
 say "Xpair install — role=$ROLE, sync=$([ "$DO_SYNC" = 1 ] && echo on || echo off) (bundle=$BUNDLE_PREFIX, app=$APP_NAME)"
 if is_client && [ -z "${REMOTE_HOST:-}" ] && [ -t 0 ] && [ "${RP_YES:-0}" != 1 ]; then
   read -r -p "Remote host (mosh/ssh target; leave blank for local-only): " REMOTE_HOST || true
 fi
 [ -n "${REMOTE_HOST:-}" ] && say "Remote host = $REMOTE_HOST" || say "REMOTE_HOST not set (local-only mode)"
-
-migrate_layout || warn "layout migration skipped some steps; continuing"
-reload_runtime_env_after_migration
 
 # ── Revert existing install before re-installing (idempotent) ──
 # notify.conf is a config file that may hold user edits (ENABLED_TYPES). Since we recorded it as
