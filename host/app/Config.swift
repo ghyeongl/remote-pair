@@ -11,6 +11,7 @@ let RP_DIR = "\(HOME)/.xpair/host"
 let CLIENT_DIR = "\(HOME)/.xpair/client"
 let LOG_DIR = "\(RP_DIR)/logs"
 let ROLE_FILE = "\(RP_DIR)/role"            // host|client|both — written by install.sh. Used to block host self-install on a client.
+let CLIENT_ROLE_FILE = "\(CLIENT_DIR)/role"
 let CLIENT_ENV_FILE = "\(CLIENT_DIR)/client.env" // present = client installed on this machine
 let LEGACY_CLIENT_ENV_FILE = "\(RP_DIR)/client.env" // pre-split client runtime location
 let RD_SESSION_TOKEN_FILE = "\(RP_DIR)/rd-session-token" // 0600 token read by the authenticated SSH client before RD signaling.
@@ -49,6 +50,24 @@ func clientEnvFileExists() -> Bool {
 func readClientEnvFile() -> String? {
     if let raw = try? String(contentsOfFile: CLIENT_ENV_FILE, encoding: .utf8) { return raw }
     return try? String(contentsOfFile: LEGACY_CLIENT_ENV_FILE, encoding: .utf8)
+}
+
+func roleFileContainsClient(_ file: String) -> Bool {
+    guard let raw = try? String(contentsOfFile: file, encoding: .utf8) else { return false }
+    let role = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return role == "client" || role == "both"
+}
+
+func clientEnvHasRemoteHost() -> Bool {
+    guard let raw = readClientEnvFile() else { return false }
+    for line in raw.split(separator: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("REMOTE_HOST=") {
+            let v = String(t.dropFirst("REMOTE_HOST=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+            return !v.isEmpty
+        }
+    }
+    return false
 }
 
 let HELPERS = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers").path

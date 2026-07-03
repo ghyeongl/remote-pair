@@ -28,6 +28,11 @@ it "logs/collect-includes-host-and-client"
 assert_rc "$RP_RC" 0 "xpair logs --collect rc=0 :: stderr=[$RP_ERR]"
 assert_contains "$CONTENTS" "client/logs/client.log" "collect archive includes client logs"
 assert_contains "$CONTENTS" "host/logs/host.log" "collect archive includes host logs on host-capable machine"
+case "$BUNDLE" in
+  "$RP_CLIENT_DIR/logs"/*) _fail "archive written inside collected client log dir: $BUNDLE" ;;
+  *) _pass "archive path is outside collected client log dir: $BUNDLE" ;;
+esac
+assert_absent "$CONTENTS" "xpair-logs-" "collect archive does not include itself"
 cleanup_sandbox
 
 finish

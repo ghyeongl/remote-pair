@@ -1261,17 +1261,18 @@ cmd_logs() {
     *)           shift ;;
   esac; done
 
-  # --collect: tar+gzip $LOG_DIR → $LOG_DIR/xpair-logs-<stamp>.tgz and print path
+  # --collect: tar+gzip local xpair logs to a temp path outside the collected dirs and print it.
   if [ "$collect" = 1 ]; then
-    local stamp out roots=() rel
+    local stamp out roots=() rel tmp_parent
     stamp="$(date +%Y%m%d-%H%M%S)"
-    out="${RP_CLIENT_DIR}/logs/xpair-logs-${stamp}.tgz"
-    mkdir -p "${RP_CLIENT_DIR}/logs"
+    tmp_parent="$(mktemp -d "${TMPDIR:-/tmp}/xpair-logs-${stamp}.XXXXXX")" \
+      || { warn "collect: mktemp failed"; return 1; }
+    out="$tmp_parent/xpair-logs-${stamp}.tgz"
     while IFS= read -r rel; do
       [ -d "$rel" ] || continue
       roots+=("${rel#"$HOME/.xpair/"}")
     done < <(local_log_dirs)
-    tar -czf "$out" -C "$HOME/.xpair" ${roots[@]+"${roots[@]}"} 2>/dev/null \
+    tar -czf "$out" -C "$HOME/.xpair" "${roots[@]}" 2>/dev/null \
       || { warn "collect: tar failed"; return 1; }
     printf '%s\n' "$out"
     return

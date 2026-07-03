@@ -24,7 +24,6 @@ const RP_CLIENT_DIR = path.join(HOME, ".xpair/client");
 const RP_HOST_DIR = path.join(HOME, ".xpair/host");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
 const LEGACY_CLIENT_ENV = path.join(RP_HOST_DIR, "client.env");
-const CLIENT_ENV = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV;
 const SSH_KEY = path.join(HOME, ".ssh", "id_ed25519");
 // Dedicated xpair pairing key — used ONLY for pairing (request signature), the SSH proof, and the
 // paired runtime (launch/heartbeat/RD). Kept OUTSIDE ~/.ssh so it never collides with the user's
@@ -85,6 +84,15 @@ function rpBinAbs() {
   const local = path.join(HOME, ".local", "bin", "xpair");
   try { if (fs.existsSync(local)) return local; } catch { /* ignore */ }
   return null;
+}
+
+function clientEnvPath() {
+  try {
+    if (fs.existsSync(CLIENT_ENV_FILE)) return CLIENT_ENV_FILE;
+  } catch {
+    /* fall back to the legacy path */
+  }
+  return LEGACY_CLIENT_ENV;
 }
 
 /** Client version SSOT — the same 0.5.0a{N} lockstep stamp the webview build embeds (read from the
@@ -1035,7 +1043,7 @@ function currentGatewayMac() {
 }
 
 function gatewayMacStatus({ updateBaseline = false } = {}) {
-  const stored = parseEnv(CLIENT_ENV).GATEWAY_MAC || "";
+  const stored = parseEnv(clientEnvPath()).GATEWAY_MAC || "";
   if (process.platform !== "darwin") {
     return { allowed: true, state: "unsupported-platform", current: "", stored, err: "" };
   }
@@ -1200,7 +1208,7 @@ function parseEnv(file) {
 function upsertEnv(key, val) {
   let lines = [];
   try {
-    lines = fs.readFileSync(CLIENT_ENV, "utf8").split("\n");
+    lines = fs.readFileSync(clientEnvPath(), "utf8").split("\n");
   } catch {
     /* file may not exist yet */
   }
@@ -1216,7 +1224,7 @@ function upsertEnv(key, val) {
   if (!found) lines.push(`${key}="${val}"`);
   try {
     fs.mkdirSync(RP_CLIENT_DIR, { recursive: true });
-    fs.writeFileSync(CLIENT_ENV, lines.join("\n").replace(/\n+$/, "\n"));
+    fs.writeFileSync(CLIENT_ENV_FILE, lines.join("\n").replace(/\n+$/, "\n"));
   } catch {
     /* best effort */
   }
@@ -1304,7 +1312,7 @@ const bridge = {
   // while parseEnv reads it literally — so a local re-parse split on ';' diverges from the CLI
   // and the UI shows zero/garbled mappings. Re-derive a clean `client::host;...` from the CLI.
   async getConfig() {
-    const e = parseEnv(CLIENT_ENV);
+    const e = parseEnv(clientEnvPath());
     let folderMaps = e.FOLDER_MAPS || "";
     // Per-mapping method comes from the CLI SSOT (FOLDER_MAP_MODES via `map list --json`). Carry it
     // alongside folderMaps as `clientPath::method;…` so the UI uses the STORED method instead of the
@@ -1410,7 +1418,7 @@ const bridge = {
   // engine-specific (each engine stores creds differently); see ENGINE_PROBE below. Returns
   // {installed, authed, version, err}.
   async hostEnvEngine(hostArg) {
-    const host = String(hostArg || parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(hostArg || parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { engine: "", err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { engine: "", err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1429,7 +1437,7 @@ const bridge = {
 
   async hostEngineStatus(engine) {
     const e = String(engine || "").trim();
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { installed: false, authed: false, version: "", err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return {
@@ -1479,7 +1487,7 @@ const bridge = {
   // "ran", not "binary is launch-able"). Mirrored in host/app/EngineGuard.swift.
   async installHostEngine(engine) {
     const e = String(engine || "");
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1504,7 +1512,7 @@ const bridge = {
   // key is dropped here right after. Returns {ok, err}.
   async setHostEngineAuth(engine, apiKey) {
     const e = String(engine || "");
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1534,7 +1542,7 @@ const bridge = {
   // Uses `test -e` which returns 0 if the path exists (file, dir, or symlink).
   async hostPathExists(p) {
     if (!p) return { exists: false, err: "no path" };
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { exists: false, err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { exists: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1574,7 +1582,7 @@ const bridge = {
   // /Volumes/<share> or a suffixed variant; when the share is already mounted,
   // discover the real path from mount(8), otherwise return the first expected path.
   defaultMountpoint(hostPath) {
-    const cfg = parseEnv(CLIENT_ENV);
+    const cfg = parseEnv(clientEnvPath());
     const remoteHost = cfg.REMOTE_HOST || "";
     const smbHost = String(remoteHost).includes("@") ? String(remoteHost).split("@").pop() : String(remoteHost);
     const shareName = path.posix.basename(String(hostPath || ""));

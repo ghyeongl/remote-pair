@@ -85,6 +85,8 @@ INSTALLER_SWIFT="$(cat "$_REPO_ROOT/host/app/Installer.swift")"
 it "config/legacy-client-env-fallback"
 assert_contains "$CONFIG_SWIFT" 'let LEGACY_CLIENT_ENV_FILE = "\(RP_DIR)/client.env"' "Config defines legacy pre-split client.env path"
 assert_contains "$CONFIG_SWIFT" 'func clientEnvFileExists() -> Bool' "Config exposes split+legacy client env existence helper"
-assert_contains "$INSTALLER_SWIFT" 'clientEnvFileExists() && !fm.fileExists(atPath: HOST_ENV)' "self-install guard checks split+legacy client.env"
+assert_contains "$CONFIG_SWIFT" 'func clientEnvHasRemoteHost() -> Bool' "Config exposes real client.env signal helper"
+assert_contains "$INSTALLER_SWIFT" 'clientEnvHasRemoteHost() && !fm.fileExists(atPath: HOST_ENV)' "self-install guard checks REMOTE_HOST instead of bare client.env existence"
+assert_contains "$INSTALLER_SWIFT" 'roleFileContainsClient(ROLE_FILE) || roleFileContainsClient(CLIENT_ROLE_FILE)' "self-install guard checks host/client role markers"
 
 finish

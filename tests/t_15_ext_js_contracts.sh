@@ -35,6 +35,35 @@ it "ext-js/suite-discovered"
 BRIDGE_JS="$(cat "$EXT_DIR/onboarding-bridge.js")"
 it "ext-js/onboarding-bridge-legacy-client-env"
 assert_contains "$BRIDGE_JS" 'const LEGACY_CLIENT_ENV = path.join(RP_HOST_DIR, "client.env")' "bridge defines legacy client.env fallback path"
-assert_contains "$BRIDGE_JS" 'const CLIENT_ENV = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV' "bridge prefers split client.env and falls back to legacy host/client.env"
+assert_contains "$BRIDGE_JS" 'function clientEnvPath()' "bridge resolves client.env through a function"
+assert_absent "$BRIDGE_JS" 'const CLIENT_ENV = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV' "bridge does not cache client.env at module load"
+
+new_sandbox
+rm -f "$RP_CLIENT_DIR/client.env"
+printf 'REMOTE_HOST=legacy-host\n' > "$RP_HOST_DIR/client.env"
+BRIDGE_PATH="$EXT_DIR/onboarding-bridge.js" HOME="$HOME" node <<'NODE'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const bridge = require(process.env.BRIDGE_PATH);
+
+(async () => {
+  const first = await bridge.getConfig();
+  assert.equal(first.remoteHost, "legacy-host");
+  const clientDir = path.join(os.homedir(), ".xpair/client");
+  fs.mkdirSync(clientDir, { recursive: true });
+  fs.writeFileSync(path.join(clientDir, "client.env"), "REMOTE_HOST=new-host\n");
+  const second = await bridge.getConfig();
+  assert.equal(second.remoteHost, "new-host");
+})().catch((err) => {
+  console.error(err && err.stack ? err.stack : err);
+  process.exit(1);
+});
+NODE
+RC=$?
+it "ext-js/onboarding-bridge-rereads-client-env"
+assert_rc "$RC" 0 "bridge sees split client.env created after module load"
+cleanup_sandbox
 
 finish

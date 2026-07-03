@@ -84,9 +84,15 @@ assert_contains "$RP_OUT" "rmdir $HOME/.xpair/host" "client-only wipe cleans hos
 cleanup_sandbox
 
 new_sandbox
-mkdir -p "$HOME/.xpair/client" "$HOME/.local/bin"
+mkdir -p "$HOME/.xpair/client" "$HOME/.xpair/host/bin" "$HOME/.xpair/host/logs" "$HOME/.local/bin"
 printf 'client\n' > "$HOME/.xpair/client/role"
 printf 'NOTE\tclient remains\t\n' > "$HOME/.xpair/client/.manifest-client"
+printf 'both\n' > "$HOME/.xpair/host/role"
+printf 'HOST_ONLY=1\n' > "$HOME/.xpair/host/host.env"
+printf 'LOCAL_BIN=%q\n' "$HOME/.local/bin" > "$HOME/.xpair/host/common.env"
+printf 'key\n' > "$HOME/.xpair/host/pairing_ed25519"
+printf 'host bin\n' > "$HOME/.xpair/host/bin/xpair-host-helper"
+printf 'host log\n' > "$HOME/.xpair/host/logs/xpair.log"
 printf 'cli\n' > "$HOME/.local/bin/xpair"
 run_host_uninstall -y --dry-run --force
 it "host/keeps-shared-cli-when-client-remains"
@@ -94,6 +100,17 @@ assert_rc "$RP_RC" 0 "host uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
 assert_contains "$RP_OUT" "Keeping shared client CLIs" "host wipe detects remaining client install"
 assert_absent "$RP_OUT" "rm -f $HOME/.local/bin/xpair" "host wipe does not remove shared xpair CLI"
 assert_contains "$RP_OUT" "pkill -f RemotePairHost" "host wipe stops legacy RemotePairHost process"
+it "host/preserves-client-shared-host-state"
+if printf '%s\n' "$RP_OUT" | grep -Fx "DRY: rm -rf $HOME/.xpair/host" >/dev/null 2>&1; then
+  _fail "host wipe should not remove entire host dir when client remains"
+else
+  _pass "host wipe does not remove entire host dir when client remains"
+fi
+assert_absent "$RP_OUT" "rm -f $HOME/.xpair/host/pairing_ed25519" "host wipe preserves client pairing key"
+assert_absent "$RP_OUT" "rm -f $HOME/.xpair/host/common.env" "host wipe preserves shared common.env"
+assert_contains "$RP_OUT" "rm -rf $HOME/.xpair/host/bin" "host wipe removes host bin"
+assert_contains "$RP_OUT" "$HOME/.xpair/host/logs" "host wipe removes host logs"
+assert_contains "$RP_OUT" "set $HOME/.xpair/host/role to client" "host role marker is downgraded for remaining client"
 cleanup_sandbox
 
 new_sandbox

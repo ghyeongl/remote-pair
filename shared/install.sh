@@ -53,6 +53,11 @@ use_host_role_manifest() { if is_host; then use_host_manifest; else use_client_m
 install_unrecorded_file() {
   local src="$1" dst="$2" mode="${3:-}"
   mkdir -p "$(dirname "$dst")"
+  if [ -e "$dst" ]; then
+    mkdir -p "$BACKUP_DIR"
+    local bak="$BACKUP_DIR/$(echo "$dst" | sed 's#/#_#g').bak"
+    cp -p "$dst" "$bak"
+  fi
   cp "$src" "$dst"
   if [ -n "$mode" ]; then chmod "$mode" "$dst"; fi
 }

@@ -48,7 +48,8 @@ test("Q0380/Q0400 Show Logs reveals logs and collects a readable diagnostic bund
   assert.match(showLogs, /createTerminal\("Xpair . Collect Logs"\)/);
   assert.match(showLogs, /sendText\("xpair logs --collect", true\)/);
 
-  assert.match(cli, /out="\$\{RP_CLIENT_DIR\}\/logs\/xpair-logs-\$\{stamp\}\.tgz"/);
+  assert.match(cli, /mktemp -d "\$\{TMPDIR:-\/tmp\}\/xpair-logs-\$\{stamp\}\.XXXXXX"/);
+  assert.match(cli, /out="\$tmp_parent\/xpair-logs-\$\{stamp\}\.tgz"/);
   assert.match(cli, /local_log_dirs\(\)/);
   assert.match(cli, /tar -czf "\$out"/);
   assert.match(cli, /printf '%s\\n' "\$out"/, "collect must print the generated bundle path");

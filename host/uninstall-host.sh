@@ -65,6 +65,53 @@ confirm() {
   esac
 }
 
+client_install_remains() {
+  [ -f "$HOME/.xpair/client/.manifest-client" ] && return 0
+  [ -f "$HOME/.xpair/client/role" ] && return 0
+  return 1
+}
+
+stash_file() {
+  local src="$1" var_name="$2" tmp
+  [ "$DRY_RUN" = 1 ] && return 0
+  [ -f "$src" ] || return 0
+  tmp="$(mktemp)" || return 0
+  cp -p "$src" "$tmp" || { rm -f "$tmp"; return 0; }
+  eval "$var_name=\$tmp"
+}
+
+restore_stashed_file() {
+  local tmp="$1" dst="$2"
+  [ "$DRY_RUN" = 1 ] && return 0
+  [ -n "$tmp" ] || return 0
+  mkdir -p "$(dirname "$dst")"
+  if cp -p "$tmp" "$dst"; then
+    rm -f "$tmp"
+  else
+    warn "restore failed for $dst — kept temp copy $tmp"
+  fi
+}
+
+set_remaining_client_role_marker() {
+  local prior="$1" role_file="$HOME/.xpair/host/role"
+  case "$prior" in
+    both|client)
+      if [ "$DRY_RUN" = 1 ]; then
+        printf 'DRY: set %q to client\n' "$role_file"
+      else
+        mkdir -p "$(dirname "$role_file")"
+        printf 'client\n' > "$role_file"
+      fi
+      ;;
+    host)
+      run rm -f "$role_file"
+      ;;
+    *)
+      [ -f "$role_file" ] && run rm -f "$role_file"
+      ;;
+  esac
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SHARED="$REPO_ROOT/shared"
@@ -253,6 +300,16 @@ else
   confirm "Wipe stray xpair host state and leftovers from this Mac?"
 fi
 
+CLIENT_REMAINS=0
+HOST_ROLE_BEFORE="$(cat "$HOME/.xpair/host/role" 2>/dev/null || true)"
+PRESERVE_PAIRING_TMP=""
+PRESERVE_COMMON_TMP=""
+if client_install_remains; then
+  CLIENT_REMAINS=1
+  stash_file "$HOME/.xpair/host/pairing_ed25519" PRESERVE_PAIRING_TMP
+  stash_file "$HOME/.xpair/host/common.env" PRESERVE_COMMON_TMP
+fi
+
 say "Removing LaunchAgents"
 U="$(id -u)"
 for L in \
@@ -302,9 +359,27 @@ run_quiet pkill -f RemotePairHost
 run_quiet pkill -f tmux-aqua
 
 say "Removing xpair state"
-run rm -rf "$HOME/.xpair/host"
+if [ "$CLIENT_REMAINS" = 1 ]; then
+  say "Removing host-owned xpair state (client install remains)"
+  restore_stashed_file "$PRESERVE_PAIRING_TMP" "$HOME/.xpair/host/pairing_ed25519"
+  restore_stashed_file "$PRESERVE_COMMON_TMP" "$HOME/.xpair/host/common.env"
+  run rm -f \
+    "$HOME/.xpair/host/host.env" \
+    "$HOME/.xpair/host/rules.txt" \
+    "$HOME/.xpair/host/notify.conf" \
+    "$HOME/.xpair/host/.manifest-host" \
+    "$HOME/.xpair/host/.manifest-both" \
+    "$HOME/.xpair/host/.install-manifest"
+  run rm -rf \
+    "$HOME/.xpair/host/bin" \
+    "$HOME/.xpair/host/logs" \
+    "$HOME/.xpair/host/backups"
+  set_remaining_client_role_marker "$HOST_ROLE_BEFORE"
+else
+  run rm -rf "$HOME/.xpair/host"
+fi
 
-if [ -f "$HOME/.xpair/client/.manifest-client" ] || [ -f "$HOME/.xpair/client/role" ]; then
+if [ "$CLIENT_REMAINS" = 1 ]; then
   say "Keeping shared client CLIs (client install remains)"
 else
   say "Removing installed CLIs"

@@ -88,6 +88,26 @@ it "uninstall/manifest-consumed"
 cleanup_sandbox
 
 # ────────────────────────────────────────────────────────────────────────────
+# SHARED CLI OVERWRITE: backup is kept but not role-manifest recorded
+# ────────────────────────────────────────────────────────────────────────────
+new_sandbox
+make_client_mocks
+mkdir -p "$HOME/.local/bin"
+printf 'previous cli\n' > "$HOME/.local/bin/xpair"
+chmod +x "$HOME/.local/bin/xpair"
+run_install --role client --no-sync
+
+it "install/shared-cli-overwrite-backed-up"
+assert_rc "$RP_RC" 0 "client install over existing shared CLI rc=0 :: stderr=[$RP_ERR]"
+BACKUP_MATCH="$(find "$RP_CLIENT_DIR/backups" -type f -name '*xpair.bak' -print 2>/dev/null | head -1)"
+[ -n "$BACKUP_MATCH" ] && _pass "backup created for overwritten shared CLI" \
+  || _fail "backup missing for overwritten shared CLI"
+[ -n "$BACKUP_MATCH" ] && assert_contains "$(cat "$BACKUP_MATCH" 2>/dev/null)" "previous cli" "backup contains previous shared CLI"
+CLIENT_MAN_TXT="$(cat "$RP_CLIENT_DIR/.manifest-client" 2>/dev/null)"
+assert_absent "$CLIENT_MAN_TXT" "$HOME/.local/bin/xpair" "shared xpair CLI backup is not recorded in role manifest"
+cleanup_sandbox
+
+# ────────────────────────────────────────────────────────────────────────────
 # UPGRADE: legacy host/client.env survives the split migration + write_config
 # ────────────────────────────────────────────────────────────────────────────
 new_sandbox
