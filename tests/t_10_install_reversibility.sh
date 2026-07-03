@@ -88,4 +88,96 @@ it "uninstall/manifest-consumed"
 
 cleanup_sandbox
 
+# ────────────────────────────────────────────────────────────────────────────
+# UPGRADE: legacy host/client.env survives the split migration + write_config
+# ────────────────────────────────────────────────────────────────────────────
+new_sandbox
+make_client_mocks
+rm -rf "$RP_CLIENT_DIR"
+mkdir -p "$RP_HOST_DIR"
+cat > "$RP_HOST_DIR/client.env" <<EOF
+REMOTE_HOST=legacy-host
+FOLDER_MAPS=$HOME/sync::/Users/alice/sync
+FOLDER_MAP_MODES=$HOME/sync::sync
+EOF
+run_install --role client --no-sync
+
+it "upgrade-preserves-config/rc-ok"
+assert_rc "$RP_RC" 0 "client reinstall from legacy layout rc=0 :: stderr=[$RP_ERR]"
+UPGRADED_ENV="$(cat "$HOME/.xpair/client/client.env" 2>/dev/null)"
+it "upgrade-preserves-config/remote-host"
+assert_contains "$UPGRADED_ENV" "REMOTE_HOST=legacy-host" "migrated REMOTE_HOST survives write_config"
+it "upgrade-preserves-config/folder-maps"
+assert_contains "$UPGRADED_ENV" "FOLDER_MAPS=$HOME/sync::/Users/alice/sync" "migrated FOLDER_MAPS survives write_config"
+it "upgrade-preserves-config/folder-map-modes"
+assert_contains "$UPGRADED_ENV" "FOLDER_MAP_MODES=$HOME/sync::sync" "migrated FOLDER_MAP_MODES survives write_config"
+cleanup_sandbox
+
+# ────────────────────────────────────────────────────────────────────────────
+# MANIFEST ATTRIBUTION: both installs record by target runtime dir
+# ────────────────────────────────────────────────────────────────────────────
+new_sandbox
+make_client_mocks
+rm -f "$RP_HOST_DIR/common.env" "$RP_HOST_DIR/host.env" "$RP_HOST_DIR/role" \
+      "$RP_CLIENT_DIR/common.env" "$RP_CLIENT_DIR/client.env" "$RP_CLIENT_DIR/role"
+run_install --role both --no-native --no-sync
+
+it "both-install/rc-ok"
+assert_rc "$RP_RC" 0 "install.sh --role both rc=0 :: stderr=[$RP_ERR]"
+HOST_MAN_TXT="$(cat "$RP_HOST_DIR/.manifest-host" 2>/dev/null)"
+CLIENT_MAN_TXT="$(cat "$RP_CLIENT_DIR/.manifest-client" 2>/dev/null)"
+it "both-install/host-files-in-host-manifest"
+assert_contains "$HOST_MAN_TXT" "FILE	$RP_HOST_DIR/host.env" "host.env recorded in host manifest"
+assert_contains "$HOST_MAN_TXT" "FILE	$RP_HOST_DIR/common.env" "host common.env recorded in host manifest"
+assert_contains "$HOST_MAN_TXT" "FILE	$RP_HOST_DIR/role" "host role recorded in host manifest"
+it "both-install/client-files-in-client-manifest"
+assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_CLIENT_DIR/client.env" "client.env recorded in client manifest"
+assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_CLIENT_DIR/common.env" "client common.env recorded in client manifest"
+assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_CLIENT_DIR/role" "client role recorded in client manifest"
+assert_absent "$CLIENT_MAN_TXT" "$RP_HOST_DIR/host.env" "client manifest does not own host.env"
+cleanup_sandbox
+
+# ────────────────────────────────────────────────────────────────────────────
+# ROLE MARKER: client-only install still writes the host-side role gate
+# ────────────────────────────────────────────────────────────────────────────
+new_sandbox
+make_client_mocks
+rm -f "$RP_HOST_DIR/role"
+run_install --role client --no-sync
+
+it "client-install/host-role-written"
+assert_rc "$RP_RC" 0 "client install rc=0 :: stderr=[$RP_ERR]"
+ROLE_TXT="$(cat "$RP_HOST_DIR/role" 2>/dev/null)"
+assert_eq "$ROLE_TXT" "client" "host role marker written for access-only app gating"
+CLIENT_MAN_TXT="$(cat "$RP_CLIENT_DIR/.manifest-client" 2>/dev/null)"
+assert_contains "$CLIENT_MAN_TXT" "FILE	$RP_HOST_DIR/role" "client-only host role marker owned by client manifest"
+cleanup_sandbox
+
+# ────────────────────────────────────────────────────────────────────────────
+# LEGACY MANIFEST ARMS: role-scoped uninstall sees pre-split manifests
+# ────────────────────────────────────────────────────────────────────────────
+new_sandbox
+LEGACY_CLIENT_TOOL="$HOME/.local/bin/legacy-client-tool"
+printf 'legacy\n' > "$LEGACY_CLIENT_TOOL"
+printf 'FILE\t%s\t\n' "$LEGACY_CLIENT_TOOL" > "$RP_HOST_DIR/.manifest-client"
+run_uninstall --role client
+
+it "uninstall-role-client/legacy-host-manifest"
+assert_rc "$RP_RC" 0 "client role uninstaller rc=0 :: stderr=[$RP_ERR]"
+[ -e "$LEGACY_CLIENT_TOOL" ] && _fail "legacy client file remaining" || _pass "legacy host/.manifest-client reverted"
+[ -e "$RP_HOST_DIR/.manifest-client" ] && _fail "legacy client manifest remaining" || _pass "legacy client manifest consumed"
+cleanup_sandbox
+
+new_sandbox
+LEGACY_BOTH_FILE="$HOME/.local/bin/legacy-both-tool"
+printf 'legacy\n' > "$LEGACY_BOTH_FILE"
+printf 'FILE\t%s\t\n' "$LEGACY_BOTH_FILE" > "$RP_HOST_DIR/.manifest-both"
+run_uninstall --role host
+
+it "uninstall-role-host/legacy-both-manifest"
+assert_rc "$RP_RC" 0 "host role uninstaller rc=0 :: stderr=[$RP_ERR]"
+[ -e "$LEGACY_BOTH_FILE" ] && _fail "legacy both file remaining" || _pass "legacy host/.manifest-both reverted"
+[ -e "$RP_HOST_DIR/.manifest-both" ] && _fail "legacy both manifest remaining" || _pass "legacy both manifest consumed"
+cleanup_sandbox
+
 finish

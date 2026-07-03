@@ -41,6 +41,18 @@ it "client/never-removes-host"
 assert_absent "$RP_OUT" "rm -rf $HOME/.xpair/host" "client dry-run does not wipe host runtime"
 cleanup_sandbox
 
+new_sandbox
+mkdir -p "$HOME/.xpair/client" "$HOME/.local/bin"
+printf 'client\n' > "$HOME/.xpair/client/role"
+printf 'NOTE\tclient remains\t\n' > "$HOME/.xpair/client/.manifest-client"
+printf 'cli\n' > "$HOME/.local/bin/xpair"
+run_host_uninstall -y --dry-run --force
+it "host/keeps-shared-cli-when-client-remains"
+assert_rc "$RP_RC" 0 "host uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$RP_OUT" "Keeping shared client CLIs" "host wipe detects remaining client install"
+assert_absent "$RP_OUT" "rm -f $HOME/.local/bin/xpair" "host wipe does not remove shared xpair CLI"
+cleanup_sandbox
+
 if [ "$(uname)" != Darwin ]; then
   it "host/protected-legacy-skip"
   _pass "skipped on non-macOS (PlistBuddy/app bundle version scan)"

@@ -46,6 +46,7 @@ is_client() { [ "$ROLE" = client ] || [ "$ROLE" = both ]; }
 use_host_manifest() { MANIFEST="$HOST_MANIFEST"; BACKUP_DIR="$RP_HOST_DIR/backups"; }
 use_client_manifest() { MANIFEST="$CLIENT_MANIFEST"; BACKUP_DIR="$RP_CLIENT_DIR/backups"; }
 use_shared_manifest() { if is_client; then use_client_manifest; else use_host_manifest; fi; }
+use_host_role_manifest() { if is_host; then use_host_manifest; else use_client_manifest; fi; }
 
 manifest_init_used() {
   if is_host; then use_host_manifest; manifest_init; fi
@@ -74,19 +75,56 @@ write_config() {
   if is_client; then
     use_client_manifest; mk_dir "$RP_CLIENT_DIR"; chmod 700 "$RP_CLIENT_DIR"
   fi
+  # Swift gates host self-install by ~/.xpair/host/role. Even a client-only
+  # install writes it so an app left on disk stays access-only.
+  use_host_role_manifest; mk_dir "$RP_HOST_DIR"; chmod 700 "$RP_HOST_DIR"
+  printf '%s\n' "$ROLE" | write_file "$RP_HOST_DIR/role" 644
   if is_host; then
-    use_shared_manifest; _write_env "$HOST_COMMON_ENV" "${COMMON_KEYS[@]}"
+    use_host_manifest; _write_env "$HOST_COMMON_ENV" "${COMMON_KEYS[@]}"
     use_host_manifest; _write_env "$HOST_ENV" "${HOST_KEYS[@]}"
-    # role marker — Swift reads ~/.xpair/host/role on host/both machines.
-    use_shared_manifest; [ -e "$RP_HOST_DIR/role" ] || record FILE "$RP_HOST_DIR/role"
-    printf '%s\n' "$ROLE" > "$RP_HOST_DIR/role"
   fi
   if is_client; then
-    use_shared_manifest; _write_env "$CLIENT_COMMON_ENV" "${COMMON_KEYS[@]}"
+    use_client_manifest; _write_env "$CLIENT_COMMON_ENV" "${COMMON_KEYS[@]}"
     use_client_manifest; _write_env "$CLIENT_ENV" "${CLIENT_KEYS[@]}"
-    use_shared_manifest; [ -e "$RP_CLIENT_DIR/role" ] || record FILE "$RP_CLIENT_DIR/role"
-    printf '%s\n' "$ROLE" > "$RP_CLIENT_DIR/role"
+    use_client_manifest; printf '%s\n' "$ROLE" | write_file "$RP_CLIENT_DIR/role" 644
   fi
+}
+
+reload_runtime_env_after_migration() {
+  set -a
+  local f
+  for f in "$RP_HOST_DIR/common.env" "$RP_HOST_DIR/host.env" "$RP_CLIENT_DIR/common.env" "$RP_CLIENT_DIR/client.env"; do
+    # shellcheck disable=SC1090
+    [ -f "$f" ] && . "$f"
+  done
+  set +a
+
+  RP_ORG="${RP_ORG:-com.x10lab}"
+  BUNDLE_PREFIX="${BUNDLE_PREFIX:-${RP_ORG}.xpair-host}"
+  APP_NAME="${APP_NAME:-XpairHost}"
+  SIGN_CN="${SIGN_CN:-RemotePair Local Signing}"
+  GH_REPO="${GH_REPO:-x10lab/xpair}"
+  APP_LABEL="$BUNDLE_PREFIX"; WATCHDOG_LABEL="${BUNDLE_PREFIX}-watchdog"
+  APP_PATH="/Applications/${APP_NAME}.app"; APP_EXEC="$APP_PATH/Contents/MacOS/${APP_NAME}"
+  APPROVE_TRIGGER="${APPROVE_TRIGGER:-/tmp/xpair.approve-request}"
+  LOG_FILE="${LOG_FILE:-$LOG_DIR/xpair.log}"
+  HEARTBEAT_FILE="${HEARTBEAT_FILE:-$LOG_DIR/xpair.heartbeat}"
+  LOG_LEVEL="${REMOTEPAIR_LOG:-${LOG_LEVEL:-info}}"
+  RULES_FILE="${RULES_FILE:-$RP_DIR/rules.txt}"
+
+  REMOTE_HOST="${REMOTE_HOST:-}"
+  FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"
+  FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"
+  LAUNCHER="${LAUNCHER:-$RP_CLIENT_DIR/bin/xpair-launch}"
+  TERMINAL_APP="${TERMINAL_APP:-$( [ -d /Applications/iTerm.app ] && echo iterm2 || echo terminal )}"
+  EDITOR_PORT="${EDITOR_PORT:-8080}"
+  SYNC_BACKEND="${SYNC_BACKEND:-syncthing}"
+  MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"
+  LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
+  AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux.sock}"
+  LAUNCH_AGENTS="${LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
+  SERVICES_DIR="${SERVICES_DIR:-$HOME/Library/Services}"
+  RP_REPO_ROOT="${RP_REPO_ROOT:-$REPO_ROOT}"
 }
 
 # ── 0. Input ──
@@ -97,6 +135,7 @@ fi
 [ -n "${REMOTE_HOST:-}" ] && say "Remote host = $REMOTE_HOST" || say "REMOTE_HOST not set (local-only mode)"
 
 migrate_layout || warn "layout migration skipped some steps; continuing"
+reload_runtime_env_after_migration
 
 # ── Revert existing install before re-installing (idempotent) ──
 # notify.conf is a config file that may hold user edits (ENABLED_TYPES). Since we recorded it as

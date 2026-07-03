@@ -31,13 +31,16 @@ case "$ROLE" in host|client|both|all) : ;; *) echo "invalid --role: $ROLE (host|
 shopt -s nullglob 2>/dev/null || true
 case "$ROLE" in
   host)
-    mans=("$RP_HOST_DIR/.manifest-host" "$RP_HOST_DIR/.install-manifest")
+    mans=("$RP_HOST_DIR/.manifest-host" "$RP_HOST_DIR/.manifest-both" "$RP_HOST_DIR/.install-manifest")
     ;;
   client)
     mans=("$RP_CLIENT_DIR/.manifest-client")
+    if [ ! -f "$RP_CLIENT_DIR/.manifest-client" ]; then
+      mans+=("$RP_HOST_DIR/.manifest-client")
+    fi
     ;;
   both)
-    mans=("$RP_HOST_DIR/.manifest-host" "$RP_HOST_DIR/.install-manifest" "$RP_CLIENT_DIR/.manifest-client")
+    mans=("$RP_HOST_DIR/.manifest-host" "$RP_HOST_DIR/.manifest-both" "$RP_HOST_DIR/.install-manifest" "$RP_CLIENT_DIR/.manifest-client")
     ;;
   all)
     mans=("$RP_HOST_DIR"/.manifest-* "$RP_HOST_DIR/.install-manifest" "$RP_CLIENT_DIR"/.manifest-* "$RP_CLIENT_DIR/.install-manifest")

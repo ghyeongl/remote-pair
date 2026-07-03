@@ -105,4 +105,14 @@ assert_rc "$RP_RC" 0 "already-mounted guard does not block attach"
 assert_absent "$MLOG" "xpair-mount|--backend|smb|mount|/Users/alice/proj" "already mounted path is not remounted"
 cleanup_sandbox
 
+# ── launch ordering: ensure missing mount mappings before the initial project cd ──
+ENSURE_LINE="$(awk '/^ensure_mount_mappings_best_effort$/ { print NR; exit }' "$LAUNCHER_SRC")"
+PROJECT_CD_LINE="$(awk 'index($0, "PROJECT_DIR=\"$(cd ") == 1 { print NR; exit }' "$LAUNCHER_SRC")"
+it "launch/ensure-before-project-cd"
+if [ -n "$ENSURE_LINE" ] && [ -n "$PROJECT_CD_LINE" ] && [ "$ENSURE_LINE" -lt "$PROJECT_CD_LINE" ]; then
+  _pass "ensure guard call appears before project-dir cd ($ENSURE_LINE < $PROJECT_CD_LINE)"
+else
+  _fail "ensure guard call must appear before project-dir cd (ensure=$ENSURE_LINE project_cd=$PROJECT_CD_LINE)"
+fi
+
 finish

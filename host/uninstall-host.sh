@@ -303,16 +303,20 @@ run_quiet pkill -f tmux-aqua
 say "Removing xpair state"
 run rm -rf "$HOME/.xpair/host"
 
-say "Removing installed CLIs"
-for p in \
-  "$HOME/.local/bin/xpair" \
-  "$HOME/.local/bin/xpair-askpass" \
-  "$HOME/.local/bin/xpair-desktop" \
-  "$HOME/.local/bin/xpair-editor" \
-  "$HOME/.local/bin/xpair-mount" \
-  "$HOME/.local/bin/xpair-launch"; do
-  run rm -f "$p"
-done
+if [ -f "$HOME/.xpair/client/.manifest-client" ] || [ -f "$HOME/.xpair/client/role" ]; then
+  say "Keeping shared client CLIs (client install remains)"
+else
+  say "Removing installed CLIs"
+  for p in \
+    "$HOME/.local/bin/xpair" \
+    "$HOME/.local/bin/xpair-askpass" \
+    "$HOME/.local/bin/xpair-desktop" \
+    "$HOME/.local/bin/xpair-editor" \
+    "$HOME/.local/bin/xpair-mount" \
+    "$HOME/.local/bin/xpair-launch"; do
+    run rm -f "$p"
+  done
+fi
 remove_xpair_app_symlink "$HOME/.local/bin/tmux-aqua"
 remove_xpair_app_symlink "$HOME/.local/bin/mosh-server"
 

@@ -179,7 +179,6 @@ choose_engine() {
   esac
 }
 
-PROJECT_DIR="$(cd "${DIR_ARG:-$PWD}" 2>/dev/null && pwd)" || die "directory not found: ${DIR_ARG:-$PWD}"
 LOCAL_HOST="$(hostname -s)"
 
 # ── path mapping: client path → host path (longest-prefix). Assumes same path if no mapping. ──
@@ -261,6 +260,9 @@ ensure_mount_mappings_best_effort() {
     fi
   done
 }
+
+ensure_mount_mappings_best_effort
+PROJECT_DIR="$(cd "${DIR_ARG:-$PWD}" 2>/dev/null && pwd)" || die "directory not found: ${DIR_ARG:-$PWD}"
 
 # ── human-readable deterministic session name ──
 # Folder name → session name mapping is the deterministic SSOT.
@@ -488,7 +490,6 @@ REMOTE_PROJ_Q="$(sh_quote "$REMOTE_PROJ")"
 
 # Single uniform target: the configured host (may be localhost). No local/remote branch.
 [ -n "$REMOTE_HOST" ] || die "no host configured — set up a host (local or remote) in Xpair.app, or: xpair config set host <ssh-host>" 1
-ensure_mount_mappings_best_effort
 
 # Expose ssh errors verbatim — timeout/key-rejection/host-key errors must appear on screen + in log.
 reach() { ssh $SSH_ID -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" true; }
