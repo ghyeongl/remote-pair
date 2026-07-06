@@ -198,6 +198,24 @@ enum EngineGuard {
 
     private struct Run { let code: Int32; let out: String; let err: String }
 
+    private final class PipeBuffer {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func store(_ data: Data) {
+            lock.lock()
+            self.data = data
+            lock.unlock()
+        }
+
+        func string() -> String {
+            lock.lock()
+            let snapshot = data
+            lock.unlock()
+            return String(data: snapshot, encoding: .utf8) ?? ""
+        }
+    }
+
     /// Run `script` via `/bin/bash -lc` (login shell → brew/npm PATH + exported provider env). When
     /// `stdin` is non-nil, the value is written ONCE to the child's stdin then closed — used to hand a
     /// secret to `read -r KEY` without it ever touching argv, a log line, or disk.
@@ -213,18 +231,31 @@ enum EngineGuard {
         do { try p.run() } catch {
             return Run(code: -1, out: "", err: "\(error)")
         }
+        let readGroup = DispatchGroup()
+        let readQueue = DispatchQueue(label: "rp.engineguard.runLogin.pipes", qos: .utility, attributes: .concurrent)
+        let outBuffer = PipeBuffer()
+        let errBuffer = PipeBuffer()
+        readGroup.enter()
+        readQueue.async {
+            outBuffer.store(outPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
+        readGroup.enter()
+        readQueue.async {
+            errBuffer.store(errPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
         if let inPipe, let stdin {
             let h = inPipe.fileHandleForWriting
             h.write(Data(stdin.utf8))
             try? h.close()
         }
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        readGroup.wait()
         return Run(
             code: p.terminationStatus,
-            out: (String(data: outData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-            err: (String(data: errData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            out: outBuffer.string().trimmingCharacters(in: .whitespacesAndNewlines),
+            err: errBuffer.string().trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
 }
