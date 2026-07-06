@@ -505,12 +505,9 @@ done
 RESPAWN
 }
 
-# _remote_next_n REMOTE_PROJ_BASE [HOST_ATTACHED_SESSIONS] [ALL_REMOTE_SESSIONS] — echo "N state"
-# state (N==1): "reattach" if _1 already exists detached on the host | "new" if it does not
-#   (decided from ALL_REMOTE_SESSIONS) | "new/reattach" only when the all-set is unknown.
-#   "fresh" when N>1 (a lower _N already has a live client).
+# _remote_next_n REMOTE_PROJ_BASE [HOST_ATTACHED_SESSIONS] — echo N
 _remote_next_n() {
-  local base="$1" attached="${2:-}" all="${3:-}" n=1
+  local base="$1" attached="${2:-}" n=1
   # Skip any _N that already has a live client, whether visible as a local mosh tab
   # or as an attached client on the host tmux server.
   while pgrep -f "mosh-client.*attach -d -t =${base}_${n}( |\$)" >/dev/null 2>&1 ||
@@ -518,15 +515,7 @@ _remote_next_n() {
   do
     n=$((n+1))
   done
-  if [ "$n" -gt 1 ]; then
-    printf '%s fresh' "$n"
-  elif [ -n "$all" ] && printf '%s\n' "$all" | grep -Fxq "${base}_1"; then
-    printf '1 reattach'
-  elif [ -n "$all" ]; then
-    printf '1 new'
-  else
-    printf '1 new/reattach'
-  fi
+  printf '%s' "$n"
 }
 
 # tmux 3-way branching policy:
@@ -637,8 +626,7 @@ fi
 # Session number is decided from both local mosh-client facts and live host tmux attached-client
 # facts. Host-side setup rechecks before create/attach so a stale client-side choice cannot
 # take over another active client.
-_rn_final="$(_remote_next_n "$REMOTE_PROJ" "$ATT")"
-RN="${_rn_final%% *}"
+RN="$(_remote_next_n "$REMOTE_PROJ" "$ATT")"
 RCONT=1
 [ "$RN" -gt 1 ] && RCONT=0   # _2+ → fresh
 [ "$FRESH" = 1 ] && RCONT=0  # --fresh → fresh
