@@ -221,12 +221,31 @@ console.log("firstRunStamp — stamps once, independent of consent:");
 check("firstRunStamp is idempotent and consent-independent", () => {
   // Fresh env, no consent flags.
   writeEnv({ TELEMETRY_ANON_ID: "00000000-0000-4000-8000-000000000000" });
-  const ts1 = t.firstRunStamp();
+  const first = t.firstRunStamp();
+  assert.strictEqual(first.created, true, "first firstRunStamp should report stamp creation");
+  const ts1 = first.ts;
   assert.ok(ts1 > 0, "firstRunStamp should produce a positive epoch");
-  const ts2 = t.firstRunStamp();
+  const second = t.firstRunStamp();
+  assert.strictEqual(second.created, false, "second firstRunStamp should not report creation");
+  const ts2 = second.ts;
   assert.strictEqual(ts1, ts2, "second firstRunStamp must not overwrite the base");
   assert.ok(fs.existsSync(TELEMETRY_ENV), "firstRunStamp should create telemetry.env");
   assert.ok(!fs.existsSync(CLIENT_ENV), "firstRunStamp must not create client.env");
+});
+
+check("setTelemetryConsent writes only TELEMETRY_CONSENT", () => {
+  writeEnv({
+    TELEMETRY_ANON_ID: "00000000-0000-4000-8000-000000000000",
+    CRASH_REPORT_CONSENT: "true",
+  });
+  assert.strictEqual(t.setTelemetryConsent(false), false);
+  let raw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(raw.includes('TELEMETRY_CONSENT="false"'), "telemetry consent should be updated");
+  assert.ok(raw.includes('CRASH_REPORT_CONSENT="true"'), "crash consent should be preserved");
+  assert.strictEqual(t.setTelemetryConsent(true), true);
+  raw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(raw.includes('TELEMETRY_CONSENT="true"'), "telemetry consent should be re-toggleable");
+  assert.ok(raw.includes('CRASH_REPORT_CONSENT="true"'), "crash consent should still be preserved");
 });
 
 check("setConsent persists telemetry flags without creating client.env", () => {

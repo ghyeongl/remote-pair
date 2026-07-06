@@ -108,6 +108,7 @@ const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
 const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
+const CLIENT_SERVICES_LOCK_FILE = path.join(RP_CLIENT_DIR, "extension-services.lock");
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
 // WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
 // on the host), so adding -i must still leave the ssh-agent + default identities available —
@@ -291,25 +292,93 @@ function readEnabledNotifyTypes() {
   return enabled;
 }
 
-function hasConfiguredValue(section, key) {
-  const inspected = section.inspect(key);
-  return !!(
-    inspected &&
-    (
-      inspected.globalValue !== undefined ||
-      inspected.workspaceValue !== undefined ||
-      inspected.workspaceFolderValue !== undefined
-    )
-  );
+function mirrorTelemetryConsentToSetting() {
+  const cfg = vscode.workspace.getConfiguration("xpair.telemetry");
+  const enabled = telemetry.telemetryConsent();
+  if (!!cfg.get("enabled", false) === enabled) return;
+  try {
+    cfg.update("enabled", enabled, vscode.ConfigurationTarget.Global)
+      .then(undefined, (e) => log(`telemetry setting mirror: ${e && e.message ? e.message : e}`, "warn"));
+  } catch (e) {
+    log(`telemetry setting mirror: ${e && e.message ? e.message : e}`, "warn");
+  }
 }
 
-function syncTelemetryConsentFromSettings() {
+function syncTelemetryConsentFromSettingChange() {
   const cfg = vscode.workspace.getConfiguration("xpair.telemetry");
-  if (!hasConfiguredValue(cfg, "enabled")) return;
   const enabled = !!cfg.get("enabled", false);
-  const current = telemetry.getConsent();
-  if (current.telemetry === enabled && current.crashReport === enabled) return;
-  telemetry.setConsent(enabled, enabled);
+  if (telemetry.telemetryConsent() === enabled) return;
+  telemetry.setTelemetryConsent(enabled);
+}
+
+function readClientServicesLockPid() {
+  try {
+    const raw = fs.readFileSync(CLIENT_SERVICES_LOCK_FILE, "utf8").trim();
+    const m = raw.match(/^\d+/);
+    if (!m) return 0;
+    const pid = parseInt(m[0], 10);
+    return Number.isFinite(pid) ? pid : 0;
+  } catch (_e) {
+    return 0;
+  }
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return !!(e && e.code === "EPERM");
+  }
+}
+
+function writeClientServicesLock() {
+  let fd = null;
+  try {
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(RP_CLIENT_DIR, 0o700); } catch (_e) {}
+    fd = fs.openSync(
+      CLIENT_SERVICES_LOCK_FILE,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY,
+      0o600
+    );
+    fs.writeFileSync(fd, `${process.pid}\n`);
+  } catch (e) {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (_e) {}
+      try { fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE); } catch (_e) {}
+    }
+    throw e;
+  }
+  try { fs.closeSync(fd); } catch (_e) {}
+}
+
+function releaseClientServicesLock() {
+  if (readClientServicesLockPid() !== process.pid) return;
+  try { fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE); } catch (_e) {}
+}
+
+function claimClientServicesLock() {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeClientServicesLock();
+      return { dispose: releaseClientServicesLock };
+    } catch (e) {
+      if (!e || e.code !== "EEXIST") {
+        log(`client services lock: ${e && e.message ? e.message : e}`, "warn");
+        return null;
+      }
+      const pid = readClientServicesLockPid();
+      if (pid && isProcessAlive(pid)) return null;
+      try {
+        fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE);
+      } catch (unlinkErr) {
+        if (!unlinkErr || unlinkErr.code !== "ENOENT") return null;
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -1853,14 +1922,28 @@ function installSentryHooks() {
 function activate(context) {
   log("Xpair activating…");
 
-  syncTelemetryConsentFromSettings();
+  mirrorTelemetryConsentToSetting();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("xpair.telemetry.enabled")) {
-        syncTelemetryConsentFromSettings();
+        syncTelemetryConsentFromSettingChange();
       }
     })
   );
+  const clientServiceDisposables = [];
+  const clientServicesLock = claimClientServicesLock();
+  if (clientServicesLock) {
+    clientServiceDisposables.push(clientServicesLock);
+    context.subscriptions.push({
+      dispose: () => {
+        for (let i = clientServiceDisposables.length - 1; i >= 0; i -= 1) {
+          try { clientServiceDisposables[i].dispose(); } catch (_e) {}
+        }
+      },
+    });
+  } else {
+    log("client services lock held by another extension host", "debug");
+  }
 
   // Start the CLIENT→HOST liveness heartbeat (writes now + every 30s; idempotent across
   // activations). Fire-and-forget — must never block or crash activation.
@@ -1880,22 +1963,18 @@ function activate(context) {
   } catch (_e) { /* best-effort */ }
 
   // 0) Telemetry (opt-in, both consent flags default OFF → zero network calls). Two side effects:
-  //    a) app_first_launch{is_fresh_install} — fired ONCE, gated by a globalState stamp.
+  //    a) app_first_launch{is_fresh_install} — fired once from the creator of TELEMETRY_INSTALL_TS.
   //    b) Sentry init for the extension host — a no-op unless CRASH_REPORT_CONSENT + SENTRY_DSN
   //       are both present (init just registers process error hooks that re-check consent on fire).
   try {
     // Stamp the install creation time at FIRST RUN, INDEPENDENT of consent. A bare epoch-ms with
     // no id is not PII, so this is safe pre-consent and gives time_to_wow_ms a real elapsed base
     // (first launch → first session) instead of ~0. Idempotent across activations.
-    telemetry.firstRunStamp();
-    const FIRST_LAUNCH_KEY = "remotepair.installTimestamp";
-    const stampedAt = context.globalState.get(FIRST_LAUNCH_KEY);
-    const isFresh = !stampedAt;
-    if (isFresh) {
-      context.globalState.update(FIRST_LAUNCH_KEY, Date.now());
+    if (clientServicesLock) {
+      const firstRun = telemetry.firstRunStamp();
+      const isFresh = !!(firstRun && firstRun.created);
+      if (isFresh) telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
     }
-    // Fire once per install (the stamp guards repeats across activations).
-    telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: isFresh });
   } catch (e) {
     log(`telemetry first-launch: ${e && e.message ? e.message : e}`, "warn");
   }
@@ -2039,9 +2118,11 @@ function activate(context) {
       });
     }
   };
-  probeHost();
-  const hostProbeTimer = setInterval(probeHost, 20000);
-  context.subscriptions.push({ dispose: () => clearInterval(hostProbeTimer) });
+  if (clientServicesLock) {
+    probeHost();
+    const hostProbeTimer = setInterval(probeHost, 20000);
+    clientServiceDisposables.push({ dispose: () => clearInterval(hostProbeTimer) });
+  }
 
   // 4) Commands.
   context.subscriptions.push(
@@ -2059,7 +2140,8 @@ function activate(context) {
         vscode.window.showInformationMessage(
           `Xpair: adopted the current network as the gateway baseline${gw.current ? ` (${gw.current})` : ""}. Reconnecting…`,
         );
-        await probeHost();
+        if (clientServicesLock) await probeHost();
+        else renderHostButton();
       } else {
         vscode.window.showWarningMessage(
           `Xpair: could not confirm the gateway baseline${gw && gw.err ? ` (${gw.err})` : ""}.`,
@@ -2118,9 +2200,11 @@ function activate(context) {
   }
 
   // 4) Host notifications poller.
-  const notifier = new NotificationPoller();
-  notifier.start();
-  context.subscriptions.push({ dispose: () => notifier.stop() });
+  if (clientServicesLock) {
+    const notifier = new NotificationPoller();
+    notifier.start();
+    clientServiceDisposables.push({ dispose: () => notifier.stop() });
+  }
 
   // 5a) Warm the Sessions sidebar, THEN default the visible sidebar to the Browser. Constructing the
   //     Sessions view runs its constructor side effects — wiring the session reattacher and the

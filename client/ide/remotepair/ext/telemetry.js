@@ -352,16 +352,22 @@ function installId() {
  * A bare epoch-ms with no id is not PII, so this is safe to write before the consent prompt —
  * it gives time_to_wow_ms a real elapsed base (first launch → first session) instead of ~0
  * (which is what happens if the base is only set lazily at the moment the WOW event fires).
- * Idempotent: only the first call writes; later calls are a no-op. Never throws.
+ * Idempotent: only the first call writes and returns created=true; later calls are a no-op.
+ * Never throws.
  * Call this on the very first run of BOTH the extension host and the Electron onboarding.
  */
 function firstRunStamp() {
   try {
-    if (!readEnv()[K_INSTALL_TS]) upsertEnv(K_INSTALL_TS, String(Date.now()));
+    const existing = installTs();
+    if (existing) return { ts: existing, created: false };
+    const now = Date.now();
+    upsertEnv(K_INSTALL_TS, String(now));
+    const stamped = installTs();
+    return { ts: stamped, created: stamped === now };
   } catch (_e) {
     /* telemetry must never break the app */
   }
-  return installTs();
+  return { ts: installTs(), created: false };
 }
 
 /** install_id creation epoch (ms). 0 if unknown (caller treats as "no wow timing"). */
@@ -426,6 +432,11 @@ function setConsent(telemetry, crashReport) {
   upsertEnv(K_TELEMETRY_CONSENT, telemetry ? "true" : "false");
   upsertEnv(K_CRASH_CONSENT, crashReport ? "true" : "false");
   return getConsent();
+}
+
+function setTelemetryConsent(enabled) {
+  upsertEnv(K_TELEMETRY_CONSENT, enabled ? "true" : "false");
+  return telemetryConsent();
 }
 
 // --- super properties ------------------------------------------------------
@@ -666,6 +677,7 @@ module.exports = {
   claimHostConnectedOnce, // once-per-install host_connected gate (activation-funnel cardinality).
   getConsent,
   setConsent,
+  setTelemetryConsent,
   telemetryConsent,
   crashReportConsent,
   sentryConfig,
