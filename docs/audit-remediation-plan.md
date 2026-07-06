@@ -31,8 +31,10 @@ Global rules:
 | now | WS1 (bash 3.2 hotfix), WS2 (test gating), WS3 (install/config), WS11 (bench) | — |
 | after WS1 | WS5 (CLI small fixes), then WS4 (maplib) — same file, sequence to avoid rebase pain | WS1 |
 | after WS2 | WS6 (Swift stability), WS7 (Rust lifecycle), WS9 (telemetry) | WS2 |
-| after in-flight branch merges | WS8 (dead-code sweep + IPC allowlist), WS10 (wizard UX) | WS2 + in-flight |
-| needs sign-off (see Deferred decisions) | WS12 (onboarding-ui single source), WS13 (win32 gates) | decisions D1, D2 |
+| after in-flight branch merges | WS8 (dead-code sweep + IPC allowlist), WS10 (wizard UX), WS12 (onboarding-ui single source) | WS2 + in-flight |
+| after WS8 + WS10 | WS14 (real host folder browsing, D5) | WS8, WS10 |
+| own branch, soak-tested | WS15 (DC ownership, D4) | WS7 |
+| **parked** until PR #37 (Rust CLI) merges | WS13 (win32 gates) — decision D2: mac-only until then | PR #37 |
 
 ---
 
@@ -138,7 +140,7 @@ The mapping + SMB-discovery helper family is copy-pasted across `xpair` (266–2
 4. F58 — `main.rs:153`: fatal errors additionally `eprintln!`; `cmd_info`/`cmd_capture` print human-facing output via `println!` (keep tracing calls for the log contract). `screen info` currently prints nothing.
 5. F57 — delete the five passthrough cargo features (`Cargo.toml:100–104`); deps stay optional behind `webrtc`/`crash-report`.
 6. F24 — `rp-input-inject.swift:171`: stop blocking the stdin loop per keystroke — drop `waitUntilExit`, log completion async. `// ponytail: fire-and-forget osascript; if key-order vs CGEvent path ever matters, move to a serial worker queue`.
-7. F60 — comments only: fix the stale host comment (1537–1539) claiming the client never creates channels. Channel-ownership redesign (`negotiated:true` + fixed IDs, or client stops creating) is deferred — see D4.
+7. F60 — comments only: fix the stale host comment (1537–1539) claiming the client never creates channels. The channel-ownership redesign itself is WS15 (decision D4).
 
 **Acceptance**: `cargo build` + `cargo clippy` clean; a failed capture start no longer leaks (assert via `lsof -p` UDP count before/after 3 failed starts); `ps` shows no `<defunct>` rp-screencap after ending a session; `screen info` prints display metadata.
 
@@ -158,7 +160,7 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 7. F70 — delete both `StepProgress.tsx` files (client + host webviews).
 8. F71 — prune the host-onboarding vocabulary (~57 keys × 2 locales) and dead `shell.*`/`map.localPick`/`map.mountPoint` keys from the client webview `i18n.ts`. *(Skip if WS12 lands first — the union dictionary becomes shared there.)*
 9. F51 — `OnboardingWindow.swift`: delete the `startInstall`/`getInstallStatus`/`connectedClients` shims, reply-handler cases, `global.d.ts` decls (the three crashing tests referencing them are handled in WS2 step 4).
-10. F30 — delete `SettingsWindow.swift`; move `autoUpdateKey` into `Updater`. The auto-update-check default is a product decision — see D3; do not change behavior here.
+10. F30 — **decision D3 (resolved): host launch-time auto-update is not wanted** — the client already gates on host version at connect (onboarding host-update gate), so a stale host is caught there. Delete `SettingsWindow.swift`, the `RPAutoUpdateCheck` key, *and* the launch-time auto-update check in `AppDelegate.startServing()` (~130). The manual "Check for Updates…" menu item stays as the only update trigger on the host itself.
 11. F26 — `CaptureControlTests.swift`: wire, don't delete — add a `--capture-control-self-test` flag in `main.swift` calling `runAll()`, run it in CI after `swift build`; fix the diverged inner `Machine.start` force-unwrap (ScreenServer error-acks the nil case). Long-term refactor → shared pure transition function (out of scope).
 12. F62 — `Installer.swift:88`: drop the dead `force:`/`refreshResources:` parameters (single behavior), fix the LEVEL-1 doc comment to match reality (version-up re-runs full install; bootstrap doesn't restart a loaded agent).
 13. F54 — delete `telemetry.js` `sentryConfig()` + export; fix the header comment (no `@sentry/electron` consumer exists).
@@ -186,11 +188,11 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 1. F37 — `App.tsx:263–267` `retryHostPrompt`: merge the fresh identity fields into the selected host — `{ ...h, hostKeyFP: match.fp || h.hostKeyFP, pairingAddress: match.pairingAddress ?? h.pairingAddress, serviceInstanceID, hostNonce, pairPort }`. Today "Try Again" can never succeed for an fp-less host.
 2. F38 — `App.tsx:326`: make the Update pass-through step direction-aware: on `w.direction === "prev"` immediately `w.goTo(S.DISCOVER, "prev")`; keep the 650ms auto-`next()` only for forward entry. Kills the Back-button bounce trap.
 3. F39 — single probe owner: `StepDiscover.chooseHost` only does `setSelected(peerToHost(peer))`; App's id-keyed effect stamps version/flags via `probeSelectedHost`; delete `StepDiscover`'s `deriveHostFlags` copy (export App's). The Update-step entry re-probe (276–283) stays.
-4. F13 — `StepMappings.tsx:86`: remove the fake `HOST_FS` tree + `nodeAt` + tree pane; manual path input (already host-verified via `resolveHostPath`) becomes the primary UI. Real host browsing needs a `listHostDir` bridge method — deferred, D5/US-004.
+4. F13 — **moved to WS14** (decision D5: build real browsing). WS10 leaves `StepMappings` untouched — the fake tree is explicitly labeled as examples and picks are host-verified, so it can survive until WS14 replaces its data source; deleting it here would just churn UI that WS14 re-backs.
 5. F21 — **re-check against the landed in-flight branch first.** If still bridge-only: keep the states but make `StepUpdate` map `result.action === 'prompt_password'` to re-pair guidance (route to pairing) instead of surfacing the impossible "enter the host password" text. Do not build a password form unless the in-flight branch already did.
 6. F52 — `host/onboarding/src/App.tsx:377`: await `window.xpair.complete()`; on `{ok:false}` surface the reason via the existing error UI (or `goTo` the first unmet permission step). The primary CTA currently fails silently.
 
-**Acceptance**: wizard walkthrough — Back from WaitPerm reaches Discover; Try Again succeeds after a host starts broadcasting; one SSH probe per host pick (count via bridge log); mapping step accepts a typed real path and rejects a bogus one with a labeled error; host Done step shows feedback when completion is refused.
+**Acceptance**: wizard walkthrough — Back from WaitPerm reaches Discover; Try Again succeeds after a host starts broadcasting; one SSH probe per host pick (count via bridge log); host Done step shows feedback when completion is refused.
 
 ## WS11 — `fix/bench-scoring` (medium/low, isolated)
 
@@ -204,36 +206,57 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 
 **Acceptance**: `bench/score/score.test.js` + `relay.test.js` green (extend relay.test.js with an RTX-delay case); a synthetic gate-failed record no longer shifts the aggregate mean.
 
-## WS12 — `refactor/onboarding-ui-shared` (architecture) — needs D1
+## WS12 — `refactor/onboarding-ui-shared` (architecture) — after the in-flight branch
 
 **Findings**: F15, F11.
 
 - F15 — the onboarding UI kit is duplicated between `host/onboarding/src` and `ext/onboarding-webview/src` (11 byte-identical files, union i18n dictionaries, already-diverged drift). Extract to `shared/onboarding-ui/` and point both vite roots at it via a resolve alias (both already use `@` aliases; no packaging needed). Each app keeps only its own `Step*`/`App.tsx`. i18n: one shared base dict + per-app extension — this supersedes WS8 step 8 (F71) if it lands first.
-- F11 — the two dist strategies must converge (host: built + gitignored; client: committed + never rebuilt + broken `__BUILD_ID__` canary). **Recommended (D1)**: build the client webview in `client/ide/build.sh` (`npm ci && npm run build` before ext injection, mirroring `build-host.sh`) and gitignore `ext/onboarding-webview/dist`. Fallback if committed dist is deliberate: CI job that rebuilds and diffs.
+- F11 — **decision D1 (resolved)**: build the client webview at build time — add `npm ci && npm run build` for `ext/onboarding-webview` to `client/ide/build.sh` before the ext injection (mirroring `build-host.sh`), delete the committed `ext/onboarding-webview/dist` and gitignore it. Note the release-pipeline implication in the PR: any packaging step that consumed the committed dist must now run after `build.sh`.
 
 **Acceptance**: both apps build from the shared source; `diff -r` of the extracted files against pre-refactor copies is empty (pure move); onboarding renders in both surfaces; no committed dist drift possible (whichever D1 option).
 
-## WS13 — `fix/win32-gates` (short-term) — needs D2
+## WS13 — `fix/win32-gates` — **PARKED** (decision D2)
 
-**Findings**: F19, F20. Latent violations of the single-codebase mac+win contract (no Windows artifact ships yet; failures currently degrade to error toasts / a dead-ended pre-workbench gate).
-
-Short-term (keeps develop honest until the Rust CLI, PR #37, provides a native Windows path):
+**Findings**: F19, F20 — accepted as known-latent. **Decision D2 (resolved)**: Windows support arrives via the Rust CLI (PR #37); until it merges, the product is mac-only and no win32 gating work is done. Do not start this WS; the plan below is kept so the findings aren't lost when PR #37 lands:
 - F19 — `extension.js:1625` `runXpairCli`: branch on `process.platform` — win32 spawns the executable argv-style (no login-shell wrapper, no `shSingleQuote`); gate `sshControlPath`/`sshRun`/`spawnTunnel` ControlMaster usage behind `!== 'win32'`.
 - F20 — skip the pre-workbench onboarding gate on `process.platform !== 'darwin'` (open the workbench normally, show a "host setup requires the CLI — coming to Windows" notice) until a win32 CLI exists. Long-term: platform-branch `rpBin`/`installCli`/`openHostOnboarding`.
 
 **Acceptance**: mac behavior byte-identical (t_15/t_23 green); code inspection shows no POSIX-shell spawn reachable on win32.
 
+## WS14 — `feat/onboarding-host-browse` (D5) — after WS8 + WS10
+
+**Findings**: F13. **Decision D5 (resolved)**: build real host folder browsing; the fake `HOST_FS` tree goes away by being *replaced*, not deleted.
+
+**Design**:
+- New bridge method `listHostDir(target, path)` in `onboarding-bridge.js`: one `ssh` invocation of `ls -1apL` (or `find -maxdepth 1 -type d`) via the existing hardened ssh helper the bridge already uses — **directories only**, home-anchored default, path passed through the same quoting/validation as `resolveHostPath` (this is post-TOFU code: reuse its host-key-pinned connection options). Returns `{ok, entries:[{name, path}], err}`; never throws into the renderer.
+- Expose via `onboarding-preload.cjs` + `global.d.ts`, and add to WS8's frozen `RENDERER_METHODS` allowlist — this is the sanctioned way to grow the surface: method + preload + types + allowlist + a caller, all in one PR (the WS8 contract test enforces the set stays identical).
+- `StepMappings.tsx`: delete the `HOST_FS` constant + `nodeAt`; the existing tree pane fetches lazily per expanded directory (cache per path, spinner per node), falls back to the manual input with a labeled error when `listHostDir` fails (offline host, permission). Picks remain verified via `resolveHostPath` before persisting — browsing is a convenience, not a new trust path.
+
+**Steps**: bridge method + tests (mirror an existing bridge ssh-method test, incl. a quoting case for paths with spaces/Hangul); preload/types/allowlist; StepMappings data-source swap; i18n keys for loading/error states (EN+KO).
+
+**Acceptance**: browsing a real host shows its actual home directories lazily; a path with spaces round-trips; killing ssh mid-browse degrades to manual input with a visible error; the WS8 surface contract test passes with exactly one new method.
+
+## WS15 — `fix/rd-datachannel-ownership` (D4) — own branch, soak-tested
+
+**Findings**: F60 (the redesign half; WS7 already fixed the stale comments). **Decision D4 (resolved)**: converge on `negotiated: true` + fixed channel IDs.
+
+**Design**: both sides declare `rp-ctl` (id 0) and `rp-move` (id 1) with `negotiated: true`, removing the four-live-channels split-brain and the client's silent mid-session switch from client-created to host-created SCTP streams. Host side: `serve_webrtc.rs` channel creation; client side: `media/remote-desktop.js` `ctlDC`/`moveDC` setup — `ondatachannel` handlers become dead and are removed. The input-ready gate stays (it also covers capture readiness, not just channel ordering).
+
+**Constraint**: version-skew — an old client against a new host (or vice versa) must still connect. Ship behind the existing screen-protocol version handshake (`shared/screen-protocol`): bump the protocol minor, negotiate old-style channels when the peer predates it, and drop the fallback one release later.
+
+**Acceptance**: manual soak — 30-minute RD session with continuous input, reconnect ×5, host restart mid-session; `webrtc-internals` (or rust-side stats) shows exactly 2 data channels; cross-version pairing against the previous release still connects.
+
 ---
 
-## Deferred decisions (need sign-off)
+## Decisions (resolved 2026-07-07)
 
-| ID | Question | Recommendation |
+| ID | Question | Decision |
 |---|---|---|
-| D1 | Client webview `dist/`: build-time compile + gitignore, or keep committing? | Build in `client/ide/build.sh`, gitignore dist (WS12). The staleness canary is already broken; committed artifacts silently drift. |
-| D2 | Windows interim UX: gate-and-notify (WS13) vs. blocking win32 builds until cli-rs (PR #37)? | Gate-and-notify — keeps develop building both targets per the project contract. |
-| D3 | `RPAutoUpdateCheck` default false + its only toggle deleted (F30) ⇒ launch auto-update effectively dead. Register default `true`, or expose a toggle on a live surface? | Default `true` + menu-item toggle; silent-stale hosts are worse than an update prompt. |
-| D4 | WebRTC data channels: both sides create `rp-ctl`/`rp-move` (4 live channels, F60). Move to `negotiated:true` + fixed IDs? | Yes, but as its own change with soak testing — cross-stream ordering is currently masked by the input-ready gate. |
-| D5 | Real host folder browsing (F13): add `listHostDir` bridge method (one `ssh ls -1p`)? | Yes, post-WS10 — tracked as US-004; manual input is the stopgap. |
+| D1 | Client webview `dist/`: commit or build? | **Build at build time** in `client/ide/build.sh`, delete + gitignore the committed dist (WS12). |
+| D2 | win32 interim handling? | **None — mac-only until the Rust CLI (PR #37) merges.** WS13 parked; F19/F20 accepted as known-latent, revisit when #37 lands. |
+| D3 | Host launch-time auto-update? | **Not needed** — the client's connect-time host-version gate covers stale hosts. Delete `SettingsWindow`, `RPAutoUpdateCheck`, and the `startServing()` check; manual "Check for Updates…" menu stays (WS8 step 10). |
+| D4 | DC ownership redesign? | **Yes** — `negotiated:true` + fixed IDs as its own soak-tested branch, WS15, with a protocol-version fallback window. |
+| D5 | Real host folder browsing? | **Yes** — `listHostDir` bridge + lazy tree, WS14 (supersedes WS10's F13 step). |
 
 ## Rejected findings (for the record)
 
