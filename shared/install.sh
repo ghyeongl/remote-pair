@@ -179,6 +179,13 @@ record NOTE "installed role=$ROLE at $(date '+%F %T') on $(hostname -s)"
 use_shared_manifest
 say "xpair CLI → $LOCAL_BIN"
 install_unrecorded_file "$CLIENT_DIR/xpair" "$LOCAL_BIN/xpair" 755
+# maplib.sh rides with the CLI, not with a role: host-only installs run xpair too.
+if [ -f "$CLIENT_DIR/bin/maplib.sh" ]; then
+  say "map helpers → $RP_CLIENT_DIR/bin/maplib.sh"
+  install_file "$CLIENT_DIR/bin/maplib.sh" "$RP_CLIENT_DIR/bin/maplib.sh" 644
+else
+  warn "client/cli/bin/maplib.sh not found — mapping commands will require self-update"
+fi
 case ":$PATH:" in *":$LOCAL_BIN:"*) : ;; *) warn "$LOCAL_BIN is not in PATH — add it to your shell rc" ;; esac
 if is_client; then
   mk_dir "$CLIENT_LOG_DIR"; chmod 700 "$CLIENT_LOG_DIR"
@@ -357,12 +364,6 @@ if is_client; then
   [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize" 755
   say "[client] shared logger → $RP_CLIENT_DIR/bin/logging.sh"
   install_file "$HERE/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" 644
-  if [ -f "$CLIENT_DIR/bin/maplib.sh" ]; then
-    say "[client] map helpers → $RP_CLIENT_DIR/bin/maplib.sh"
-    install_file "$CLIENT_DIR/bin/maplib.sh" "$RP_CLIENT_DIR/bin/maplib.sh" 644
-  else
-    warn "client/cli/bin/maplib.sh not found — mapping commands will require self-update"
-  fi
   if [ -f "$HOST_DIR/uninstall-host.sh" ]; then
     say "[client] host uninstaller → $RP_CLIENT_DIR/share/uninstall-host.sh"
     install_file "$HOST_DIR/uninstall-host.sh" "$RP_CLIENT_DIR/share/uninstall-host.sh" 755

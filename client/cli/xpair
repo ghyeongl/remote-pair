@@ -119,8 +119,13 @@ if [ -f "$RP_CLIENT_DIR/bin/maplib.sh" ]; then
   # shellcheck disable=SC1090
   . "$RP_CLIENT_DIR/bin/maplib.sh"
 else
-  err "maplib.sh missing — run: xpair self-update"
-  exit 1
+  # Deferred failure: mapping-free commands (self-update, host, status, logs) must keep
+  # working on a pre-maplib install — a load-time exit would brick the upgrade path
+  # (the old self-update never fetched maplib.sh, so the recovery command itself dies).
+  for _maplib_fn in map_client_of map_host_of map_to_host resolve_host valid_host smb_host map_mode_infer smb_user share_name_for_hostpath expected_mountpoint smb_mount_url smb_mount_source discover_mountpoint_for_share discover_mountpoint_for_hostpath host_smb_status; do
+    eval "$_maplib_fn() { printf '%s\n' 'maplib.sh missing — run: xpair self-update' >&2; exit 1; }"
+  done
+  unset _maplib_fn
 fi
 
 # ── UI helpers (err/info/warn come from logging.sh or the fallback above) ──
