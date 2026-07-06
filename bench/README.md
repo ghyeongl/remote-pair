@@ -59,19 +59,25 @@ Slice 2 adds a seedable UDP relay on `127.0.0.1:${PROXY_PORT}` and rewrites both
 peers' UDP host ICE candidates to that relay from the benchmark client. STUN and
 DTLS are always passed through; RTP media impairment is applied only on the
 host-to-client direction by default. The relay writes counters to
-`bench/out/proxy-<timestamp>.json`, and the client run record includes the path as
-`run.proxyStats`.
+`bench/out/proxy-<profile>-<timestamp>.json`, and the client run record includes
+the path as `run.proxyStats`.
 
 ```sh
 cd bench
 PROFILE=passthrough SEED=axis-a ./run-impaired.sh
 PROFILE=loss LOSS=0.01 SEED=loss-001 ./run-impaired.sh
 PROFILE=burst GE_P=0.03 GE_R=0.15 GE_LOSS_BAD=1 SEED=burst-001 ./run-impaired.sh
+PROFILE=marked-burst BURST_SCHEDULE=3000:700,9000:700 SEED=burst-window ./run-impaired.sh
 ```
 
-Profiles are `passthrough`, `latency`, `loss`, `burst`, and `fragment`. Set
-`LAT_MS`/`JIT_MS` to add seeded delay to any non-passthrough profile. Set
-`RTCP_LOSS` to impair feedback packets; it defaults to off. The `fragment`
+Profiles are `passthrough`, `latency`, `loss`, `burst`, `fragment`, and
+`marked-burst`. Set `LAT_MS`/`JIT_MS` to add seeded delay to any non-passthrough
+profile. Set `RTCP_LOSS` to impair feedback packets; it defaults to off.
+`RETX_LOSS` adds residual loss for RTX retransmissions. `BW_KBPS` enables a
+host-to-client RTP leaky-bucket bandwidth cap, and `BW_BUFFER_MS` controls how
+long packets may queue before tail-drop. The `marked-burst` profile drops
+host-to-client RTP during `BURST_SCHEDULE` windows, formatted as comma-separated
+`startMs:durationMs` entries anchored to the first media packet. The `fragment`
 profile drops RTP packets by packet size (`FRAG_BYTES`, default 1100) because
 SRTP keeps the RTP header visible but hides whether a large packet is an IDR
 fragment.
@@ -95,6 +101,7 @@ and sample standard deviation, then prints a short table.
 cd bench
 npm run parse-check
 npm run relay-check
+npm run score-check
 ```
 
 This loads the local client stats module, builds a fabricated sample, and exits

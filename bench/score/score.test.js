@@ -2,8 +2,13 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const { aggregateScoreRecords } = require("./baseline-aggregate");
 const { computeRecovery, RECOVER_SPEED_OFFSET_MS } = require("./recovery");
-const { HARD_GATE_SCORE, WEIGHTS, norm, scoreRun } = require("./score");
+const { HARD_GATE_SCORE, WEIGHTS, norm, rateFromCounter, scoreRun } = require("./score");
 
 function client(overrides = {}) {
   return {
@@ -65,6 +70,45 @@ function testCompositeMathAndMissing() {
   assert.deepEqual(record.missing, ["cpuSlope", "qp", "e2eP95"]);
   assert.equal(record.inputs.hostToClientRtpDropped, 10);
   assert.equal(record.inputs.injectedLossRate, 0.1);
+}
+
+function testRateFromCounterExport() {
+  assert.equal(rateFromCounter(client(), "pliCount"), 2);
+}
+
+function testBaselineAggregateExcludesGateFailures() {
+  const records = [
+    { path: "score-good-a.json", score: 1, gates: { passed: true }, inputs: { decodedFps: 30 } },
+    { path: "score-gate-failed.json", score: HARD_GATE_SCORE, gates: { passed: false }, inputs: { decodedFps: 0 } },
+    { path: "score-good-b.json", score: 3, gates: { passed: true }, inputs: { decodedFps: 30 } },
+  ];
+  const aggregate = aggregateScoreRecords(records);
+  assert.equal(aggregate.runCount, 3);
+  assert.equal(aggregate.excludedRuns, 1);
+  assert.equal(aggregate.score.count, 2);
+  assert.equal(aggregate.score.mean, 2);
+  close(aggregate.score.stddev, Math.sqrt(2));
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-baseline-score-"));
+  try {
+    const files = records.map((record, index) => {
+      const file = path.join(tmp, `score-${index}.json`);
+      fs.writeFileSync(file, `${JSON.stringify(record)}\n`);
+      return file;
+    });
+    const out = path.join(tmp, "aggregate.json");
+    const result = spawnSync(process.execPath, [path.join(__dirname, "baseline-aggregate.js"), out, ...files], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout.trim(), "2");
+    assert.match(result.stderr, /excludedRuns=1/);
+    const written = JSON.parse(fs.readFileSync(out, "utf8"));
+    assert.equal(written.score.mean, 2);
+    assert.deepEqual(written.score.values, [1, 3]);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 function testCoverageHardGate() {
@@ -142,6 +186,8 @@ function testRecoveryComputation() {
 const tests = [
   testNormUsesBaselineStddev,
   testCompositeMathAndMissing,
+  testRateFromCounterExport,
+  testBaselineAggregateExcludesGateFailures,
   testCoverageHardGate,
   testFreezeTelemetryHardGate,
   testSsimHardGate,

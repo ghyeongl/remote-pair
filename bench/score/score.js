@@ -299,5 +299,6 @@ module.exports = {
   SSIM_FLOOR,
   WEIGHTS,
   norm,
+  rateFromCounter,
   scoreRun,
 };
