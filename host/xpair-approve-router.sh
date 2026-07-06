@@ -84,7 +84,7 @@ sendkey(){
     return|enter) kc=36 ;; esc|escape) kc=53 ;; space) kc=49 ;; tab) kc=48 ;; *) kc="" ;;
   esac
   IFS='+' read -ra M <<< "$mods"
-  for m in "${M[@]}"; do case "$m" in
+  for m in ${M[@]+"${M[@]}"}; do case "$m" in
     cmd|command) parts="$parts command down," ;; shift) parts="$parts shift down," ;;
     ctrl|control) parts="$parts control down," ;; alt|option) parts="$parts option down," ;;
   esac; done

@@ -1322,6 +1322,7 @@ cmd_logs() {
       [ -d "$rel" ] || continue
       roots+=("${rel#"$HOME/.xpair/"}")
     done < <(local_log_dirs)
+    [ "${#roots[@]}" -gt 0 ] || { warn "collect: no log dirs yet"; return 1; }
     tar -czf "$out" -C "$HOME/.xpair" "${roots[@]}" 2>/dev/null \
       || { warn "collect: tar failed"; return 1; }
     printf '%s\n' "$out"
@@ -1924,7 +1925,7 @@ cmd_install_host() {
     { [ -n "${pwdir:-}" ] && rm -rf "$pwdir"; } || true
     unset RP_ASKPASS_FIFO || true
   ' RETURN
-  _rp_ssh() { "${SSHENV[@]}" ssh "${RP_SSHOPTS[@]}" "$@" </dev/null; }
+  _rp_ssh() { ${SSHENV[@]+"${SSHENV[@]}"} ssh "${RP_SSHOPTS[@]}" "$@" </dev/null; }
 
   if [ "$password_stdin" = 1 ]; then
     c "authenticating to $target with the supplied account password …"
@@ -1990,7 +1991,7 @@ cmd_install_host() {
       # We do NOT use _rp_ssh here: it hardcodes </dev/null (see the key-authorize note below),
       # which would discard "$btmp" and run an EMPTY bootstrap that "succeeds" while installing
       # nothing. Call ssh directly so the script reaches the remote bash's stdin.
-      "${SSHENV[@]}" ssh "${RP_SSHOPTS[@]}" "$target" "ROLE=host BRANCH=$ref bash -s" < "$btmp" \
+      ${SSHENV[@]+"${SSHENV[@]}"} ssh "${RP_SSHOPTS[@]}" "$target" "ROLE=host BRANCH=$ref bash -s" < "$btmp" \
         || { rm -f "$btmp"; err "remote bootstrap failed"; return 1; }
       rm -f "$btmp"
     else
@@ -2011,14 +2012,14 @@ cmd_install_host() {
       # whose forced xpair-ssh-gate execs SSH_ORIGINAL_COMMAND and serves NO sftp subsystem — default
       # (SFTP) scp would fail before the update installs. -O is harmless over the normal key/password path.
       _rp_ssh "$target" "rm -rf ~/.cache/xpair/stage && mkdir -p ~/.cache/xpair/stage/shared ~/.cache/xpair/stage/host ~/.cache/xpair/stage/client ~/.cache/xpair/stage/build" 2>/dev/null || true
-      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" "$repo_root"/shared/*.sh "$target:~/.cache/xpair/stage/shared/" </dev/null \
+      ${SSHENV[@]+"${SSHENV[@]}"} scp -O "${RP_SSHOPTS[@]}" "$repo_root"/shared/*.sh "$target:~/.cache/xpair/stage/shared/" </dev/null \
         || { err "scp of shared/ failed"; return 1; }
       # role=host also (re)installs the client CLI tools from client/cli/ — stage them too.
-      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/client/cli" "$target:~/.cache/xpair/stage/client/" </dev/null \
+      ${SSHENV[@]+"${SSHENV[@]}"} scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/client/cli" "$target:~/.cache/xpair/stage/client/" </dev/null \
         || { err "scp of client/cli failed"; return 1; }
-      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/host/rules.txt" "$repo_root/host/skills" "$repo_root/host/hooks" "$target:~/.cache/xpair/stage/host/" </dev/null \
+      ${SSHENV[@]+"${SSHENV[@]}"} scp -O "${RP_SSHOPTS[@]}" -r "$repo_root/host/rules.txt" "$repo_root/host/skills" "$repo_root/host/hooks" "$target:~/.cache/xpair/stage/host/" </dev/null \
         || { err "scp of host resources failed"; return 1; }
-      "${SSHENV[@]}" scp -O "${RP_SSHOPTS[@]}" -r "$appsrc" "$target:~/.cache/xpair/stage/build/" </dev/null \
+      ${SSHENV[@]+"${SSHENV[@]}"} scp -O "${RP_SSHOPTS[@]}" -r "$appsrc" "$target:~/.cache/xpair/stage/build/" </dev/null \
         || { err "scp of signed app failed"; return 1; }
       _rp_ssh "$target" "cd ~/.cache/xpair/stage && RP_YES=1 bash shared/install.sh --role host" \
         || { err "remote install.sh failed"; return 1; }
@@ -2053,7 +2054,7 @@ cmd_install_host() {
     # into ssh and read via $(cat) on the host; we do NOT use _rp_ssh (it hardcodes
     # </dev/null, which would drop the piped key).
     local rp_authcmd='umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys; key=$(cat); grep -qxF "$key" ~/.ssh/authorized_keys || printf "%s\n" "$key" >> ~/.ssh/authorized_keys'
-    printf '%s\n' "$pubdata" | "${SSHENV[@]}" ssh "${RP_SSHOPTS[@]}" "$target" "$rp_authcmd" \
+    printf '%s\n' "$pubdata" | ${SSHENV[@]+"${SSHENV[@]}"} ssh "${RP_SSHOPTS[@]}" "$target" "$rp_authcmd" \
       || { err "failed to authorize client key on $target"; return 1; }
     ok "client key authorized on $target"
   fi
