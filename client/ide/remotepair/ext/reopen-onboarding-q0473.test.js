@@ -16,9 +16,9 @@ process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 delete process.env.RP_FORCE_ONBOARDING;
 
-const hostDir = path.join(tmpHome, ".xpair", "host");
-fs.mkdirSync(hostDir, { recursive: true });
-fs.writeFileSync(path.join(hostDir, "client.env"), "REMOTE_HOST=configured-host\n");
+const clientDir = path.join(tmpHome, ".xpair", "client");
+fs.mkdirSync(clientDir, { recursive: true });
+fs.writeFileSync(path.join(clientDir, "client.env"), "REMOTE_HOST=configured-host\n");
 
 const onboardingMain = require("./onboarding-main.cjs");
 
@@ -73,7 +73,7 @@ test("Q0473 Settings Configure can reopen first-run onboarding without ending se
     "configured users should normally skip onboarding when guards pass",
   );
 
-  fs.writeFileSync(path.join(hostDir, ".force-onboarding"), "");
+  fs.writeFileSync(path.join(clientDir, ".force-onboarding"), "");
   assert.equal(
     await onboardingMain.firstFailingGuard(["Xpair"], greenBridge),
     "welcome",

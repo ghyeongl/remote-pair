@@ -13,7 +13,7 @@ run_doctor() {  # $1 = what the stubbed ssh should echo (on|off)
 # ── mount-method mapping + host File Sharing OFF → doctor surfaces the cause + guidance ──
 new_sandbox
 mkdir -p "$SBX/proj"
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/proj\nFOLDER_MAP_MODES=%s::mount\nSYNC_BACKEND=mount\nMOUNT_BACKEND=smb\n' "$SBX/proj" "$SBX/proj" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/proj\nFOLDER_MAP_MODES=%s::mount\nSYNC_BACKEND=mount\nMOUNT_BACKEND=smb\n' "$SBX/proj" "$SBX/proj" > "$RP_CLIENT_DIR/client.env"
 run_doctor off
 it "doctor_smb/off-surfaced"
 assert_contains "$RP_OUT" "host File Sharing" "doctor reports host File Sharing for a mount mapping"
@@ -23,12 +23,19 @@ assert_contains "$RP_OUT" "OFF" "File Sharing OFF is surfaced as the cause"
 run_doctor on
 it "doctor_smb/on-reported"
 assert_contains "$RP_OUT" "on (SMB mounts can connect)" "File Sharing ON reported"
+
+# ── stale MOUNT_BACKEND=sshfs is ignored; SMB is still the only mount backend ──
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/proj\nFOLDER_MAP_MODES=%s::mount\nSYNC_BACKEND=mount\nMOUNT_BACKEND=sshfs\n' "$SBX/proj" "$SBX/proj" > "$RP_CLIENT_DIR/client.env"
+run_doctor on
+it "doctor_smb/stale-sshfs-backend-ignored"
+assert_contains "$RP_OUT" "backend=smb" "doctor reports smb despite stale sshfs config"
+assert_contains "$RP_OUT" "on (SMB mounts can connect)" "stale sshfs config does not skip SMB readiness"
 cleanup_sandbox
 
 # ── sync-only setup (no mount mapping) → NO SMB gate/line at all ──
 new_sandbox
 mkdir -p "$SBX/syncproj"
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/s\nFOLDER_MAP_MODES=%s::sync\nSYNC_BACKEND=syncthing\n' "$SBX/syncproj" "$SBX/syncproj" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%s::/host/s\nFOLDER_MAP_MODES=%s::sync\nSYNC_BACKEND=syncthing\n' "$SBX/syncproj" "$SBX/syncproj" > "$RP_CLIENT_DIR/client.env"
 run_doctor off
 it "doctor_smb/sync-only-no-gate"
 assert_absent "$RP_OUT" "host File Sharing" "sync-only setup never triggers an SMB gate"

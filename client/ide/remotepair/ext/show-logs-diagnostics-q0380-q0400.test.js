@@ -43,12 +43,14 @@ test("Q0380/Q0400 Show Logs reveals logs and collects a readable diagnostic bund
   assert.match(showLogs, /executeCommand\("revealFileInOS", dirUri\)/);
   assert.match(showLogs, /openExternal\(dirUri\)/, "Show Logs must fall back to opening the log folder");
   assert.match(showLogs, /Collect logs \(\-\-collect\)/);
-  assert.match(showLogs, /Xpair logs are in ~\/\.xpair\/host\/logs/);
+  assert.match(showLogs, /Xpair logs are in ~\/\.xpair\/client\/logs/);
   assert.match(showLogs, /bug report/);
   assert.match(showLogs, /createTerminal\("Xpair . Collect Logs"\)/);
   assert.match(showLogs, /sendText\("xpair logs --collect", true\)/);
 
-  assert.match(cli, /out="\$\{RP_DIR\}\/logs\/xpair-logs-\$\{stamp\}\.tgz"/);
+  assert.match(cli, /mktemp -d "\$\{TMPDIR:-\/tmp\}\/xpair-logs-\$\{stamp\}\.XXXXXX"/);
+  assert.match(cli, /out="\$tmp_parent\/xpair-logs-\$\{stamp\}\.tgz"/);
+  assert.match(cli, /local_log_dirs\(\)/);
   assert.match(cli, /tar -czf "\$out"/);
   assert.match(cli, /printf '%s\\n' "\$out"/, "collect must print the generated bundle path");
 });

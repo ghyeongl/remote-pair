@@ -41,7 +41,7 @@ assert_absent "$MLOG" "ssh|" "invalid configured host is not passed to ssh"
 cleanup_sandbox
 
 new_sandbox
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$PWD::/tmp/xpair path'quote" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$PWD::/tmp/xpair path'quote" > "$RP_CLIENT_DIR/client.env"
 make_all_mocks
 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --yes "$PWD"
 
@@ -56,7 +56,7 @@ cleanup_sandbox
 new_sandbox
 unsafe_dir="$SBX/bad'quote\"name"
 mkdir -p "$unsafe_dir"
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$unsafe_dir::$unsafe_dir" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$unsafe_dir::$unsafe_dir" > "$RP_CLIENT_DIR/client.env"
 make_all_mocks ssh mosh tmux tmux-aqua tailscale open launchctl tput
 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --yes "$unsafe_dir"
 

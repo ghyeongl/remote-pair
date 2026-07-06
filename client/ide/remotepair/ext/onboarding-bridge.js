@@ -20,15 +20,17 @@ const http = require("http");
 const telemetry = require("./telemetry.js");
 
 const HOME = os.homedir();
-const RP_DIR = path.join(HOME, ".xpair/host");
-const CLIENT_ENV = path.join(RP_DIR, "client.env");
+const RP_CLIENT_DIR = path.join(HOME, ".xpair/client");
+const RP_HOST_DIR = path.join(HOME, ".xpair/host");
+const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
+const LEGACY_CLIENT_ENV = path.join(RP_HOST_DIR, "client.env");
 const SSH_KEY = path.join(HOME, ".ssh", "id_ed25519");
 // Dedicated xpair pairing key — used ONLY for pairing (request signature), the SSH proof, and the
 // paired runtime (launch/heartbeat/RD). Kept OUTSIDE ~/.ssh so it never collides with the user's
 // personal id_ed25519: the host installs ONLY this key as the restricted, fingerprint-bound
 // forced-command line, so the xpair-ssh-gate always runs and the proof completes. Generated
 // unencrypted (owned by us) → signed raw, no ssh-agent needed.
-const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
+const PAIRING_KEY = path.join(RP_HOST_DIR, "pairing_ed25519");
 const SSH_KNOWN_HOSTS = path.join(HOME, ".ssh", "known_hosts");
 const SSH_KNOWN_HOSTS_DEFAULTS = [
   SSH_KNOWN_HOSTS,
@@ -82,6 +84,15 @@ function rpBinAbs() {
   const local = path.join(HOME, ".local", "bin", "xpair");
   try { if (fs.existsSync(local)) return local; } catch { /* ignore */ }
   return null;
+}
+
+function clientEnvPath() {
+  try {
+    if (fs.existsSync(CLIENT_ENV_FILE)) return CLIENT_ENV_FILE;
+  } catch {
+    /* fall back to the legacy path */
+  }
+  return LEGACY_CLIENT_ENV;
 }
 
 /** Client version SSOT — the same 0.5.0a{N} lockstep stamp the webview build embeds (read from the
@@ -938,8 +949,8 @@ async function signWithAgent(pubBlob, transcript) {
 
 async function ensurePairingKey() {
   try {
-    fs.mkdirSync(RP_DIR, { recursive: true });
-    fs.chmodSync(RP_DIR, 0o700);
+    fs.mkdirSync(RP_HOST_DIR, { recursive: true });
+    fs.chmodSync(RP_HOST_DIR, 0o700);
   } catch { /* best-effort dir perms */ }
   if (!fs.existsSync(PAIRING_KEY)) {
     await run("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", PAIRING_KEY, "-C", "xpair-pairing", "-q"]);
@@ -1032,7 +1043,7 @@ function currentGatewayMac() {
 }
 
 function gatewayMacStatus({ updateBaseline = false } = {}) {
-  const stored = parseEnv(CLIENT_ENV).GATEWAY_MAC || "";
+  const stored = parseEnv(clientEnvPath()).GATEWAY_MAC || "";
   if (process.platform !== "darwin") {
     return { allowed: true, state: "unsupported-platform", current: "", stored, err: "" };
   }
@@ -1197,7 +1208,7 @@ function parseEnv(file) {
 function upsertEnv(key, val) {
   let lines = [];
   try {
-    lines = fs.readFileSync(CLIENT_ENV, "utf8").split("\n");
+    lines = fs.readFileSync(clientEnvPath(), "utf8").split("\n");
   } catch {
     /* file may not exist yet */
   }
@@ -1212,8 +1223,8 @@ function upsertEnv(key, val) {
   });
   if (!found) lines.push(`${key}="${val}"`);
   try {
-    fs.mkdirSync(RP_DIR, { recursive: true });
-    fs.writeFileSync(CLIENT_ENV, lines.join("\n").replace(/\n+$/, "\n"));
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true });
+    fs.writeFileSync(CLIENT_ENV_FILE, lines.join("\n").replace(/\n+$/, "\n"));
   } catch {
     /* best effort */
   }
@@ -1301,7 +1312,7 @@ const bridge = {
   // while parseEnv reads it literally — so a local re-parse split on ';' diverges from the CLI
   // and the UI shows zero/garbled mappings. Re-derive a clean `client::host;...` from the CLI.
   async getConfig() {
-    const e = parseEnv(CLIENT_ENV);
+    const e = parseEnv(clientEnvPath());
     let folderMaps = e.FOLDER_MAPS || "";
     // Per-mapping method comes from the CLI SSOT (FOLDER_MAP_MODES via `map list --json`). Carry it
     // alongside folderMaps as `clientPath::method;…` so the UI uses the STORED method instead of the
@@ -1407,7 +1418,7 @@ const bridge = {
   // engine-specific (each engine stores creds differently); see ENGINE_PROBE below. Returns
   // {installed, authed, version, err}.
   async hostEnvEngine(hostArg) {
-    const host = String(hostArg || parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(hostArg || parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { engine: "", err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { engine: "", err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1426,7 +1437,7 @@ const bridge = {
 
   async hostEngineStatus(engine) {
     const e = String(engine || "").trim();
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { installed: false, authed: false, version: "", err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return {
@@ -1476,7 +1487,7 @@ const bridge = {
   // "ran", not "binary is launch-able"). Mirrored in host/app/EngineGuard.swift.
   async installHostEngine(engine) {
     const e = String(engine || "");
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1501,7 +1512,7 @@ const bridge = {
   // key is dropped here right after. Returns {ok, err}.
   async setHostEngineAuth(engine, apiKey) {
     const e = String(engine || "");
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { ok: false, err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1531,7 +1542,7 @@ const bridge = {
   // Uses `test -e` which returns 0 if the path exists (file, dir, or symlink).
   async hostPathExists(p) {
     if (!p) return { exists: false, err: "no path" };
-    const host = String(parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
     if (!host) return { exists: false, err: "REMOTE_HOST not set" };
     if (!validSshTarget(host)) {
       return { exists: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
@@ -1567,24 +1578,26 @@ const bridge = {
     return { ok: false, path: "", err: "folder not found" };
   },
 
-  // Mappings — compute the default mountpoint the same way xpair-mount does, so the UI
-  // can pre-fill the field before the user clicks Mount.
-  //
-  // Mirrors xpair-mount default_mountpoint + sanitize_path exactly:
-  //   sanitize_path: strip leading '/', replace remaining '/' with '_',
-  //                  then replace every char not in [A-Za-z0-9._-] with '_'.
-  //   host_slug:     replace every char not in [A-Za-z0-9._-] with '_'.
-  //   result:        ~/.xpair/host/mounts/<host_slug>/<path_slug>
+  // Mappings — pre-fill with the NetFS/Finder mountpoint. macOS chooses
+  // /Volumes/<share> or a suffixed variant; when the share is already mounted,
+  // discover the real path from mount(8), otherwise return the first expected path.
   defaultMountpoint(hostPath) {
-    const cfg = parseEnv(CLIENT_ENV);
+    const cfg = parseEnv(clientEnvPath());
     const remoteHost = cfg.REMOTE_HOST || "";
-    const hostSlug = remoteHost.replace(/[^A-Za-z0-9._-]/g, "_");
-    const pathSlug = hostPath
-      .replace(/^\//, "")          // strip leading /
-      .replace(/\//g, "_")         // remaining / → _
-      .replace(/[^A-Za-z0-9._-]/g, "_"); // non-safe chars → _
-    const mountsRoot = path.join(RP_DIR, "mounts");
-    return path.join(mountsRoot, hostSlug, pathSlug);
+    const smbHost = String(remoteHost).includes("@") ? String(remoteHost).split("@").pop() : String(remoteHost);
+    const shareName = path.posix.basename(String(hostPath || ""));
+    if (!shareName) return "/Volumes";
+    try {
+      const out = cp.execFileSync("mount", { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+      const marker = `@${smbHost}/${shareName} on `;
+      for (const line of String(out || "").split("\n")) {
+        if (!line.includes(marker) || !line.includes(" (smbfs")) continue;
+        const start = line.indexOf(" on ");
+        const end = line.indexOf(" (smbfs", start);
+        if (start >= 0 && end > start) return line.slice(start + 4, end);
+      }
+    } catch { /* best effort only */ }
+    return path.join("/Volumes", shareName);
   },
 
   // Mappings — actually mount a host folder. `xpair-mount` takes a SUBCOMMAND first, so via the
@@ -2192,7 +2205,7 @@ const bridge = {
     if ("reason" in p) p.reason = telemetry.normalizeReason(p.reason);
     if ("path" in p) p.path = telemetry.normalizePath(p.path);
     // host_connected cardinality = ONCE PER INSTALL (Insight A/B count installs, not IDE
-    // restarts). The same shared client.env stamp is honored by extension.js probeHost(), so a
+    // restarts). The same shared telemetry.env stamp is honored by extension.js probeHost(), so a
     // host_connected fires at most once whether the webview or the extension observes it first.
     if (event === telemetry.EVENTS.HOST_CONNECTED && !telemetry.claimHostConnectedOnce()) {
       return { ok: true }; // already counted this install — drop the duplicate.

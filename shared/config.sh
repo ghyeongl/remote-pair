@@ -1,31 +1,46 @@
 #!/bin/bash
 # config.sh — Single source of tunables. Source-only (do not execute directly).
 #
-# All Xpair runtime state lives under ~/.xpair/host (self-contained namespace).
-# ~/.claude holds only what the Claude harness needs (approve skill, etc.) — Xpair
-# behavior does not depend on whether ~/.claude is synced.
+# Xpair runtime state is split by role:
+#   ~/.xpair/host    HOST runtime — host app, approve router, rules, host logs.
+#   ~/.xpair/client  CLIENT runtime — launcher, client.env, client logs.
+#   ~/.xpair/ide     IDE user-data.
+#   ~/.xpair/ide-server  IDE remote-server data.
 #
 # Config is split by role so client and host files never overwrite each other:
-#   ~/.xpair/host/common.env   LOCAL_BIN, AQUA_SOCK            (shared — values must match on both sides)
-#   ~/.xpair/host/host.env     BUNDLE_PREFIX, APP_NAME, …       (host-only — app/approve/update identity)
-#   ~/.xpair/host/client.env   REMOTE_HOST, FOLDER_MAPS, …      (client-only — attach target, path mappings)
+#   ~/.xpair/host/common.env     LOCAL_BIN, AQUA_SOCK          (host-side shared values)
+#   ~/.xpair/host/host.env       BUNDLE_PREFIX, APP_NAME, …     (host-only — app/approve/update identity)
+#   ~/.xpair/client/common.env   LOCAL_BIN, AQUA_SOCK          (client-side shared values)
+#   ~/.xpair/client/client.env   REMOTE_HOST, FOLDER_MAPS, …    (client-only — attach target, path mappings)
 # Each role install writes only its own file → no cross-role contamination.
 #
 # Priority: environment variable > role env file > derived default.
 # Personal values (hostname, sync paths) are not hard-coded here.
 
-# ── Paths (namespace) ──
-RP_DIR="${RP_DIR:-$HOME/.xpair/host}"                  # Xpair config/state/logs/rules/manifest. Per-machine, not synced.
+# ── Paths (role namespaces) ──
+RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
+RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
+RP_IDE_DIR="${RP_IDE_DIR:-$HOME/.xpair/ide}"
+RP_IDE_SERVER_DIR="${RP_IDE_SERVER_DIR:-$HOME/.xpair/ide-server}"
+RP_DIR="$RP_HOST_DIR"                                  # legacy alias: host runtime dir.
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"               # Claude harness (skills). Xpair only installs here; does not depend on it.
-COMMON_ENV="$RP_DIR/common.env"; HOST_ENV="$RP_DIR/host.env"; CLIENT_ENV="$RP_DIR/client.env"
-MANIFEST="$RP_DIR/.install-manifest"; BACKUP_DIR="$RP_DIR/backups"
-LOG_DIR="$RP_DIR/logs"
+HOST_COMMON_ENV="$RP_HOST_DIR/common.env"; CLIENT_COMMON_ENV="$RP_CLIENT_DIR/common.env"
+COMMON_ENV="$HOST_COMMON_ENV"; HOST_ENV="$RP_HOST_DIR/host.env"; CLIENT_ENV="$RP_CLIENT_DIR/client.env"
+MANIFEST="$RP_HOST_DIR/.install-manifest"; BACKUP_DIR="$RP_HOST_DIR/backups"
+LOG_DIR="$RP_HOST_DIR/logs"
+CLIENT_LOG_DIR="$RP_CLIENT_DIR/logs"
 
-# Load role files (only those that exist)
-for _f in "$COMMON_ENV" "$HOST_ENV" "$CLIENT_ENV"; do
+# Load role files (only those that exist). Host-role tooling sources the host common file last so
+# shared keys such as LOCAL_BIN/AQUA_SOCK are not inherited from a co-located client install.
+case "${XPAIR_CONFIG_ROLE:-}" in
+  host) _role_env_files=("$CLIENT_COMMON_ENV" "$CLIENT_ENV" "$HOST_COMMON_ENV" "$HOST_ENV") ;;
+  *)    _role_env_files=("$HOST_COMMON_ENV" "$HOST_ENV" "$CLIENT_COMMON_ENV" "$CLIENT_ENV") ;;
+esac
+for _f in "${_role_env_files[@]}"; do
   # shellcheck disable=SC1090
   [ -f "$_f" ] && { set -a; . "$_f"; set +a; }
 done
+unset _role_env_files
 
 # ── Host identity (org-level defaults, no personal values) ──
 RP_ORG="${RP_ORG:-com.x10lab}"
@@ -52,10 +67,10 @@ REMOTE_HOST="${REMOTE_HOST:-}"          # Empty = no host configured (onboarding
 FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"
 # Per-mapping access method, keyed by clientPath: "clientPath::mount;clientPath2::sync".
 # FOLDER_MAPS itself stays client::host (no method), so an entry missing here falls back to
-# path-convention inference (a clientPath under ~/.xpair/host/mounts/ ⇒ mount, else sync).
+# path-convention inference (a clientPath under /Volumes/ ⇒ mount, else sync).
 # method ∈ {mount, sync}; mount transport is SMB-only.
 FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"
-LAUNCHER="${LAUNCHER:-$RP_DIR/bin/xpair-launch}"
+LAUNCHER="${LAUNCHER:-$RP_CLIENT_DIR/bin/xpair-launch}"
 
 # Terminal app used by the Quick Action / open-gui subcommand.
 # Derived default: iterm2 if iTerm.app is installed, otherwise terminal.
@@ -67,8 +82,8 @@ EDITOR_PORT="${EDITOR_PORT:-8080}"       # code-server (xpair editor / M4) loopb
 # How the client sees host files: syncthing (local synced copy, default) or mount (single
 # source of truth on the host, no sync daemon). Wired into xpair doctor + the wizard.
 SYNC_BACKEND="${SYNC_BACKEND:-syncthing}"   # syncthing | mount
-# Mount transport when SYNC_BACKEND=mount: smb (macOS-native, no kext, default) or sshfs (needs macFUSE).
-MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"        # smb | sshfs
+# Mount transport when SYNC_BACKEND=mount: SMB (macOS-native, no kext).
+MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"
 
 # ── Common ──
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"

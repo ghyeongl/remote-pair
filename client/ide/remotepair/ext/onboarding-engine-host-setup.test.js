@@ -85,7 +85,7 @@ test("Q0545 bridge and host app engine guards still support host-side Codex setu
   assert.match(bridge, /const ENGINES = new Set\(\["claude", "codex", "opencode"\]\)/);
   assert.match(bridge, /const SESSION_ENGINES = new Set\(\[\.\.\.ENGINES, "shell"\]\)/);
   assert.match(bridge, /remoteHost: e\.REMOTE_HOST \|\| "",[\s\S]*engine: e\.ENGINE \|\| "",/);
-  assert.match(bridge, /const host = String\(parseEnv\(CLIENT_ENV\)\.REMOTE_HOST \|\| ""\)\.trim\(\)/);
+  assert.match(bridge, /const host = String\(parseEnv\(clientEnvPath\(\)\)\.REMOTE_HOST \|\| ""\)\.trim\(\)/);
   assert.match(bridge, /async hostEnvEngine\(hostArg\)[\s\S]*cat|async hostEnvEngine\(hostArg\)[\s\S]*host\.env/);
   assert.match(bridge, /const probe = ENGINE_PROBE\[e\]/);
   assert.match(bridge, /run\("ssh", \[\.\.\.sshProbeOpts\(host, 6\), host, probe\]\)/);

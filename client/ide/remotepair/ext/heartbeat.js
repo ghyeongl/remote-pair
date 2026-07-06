@@ -28,8 +28,10 @@ const fs = require("fs");
 const path = require("path");
 
 const HOME = os.homedir();
-const RP_DIR = path.join(HOME, ".xpair/host");
-const CLIENT_ENV = path.join(RP_DIR, "client.env");
+const RP_CLIENT_DIR = path.join(HOME, ".xpair/client");
+const RP_HOST_DIR = path.join(HOME, ".xpair/host");
+const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
+const LEGACY_CLIENT_ENV = path.join(RP_HOST_DIR, "client.env");
 const INTERVAL_MS = 30 * 1000;
 const CONNECT_TIMEOUT = "6";
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i, WITHOUT IdentitiesOnly:
@@ -37,7 +39,7 @@ const CONNECT_TIMEOUT = "6";
 // adding -i must still leave the ssh-agent + default identities available — IdentitiesOnly=yes would
 // restrict auth to only these files and break a client whose working host auth is agent-only. Neither
 // key present → [] (ssh defaults/agent).
-const PAIRING_KEY = path.join(RP_DIR, "pairing_ed25519");
+const PAIRING_KEY = path.join(RP_HOST_DIR, "pairing_ed25519");
 const PERSONAL_KEY = path.join(HOME, ".ssh", "id_ed25519");
 function idArgs() {
   try {
@@ -93,7 +95,8 @@ function parseEnv(file) {
 
 /** Read REMOTE_HOST from client.env (empty string if unset / unreadable). */
 function remoteHost() {
-  const host = (parseEnv(CLIENT_ENV).REMOTE_HOST || "").trim();
+  const envFile = fs.existsSync(CLIENT_ENV) ? CLIENT_ENV : LEGACY_CLIENT_ENV;
+  const host = (parseEnv(envFile).REMOTE_HOST || "").trim();
   // Validate HERE so every caller (writeOnce AND stopHeartbeat) is covered before ssh is spawned —
   // an invalid value yields "" and callers already bail on empty. `^(?!-)` rejects option-looking
   // hosts like `-p2222`/`-oProxyCommand=...` that ssh would parse as options, not the destination.

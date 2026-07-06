@@ -89,11 +89,11 @@ cleanup_sandbox
 # ────────────────────────────────────────────────────────────
 new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
-cat > "$RP_DIR/bin/xpair-launch" <<'EOF'
+cat > "$RP_CLIENT_DIR/bin/xpair-launch" <<'EOF'
 #!/bin/bash
 printf 'engine=%s explicit=%s args=%s\n' "${RP_ENGINE:-}" "${RP_ENGINE_EXPLICIT:-}" "$*" >> "$MOCKLOG"
 EOF
-chmod +x "$RP_DIR/bin/xpair-launch"
+chmod +x "$RP_CLIENT_DIR/bin/xpair-launch"
 # Unmapped dir + --yes on the uniform host path must still reach the launcher (regression:
 # mapping_for_dir returns non-zero for an unmapped dir; under set -e that used to abort rc 1).
 run_cli launch --engine claudecode --yes "$SBX"
@@ -112,7 +112,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
 run_cli config set engine claudecode
-CFG6="$(cat "$RP_DIR/client.env" 2>/dev/null)"
+CFG6="$(cat "$RP_CLIENT_DIR/client.env" 2>/dev/null)"
 run_cli config get engine
 
 it "engine/xpair-config-claudecode-alias"

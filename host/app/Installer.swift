@@ -42,29 +42,20 @@ enum Installer {
     /// (LEVEL-2, which requires a native restart, is handled by the gate in Updater.swift.)
     /// Is this a machine/launch where host self-install must not happen? (gh-mac-m4 incident: a client laptop opened a
     /// build/ app once and got self-installed as a host — blocking that case.) ① launched from a non-installed location
-    /// (repo build/) ② role=client marker ③ only client.env present with no host.env (a client install, not a host) →
-    /// skip if any one is true.
+    /// (repo build/) ② real client role marker ③ client.env with REMOTE_HOST but no host.env (a client install, not a host) →
+    /// skip if any one is true. Telemetry-only client.env is not a client install signal.
     static func shouldSkipSelfInstall() -> Bool {
         let p = Bundle.main.bundlePath
         if !(p.hasPrefix("/Applications/") || p.hasPrefix("\(HOME)/Applications/")) {
             log(.warn, "launched from non-installed location (\(p)) — refusing host self-install (build/dev launch guard)")
             return true
         }
-        let role: String
-        do {
-            role = try String(contentsOfFile: ROLE_FILE, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            // Absent role marker is normal (cask-only host, or pre-marker install) — trace it but treat as empty.
-            log(.debug, "role marker read skipped (\(ROLE_FILE)): \(error)")
-            role = ""
-        }
-        if role == "client" {
-            log(.info, "role=client marker — skipping host self-install")
+        if roleFileIsClientOnly(ROLE_FILE) || roleFileIsClientOnly(CLIENT_ROLE_FILE) {
+            log(.info, "client role marker — skipping host self-install")
             return true
         }
-        if role.isEmpty && fm.fileExists(atPath: CLIENT_ENV_FILE) && !fm.fileExists(atPath: HOST_ENV) {
-            log(.info, "client.env present + no host.env — treating as client, skipping host self-install")
+        if clientEnvHasRemoteHost() && !fm.fileExists(atPath: HOST_ENV) {
+            log(.info, "client.env REMOTE_HOST + no host.env — treating as client, skipping host self-install")
             return true
         }
         return false

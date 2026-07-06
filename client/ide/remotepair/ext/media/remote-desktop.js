@@ -848,7 +848,7 @@
     if (m.type === "status") {
       let msg = "Connecting to host…";
       if (m.state === "no-host") {
-        msg = "REMOTE_HOST is not set in ~/.xpair/host/client.env";
+        msg = "REMOTE_HOST is not set in ~/.xpair/client/client.env";
       } else if (m.state === "error") {
         msg = failureOverlayMessage(m.failureKind || m.kind || "reach", m.detail || "unknown");
       }

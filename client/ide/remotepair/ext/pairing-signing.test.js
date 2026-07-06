@@ -79,7 +79,7 @@ check("pairing signer uses the dedicated pairing key (raw ed25519, no agent, no 
   const bridgeSource = fs.readFileSync(path.join(__dirname, "onboarding-bridge.js"), "utf8");
   // Dedicated key kept OUTSIDE ~/.ssh so it never collides with the user's personal id_ed25519 —
   // the host installs only this key as the restricted forced-command line, so the gate always runs.
-  assert.match(bridgeSource, /const PAIRING_KEY = path\.join\(RP_DIR, "pairing_ed25519"\)/);
+  assert.match(bridgeSource, /const PAIRING_KEY = path\.join\(RP_HOST_DIR, "pairing_ed25519"\)/);
   // Generated unencrypted on demand (ensurePairingKey), then signed RAW — no ssh-agent needed.
   assert.match(bridgeSource, /"ssh-keygen"[\s\S]*"-f", PAIRING_KEY/);
   assert.match(

@@ -20,6 +20,7 @@ YES=0
 DRY_RUN=0
 FORCE=0
 APP_NAME="XpairHost"
+LEGACY_APP_NAME="RemotePairHost"
 
 usage() { awk 'NR == 1 { next } /^set -euo pipefail$/ { exit } { print }' "$0"; }
 
@@ -62,6 +63,69 @@ confirm() {
     [yY]|[yY][eE][sS]) ;;
     *) say "Aborted."; exit 1 ;;
   esac
+}
+
+client_install_remains() {
+  [ -f "$HOME/.xpair/client/.manifest-client" ] && return 0
+  [ -f "$HOME/.xpair/client/role" ] && return 0
+  [ -f "$HOME/.xpair/client/client.env" ] && return 0
+  client_env_has_real_config "$HOME/.xpair/host/client.env" && return 0
+  return 1
+}
+
+client_env_has_real_config() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  (
+    unset REMOTE_HOST FOLDER_MAPS SYNC_ROOTS
+    set -a
+    # shellcheck disable=SC1090
+    . "$file" >/dev/null 2>&1 || true
+    set +a
+    [ -n "${REMOTE_HOST:-}" ] || [ -n "${FOLDER_MAPS:-${SYNC_ROOTS:-}}" ]
+  )
+}
+
+stash_file() {
+  local src="$1" var_name="$2" tmp
+  [ "$DRY_RUN" = 1 ] && return 0
+  [ -f "$src" ] || return 0
+  tmp="$(mktemp)" || return 0
+  cp -p "$src" "$tmp" || { rm -f "$tmp"; return 0; }
+  eval "$var_name=\$tmp"
+}
+
+restore_stashed_file() {
+  local tmp="$1" dst="$2"
+  [ "$DRY_RUN" = 1 ] && return 0
+  [ -n "$tmp" ] || return 0
+  mkdir -p "$(dirname "$dst")"
+  if cp -p "$tmp" "$dst"; then
+    rm -f "$tmp"
+  else
+    warn "restore failed for $dst — kept temp copy $tmp"
+  fi
+}
+
+set_remaining_client_role_marker() {
+  local prior="$1" role_file="$HOME/.xpair/host/role"
+  case "$prior" in
+    both|client)
+      if [ "$DRY_RUN" = 1 ]; then
+        printf 'DRY: set %q to client\n' "$role_file"
+      else
+        mkdir -p "$(dirname "$role_file")"
+        printf 'client\n' > "$role_file"
+      fi
+      ;;
+    host)
+      run rm -f "$role_file"
+      ;;
+    *)
+      [ -f "$role_file" ] && run rm -f "$role_file"
+      ;;
+  esac
+  return 0
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -212,22 +276,24 @@ APP_PATH=""
 VER=""
 PROTECTED_APP_PATH=""
 PROTECTED_VER=""
-for p in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"; do
-  [ -d "$p" ] || continue
-  v="$(app_version "$p")"
-  [ -n "$v" ] || continue
-  if [ -z "$VER" ]; then
-    APP_PATH="$p"
-    VER="$v"
-  fi
-  case "$v" in
-    0.4*)
-      if [ -z "$PROTECTED_VER" ]; then
-        PROTECTED_APP_PATH="$p"
-        PROTECTED_VER="$v"
-      fi
-      ;;
-  esac
+for app_name in "$APP_NAME" "$LEGACY_APP_NAME"; do
+  for p in "/Applications/$app_name.app" "$HOME/Applications/$app_name.app"; do
+    [ -d "$p" ] || continue
+    v="$(app_version "$p")"
+    [ -n "$v" ] || continue
+    if [ -z "$VER" ]; then
+      APP_PATH="$p"
+      VER="$v"
+    fi
+    case "$v" in
+      0.4*)
+        if [ -z "$PROTECTED_VER" ]; then
+          PROTECTED_APP_PATH="$p"
+          PROTECTED_VER="$v"
+        fi
+        ;;
+    esac
+  done
 done
 
 if [ -z "$VER" ]; then
@@ -248,6 +314,16 @@ if [ -n "$VER" ]; then
   confirm "Remove $APP_NAME $VER and wipe xpair host leftovers from this Mac?"
 else
   confirm "Wipe stray xpair host state and leftovers from this Mac?"
+fi
+
+CLIENT_REMAINS=0
+HOST_ROLE_BEFORE="$(cat "$HOME/.xpair/host/role" 2>/dev/null || true)"
+PRESERVE_PAIRING_TMP=""
+PRESERVE_COMMON_TMP=""
+if client_install_remains; then
+  CLIENT_REMAINS=1
+  stash_file "$HOME/.xpair/host/pairing_ed25519" PRESERVE_PAIRING_TMP
+  stash_file "$HOME/.xpair/host/common.env" PRESERVE_COMMON_TMP
 fi
 
 say "Removing LaunchAgents"
@@ -275,13 +351,13 @@ done
 UNINSTALLER="$(find_shared_uninstaller || true)"
 if [ -n "$UNINSTALLER" ]; then
   say "Reverting manifest-recorded install actions"
-  run bash "$UNINSTALLER"
+  run bash "$UNINSTALLER" --role host
 else
   # No shared reverter on disk — replay every manifest we have inline (best-effort). The
   # role installer writes .manifest-host; the self-installer writes .install-manifest. The
   # shared uninstaller globs both, so we must too, or rm -rf ~/.xpair drops the only record.
   shopt -s nullglob
-  inline_mans=("$HOME"/.xpair/host/.manifest-* "$HOME/.xpair/host/.install-manifest")
+  inline_mans=("$HOME/.xpair/host/.manifest-host" "$HOME/.xpair/host/.manifest-both" "$HOME/.xpair/host/.install-manifest")
   shopt -u nullglob
   if [ "${#inline_mans[@]}" -gt 0 ]; then
     say "No shared manifest reverter found; using inline manifest revert (${#inline_mans[@]} manifest(s))."
@@ -295,21 +371,44 @@ fi
 
 say "Stopping host processes"
 run_quiet pkill -f XpairHost
+run_quiet pkill -f RemotePairHost
 run_quiet pkill -f tmux-aqua
 
 say "Removing xpair state"
-run rm -rf "$HOME/.xpair"
+if [ "$CLIENT_REMAINS" = 1 ]; then
+  say "Removing host-owned xpair state (client install remains)"
+  restore_stashed_file "$PRESERVE_PAIRING_TMP" "$HOME/.xpair/host/pairing_ed25519"
+  restore_stashed_file "$PRESERVE_COMMON_TMP" "$HOME/.xpair/host/common.env"
+  run rm -f \
+    "$HOME/.xpair/host/host.env" \
+    "$HOME/.xpair/host/rules.txt" \
+    "$HOME/.xpair/host/notify.conf" \
+    "$HOME/.xpair/host/.manifest-host" \
+    "$HOME/.xpair/host/.manifest-both" \
+    "$HOME/.xpair/host/.install-manifest"
+  run rm -rf \
+    "$HOME/.xpair/host/bin" \
+    "$HOME/.xpair/host/logs" \
+    "$HOME/.xpair/host/backups"
+  set_remaining_client_role_marker "$HOST_ROLE_BEFORE"
+else
+  run rm -rf "$HOME/.xpair/host"
+fi
 
-say "Removing installed CLIs"
-for p in \
-  "$HOME/.local/bin/xpair" \
-  "$HOME/.local/bin/xpair-askpass" \
-  "$HOME/.local/bin/xpair-desktop" \
-  "$HOME/.local/bin/xpair-editor" \
-  "$HOME/.local/bin/xpair-mount" \
-  "$HOME/.local/bin/xpair-launch"; do
-  run rm -f "$p"
-done
+if [ "$CLIENT_REMAINS" = 1 ]; then
+  say "Keeping shared client CLIs (client install remains)"
+else
+  say "Removing installed CLIs"
+  for p in \
+    "$HOME/.local/bin/xpair" \
+    "$HOME/.local/bin/xpair-askpass" \
+    "$HOME/.local/bin/xpair-desktop" \
+    "$HOME/.local/bin/xpair-editor" \
+    "$HOME/.local/bin/xpair-mount" \
+    "$HOME/.local/bin/xpair-launch"; do
+    run rm -f "$p"
+  done
+fi
 remove_xpair_app_symlink "$HOME/.local/bin/tmux-aqua"
 remove_xpair_app_symlink "$HOME/.local/bin/mosh-server"
 
@@ -320,5 +419,7 @@ run_quiet brew uninstall --cask --force xpair-host
 
 remove_app "/Applications/$APP_NAME.app"
 remove_app "$HOME/Applications/$APP_NAME.app"
+remove_app "/Applications/$LEGACY_APP_NAME.app"
+remove_app "$HOME/Applications/$LEGACY_APP_NAME.app"
 
 say 'host wiped — re-run `xpair install-host` (or onboarding) to reinstall.'

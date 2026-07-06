@@ -4,7 +4,7 @@ Turns the **Xpair IDE** (a VSCodium fork) into a xpair **client** for
 a macOS **host** running `XpairHost.app`.
 
 The IDE is the client; the host is a separate Mac reached over SSH
-(`REMOTE_HOST` in `~/.xpair/host/client.env`). The IDE Remote Desktop is
+(`REMOTE_HOST` in `~/.xpair/client/client.env`). The IDE Remote Desktop is
 an authenticated screen-and-input surface; host-side agent sessions keep
 computer-use privileges through `XpairHost.app`.
 
@@ -36,7 +36,7 @@ shell metacharacters.
 
 ## Configuration
 
-`~/.xpair/host/client.env`:
+`~/.xpair/client/client.env`:
 
 ```
 REMOTE_HOST=gh-mac-m1

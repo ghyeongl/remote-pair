@@ -119,29 +119,63 @@ remove_client_app() {
   fi
 }
 
+host_install_remains() {
+  [ -f "$HOME/.xpair/host/.manifest-host" ] && return 0
+  [ -f "$HOME/.xpair/host/host.env" ] && return 0
+  return 1
+}
+
+remove_orphaned_pairing_key() {
+  host_install_remains && return 0
+  local host_dir key other
+  host_dir="$HOME/.xpair/host"
+  key="$host_dir/pairing_ed25519"
+  [ -e "$key" ] || return 0
+  other="$(find "$host_dir" -mindepth 1 ! -name pairing_ed25519 -print -quit 2>/dev/null || true)"
+  say "Removing client pairing key"
+  run rm -f "$key"
+  [ -z "$other" ] && run rmdir "$host_dir"
+  return 0
+}
+
 confirm "Wipe xpair client state, binaries, Quick Action, and cask from this Mac?"
+
+legacy_client_only=0
+if [ ! -e "$HOME/.xpair/client/client.env" ] && { [ -e "$HOME/.xpair/host/client.env" ] || [ -e "$HOME/.xpair/host/.manifest-client" ]; } \
+  && [ ! -e "$HOME/.xpair/host/host.env" ] && [ ! -e "$HOME/.xpair/host/.manifest-host" ]; then
+  legacy_client_only=1
+fi
 
 UNINSTALLER="$(find_shared_uninstaller || true)"
 if [ -n "$UNINSTALLER" ]; then
   say "Reverting manifest-recorded install actions"
-  run bash "$UNINSTALLER"
+  run bash "$UNINSTALLER" --role client
 else
   say "No shared manifest reverter found; continuing with known paths."
 fi
 
 say "Removing xpair state"
-run rm -rf "$HOME/.xpair"
+run rm -rf "$HOME/.xpair/client" "$HOME/.xpair/ide" "$HOME/.xpair/ide-server"
+if [ "$legacy_client_only" = 1 ]; then
+  say "Removing legacy pre-split client-only state"
+  run rm -rf "$HOME/.xpair/host"
+fi
+remove_orphaned_pairing_key
 
-say "Removing installed CLIs"
-for p in \
-  "$HOME/.local/bin/xpair" \
-  "$HOME/.local/bin/xpair-askpass" \
-  "$HOME/.local/bin/xpair-desktop" \
-  "$HOME/.local/bin/xpair-editor" \
-  "$HOME/.local/bin/xpair-mount" \
-  "$HOME/.local/bin/xpair-launch"; do
-  run rm -f "$p"
-done
+if host_install_remains; then
+  say "Keeping shared CLIs (host install remains)"
+else
+  say "Removing installed CLIs"
+  for p in \
+    "$HOME/.local/bin/xpair" \
+    "$HOME/.local/bin/xpair-askpass" \
+    "$HOME/.local/bin/xpair-desktop" \
+    "$HOME/.local/bin/xpair-editor" \
+    "$HOME/.local/bin/xpair-mount" \
+    "$HOME/.local/bin/xpair-launch"; do
+    run rm -f "$p"
+  done
+fi
 # mosh / mosh-client are installed via install_file (manifest-recorded, backup-aware): the shared
 # manifest reverter above already removes our copies and RESTORES any pre-existing user-owned binary
 # from backup. Do NOT rm them unconditionally here — that would clobber a user's own mosh.

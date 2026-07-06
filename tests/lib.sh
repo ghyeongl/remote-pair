@@ -34,33 +34,35 @@ assert_absent()   { case "$1" in *"$2"*) _fail "should NOT contain '$2' ($3) :: 
 assert_eq()       { [ "$1" = "$2" ] && _pass "eq '$2' ($3)" || _fail "expected '$2' got '$1' ($3)"; }
 
 # ── sandbox + mock environment ──
-# new_sandbox: creates a temporary HOME/RP_DIR, sets up MOCKBIN/MOCKLOG. After calling, install the mocks and run_launcher.
+# new_sandbox: creates a temporary HOME/runtime dirs, sets up MOCKBIN/MOCKLOG. After calling, install the mocks and run_launcher.
 # $HOME_REAL is preserved for resolving the reference path.
 HOME_REAL="${HOME_REAL:-$HOME}"
 
 new_sandbox() {
   SBX="$(mktemp -d -t rpltest.XXXXXX)"
   export HOME="$SBX"
-  RP_DIR="$SBX/.xpair/host"
+  RP_HOST_DIR="$SBX/.xpair/host"
+  RP_CLIENT_DIR="$SBX/.xpair/client"
+  RP_DIR="$RP_HOST_DIR"
   MOCKBIN="$SBX/.local/bin"
   MOCKLOG="$SBX/mocklog"
   RP_ERRFILE="$SBX/launch.err"
   SSH_CAPTURE="$SBX/ssh-capture"     # stores the remote script received by the mock ssh
-  mkdir -p "$RP_DIR/logs" "$MOCKBIN" "$RP_DIR/bin"
+  mkdir -p "$RP_HOST_DIR/logs" "$RP_HOST_DIR/bin" "$RP_CLIENT_DIR/logs" "$RP_CLIENT_DIR/bin" "$MOCKBIN"
   # must export so the mocks (launched as children of the launcher) can see them
-  export HOME RP_DIR MOCKBIN MOCKLOG SSH_CAPTURE SBX
+  export HOME RP_DIR RP_HOST_DIR RP_CLIENT_DIR MOCKBIN MOCKLOG SSH_CAPTURE SBX
   : > "$MOCKLOG"
   # default config (client role). Tests may override it.
-  : > "$RP_DIR/common.env"
-  : > "$RP_DIR/host.env"
+  : > "$RP_CLIENT_DIR/common.env"
+  : > "$RP_HOST_DIR/host.env"
   # single-dash default — so a test can set SBX_REMOTE_HOST="" to an empty value (forcing local)
-  cat > "$RP_DIR/client.env" <<EOF
+  cat > "$RP_CLIENT_DIR/client.env" <<EOF
 REMOTE_HOST=${SBX_REMOTE_HOST-test-host}
 FOLDER_MAPS=${SBX_FOLDER_MAPS-}
 EOF
   # Role marker (SSOT) — ensure_local_host only takes the local tmux-aqua path on a host/both role.
   # Tests exercising the local-aqua path set SBX_ROLE=both; default leaves no marker (client-ish).
-  [ -n "${SBX_ROLE:-}" ] && printf '%s\n' "$SBX_ROLE" > "$RP_DIR/role"
+  [ -n "${SBX_ROLE:-}" ] && printf '%s\n' "$SBX_ROLE" > "$RP_CLIENT_DIR/role"
   return 0
 }
 
@@ -111,6 +113,8 @@ case "$last" in
     # distinct from the client $HOME so tests prove the differing-account fix (option A).
     echo "__HOME__:${MOCK_REMOTE_HOME:-$SBX/remote-home}"; exit 0 ;;
   *detach-client*) exit 0 ;;
+  *'cat ~/.xpair/host/logs/status.json'*) echo '{"ts":1,"pid":123}'; exit 0 ;;
+  *'status.json'*) echo fresh; exit 0 ;;
   *list-sessions*) printf '%s\n' "${MOCK_ATT:-}"; exit 0 ;;
   *mkdir*) exit 0 ;;
 esac

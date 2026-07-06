@@ -32,8 +32,8 @@ it "map_method/explicit-sync"
 assert_eq "$(json_method "$SYN")" "sync" "sync method round-trips to list --json"
 
 it "map_method/persisted-in-client-env"
-assert_contains "$(cat "$RP_DIR/client.env")" "FOLDER_MAP_MODES=" "FOLDER_MAP_MODES written to client.env"
-assert_contains "$(cat "$RP_DIR/client.env")" "$MNT::mount" "mount entry persisted"
+assert_contains "$(cat "$RP_CLIENT_DIR/client.env")" "FOLDER_MAP_MODES=" "FOLDER_MAP_MODES written to client.env"
+assert_contains "$(cat "$RP_CLIENT_DIR/client.env")" "$MNT::mount" "mount entry persisted"
 
 # ── invalid method rejected ──
 mkdir -p "$SBX/proj-bad"
@@ -45,19 +45,27 @@ assert_rc "$RP_RC" 2 "unknown method → rc 2"
 run_cli map rm "$MNT"
 run_cli map list --json
 it "map_method/rm-clears"
-assert_absent "$(cat "$RP_DIR/client.env")" "$MNT::mount" "method record removed on rm"
+assert_absent "$(cat "$RP_CLIENT_DIR/client.env")" "$MNT::mount" "method record removed on rm"
 
 cleanup_sandbox
 
 # ── inference fallback when FOLDER_MAP_MODES has no record for the entry ──
-# A clientPath under ~/.xpair/host/mounts/ ⇒ mount; any other path ⇒ sync.
+# A /Volumes clientPath infers mount only when mount(8) shows an smbfs mount from REMOTE_HOST.
 new_sandbox
-MOUNTSPATH="$SBX/.xpair/host/mounts/vol"; PLAIN="$SBX/plainproj"; mkdir -p "$MOUNTSPATH" "$PLAIN"
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS="%s::/host/v;%s::/host/p"\nFOLDER_MAP_MODES=\n' "$MOUNTSPATH" "$PLAIN" > "$RP_DIR/client.env"
+MOUNTSPATH="/Volumes/proj"; PLAIN="$SBX/plainproj"; EXTERNAL="/Volumes/ExternalSSD/proj"; mkdir -p "$PLAIN"
+cat > "$MOCKBIN/mount" <<'EOF'
+#!/bin/bash
+echo '/dev/disk4s1 on /Volumes/ExternalSSD (apfs, local, nodev)'
+echo '//alice@test-host/proj on /Volumes/proj (smbfs, nodev, nosuid, mounted by alice)'
+EOF
+chmod +x "$MOCKBIN/mount"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS="%s::/host/v;%s::/host/p;%s::/host/e"\nFOLDER_MAP_MODES=\n' "$MOUNTSPATH" "$PLAIN" "$EXTERNAL" > "$RP_CLIENT_DIR/client.env"
 run_cli map list --json
-it "map_method/infer-mountspath"
-assert_eq "$(json_method "$MOUNTSPATH")" "mount" "path under .xpair/host/mounts/ infers mount"
+it "map_method/infer-remote-smb-volumes"
+assert_eq "$(json_method "$MOUNTSPATH")" "mount" "REMOTE_HOST smbfs /Volumes path infers mount"
 it "map_method/infer-plain"
 assert_eq "$(json_method "$PLAIN")" "sync" "plain path infers sync"
+it "map_method/infer-non-smb-volumes-sync"
+assert_eq "$(json_method "$EXTERNAL")" "sync" "non-SMB /Volumes path infers sync"
 
 cleanup_sandbox

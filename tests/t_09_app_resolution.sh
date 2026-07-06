@@ -81,6 +81,36 @@ assert_absent "$MLOG" "pgrep|" "pgrep fallback unused on launchctl hit"
 
 cleanup_sandbox
 
+new_sandbox
+mkdir -p "$SBX/host-bin" "$SBX/client-bin" "$RP_HOST_DIR/logs" "$RP_CLIENT_DIR/logs"
+printf 'LOCAL_BIN=%q\nAQUA_SOCK=/tmp/host-aqua.sock\n' "$SBX/host-bin" > "$RP_HOST_DIR/common.env"
+printf 'LOCAL_BIN=%q\nAQUA_SOCK=/tmp/client-aqua.sock\n' "$SBX/client-bin" > "$RP_CLIENT_DIR/common.env"
+cat > "$SBX/host-bin/tmux-aqua" <<'EOS'
+#!/bin/bash
+{ printf 'host-tmux'; for a in "$@"; do printf '|%s' "$a"; done; printf '\n'; } >> "$MOCKLOG"
+exit 0
+EOS
+chmod +x "$SBX/host-bin/tmux-aqua"
+cat > "$SBX/client-bin/tmux-aqua" <<'EOS'
+#!/bin/bash
+{ printf 'client-tmux'; for a in "$@"; do printf '|%s' "$a"; done; printf '\n'; } >> "$MOCKLOG"
+exit 0
+EOS
+chmod +x "$SBX/client-bin/tmux-aqua"
+printf '{"ts":1,"ax":true,"sr":true,"fda":false}\n' > "$RP_HOST_DIR/logs/status.json"
+make_launchctl_mock
+make_pgrep_mock
+make_mock open
+run_cli status
+
+it "status/local-host-uses-host-common-env"
+assert_rc "$RP_RC" 0 "status with differing host/client common.env rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$RP_OUT" "up (/tmp/host-aqua.sock)" "status reports host AQUA_SOCK"
+assert_contains "$MLOG" "host-tmux|-S|/tmp/host-aqua.sock|has-session" "status probes tmux via host LOCAL_BIN"
+assert_absent "$MLOG" "client-tmux" "status does not use client LOCAL_BIN for local host probe"
+
+cleanup_sandbox
+
 # ────────────────────────────────────────────────────────────────────────────
 # Case 2: only the FORWARD label (com.x10lab.xpair, unified 0.5 id) → still resolves via dual-id probing
 #   (even if the 0.5 flip moves the host to the unified id, this CLI does not produce a false negative.)
