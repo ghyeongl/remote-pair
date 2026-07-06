@@ -44,20 +44,34 @@ check("settings mirror reads telemetry.env on activation and writes only TELEMET
   assert.doesNotMatch(extension, /telemetry\.setConsent\(enabled,\s*enabled\)/);
 });
 
-check("app_first_launch is gated by firstRunStamp creation and no globalState install key remains", () => {
+check("app_first_launch uses the persisted consent-aware claim and no globalState install key remains", () => {
   assert.doesNotMatch(extension, /remotepair\.installTimestamp/);
+  // Claim-based, not created-based: an abandoned onboarding leaves the stamp without the
+  // event; the claim persists until a consented launch/completion emits exactly once.
   assert.match(
     extension,
-    /const firstRun = telemetry\.firstRunStamp\(\);[\s\S]*const isFresh = !!\(firstRun && firstRun\.created\);[\s\S]*if \(isFresh\) telemetry\.capture\(telemetry\.EVENTS\.APP_FIRST_LAUNCH, \{ is_fresh_install: true \}\);/,
+    /telemetry\.firstRunStamp\(\);[\s\S]*if \(telemetry\.claimFirstLaunchOnce\(\)\) \{[\s\S]*telemetry\.capture\(telemetry\.EVENTS\.APP_FIRST_LAUNCH, \{ is_fresh_install: true \}\);/,
   );
   assert.match(
     onboardingMain,
-    /const firstRunStamp = _firstRunStamp[\s\S]*_firstRunStamp = null[\s\S]*firstRunStamp && firstRunStamp\.created[\s\S]*telemetry\.capture\(telemetry\.EVENTS\.APP_FIRST_LAUNCH, \{ is_fresh_install: true \}\)/,
+    /telemetry\.claimFirstLaunchOnce && telemetry\.claimFirstLaunchOnce\(\)[\s\S]*telemetry\.capture\(telemetry\.EVENTS\.APP_FIRST_LAUNCH, \{ is_fresh_install: true \}\)/,
+  );
+  const telemetryModule = fs.readFileSync(path.join(root, "telemetry.js"), "utf8");
+  assert.match(
+    telemetryModule,
+    /function claimFirstLaunchOnce\(\) \{[\s\S]*if \(!telemetryConsent\(\)\) return false;[\s\S]*K_FIRST_LAUNCH_STAMP/,
   );
 });
 
 check("notification polling and host probing are protected by the client services lock", () => {
-  indexOfOrThrow(extension, 'const CLIENT_SERVICES_LOCK_FILE = path.join(RP_CLIENT_DIR, "extension-services.lock")');
+  // Per-window scope: sessionId in the lock name dedupes the window's dual hosts without
+  // starving other windows' pollers; stale sibling locks are swept by dead-pid check.
+  assert.match(
+    extension,
+    /sid = String\(\(vscode\.env && vscode\.env\.sessionId\) \|\| "global"\)/,
+  );
+  assert.match(extension, /extension-services\.\$\{sid/);
+  assert.match(extension, /function sweepStaleServiceLocks\(\)/);
   assert.match(extension, /fs\.constants\.O_CREAT \| fs\.constants\.O_EXCL \| fs\.constants\.O_WRONLY/);
   assert.ok(extension.includes("fs.writeFileSync(fd, `${process.pid}\\n`);"));
   assert.match(

@@ -108,7 +108,14 @@ const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
 const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
-const CLIENT_SERVICES_LOCK_FILE = path.join(RP_CLIENT_DIR, "extension-services.lock");
+// Per-WINDOW lock (vscode.env.sessionId is shared by the window's two extension hosts but
+// distinct across windows): dedupe the dual hosts without starving other windows' pollers.
+// Guarded access: contract tests require this module with a minimal vscode stub (no env).
+const CLIENT_SERVICES_LOCK_FILE = (() => {
+  let sid = "global";
+  try { sid = String((vscode.env && vscode.env.sessionId) || "global"); } catch (_e) { /* stubbed vscode */ }
+  return path.join(RP_CLIENT_DIR, `extension-services.${sid.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)}.lock`);
+})();
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
 // WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
 // on the host), so adding -i must still leave the ssh-agent + default identities available —
@@ -359,7 +366,24 @@ function releaseClientServicesLock() {
   try { fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE); } catch (_e) {}
 }
 
+function sweepStaleServiceLocks() {
+  // Opportunistic: session-scoped lock names accumulate across window sessions — unlink dead ones.
+  try {
+    for (const name of fs.readdirSync(RP_CLIENT_DIR)) {
+      if (!/^extension-services\..+\.lock$/.test(name)) continue;
+      const p = path.join(RP_CLIENT_DIR, name);
+      if (p === CLIENT_SERVICES_LOCK_FILE) continue;
+      try {
+        const raw = fs.readFileSync(p, "utf8").trim();
+        const pid = parseInt((raw.match(/^\d+/) || ["0"])[0], 10);
+        if (!isProcessAlive(pid)) fs.unlinkSync(p);
+      } catch (_e) { /* another window may be racing the same sweep */ }
+    }
+  } catch (_e) { /* best-effort */ }
+}
+
 function claimClientServicesLock() {
+  sweepStaleServiceLocks();
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       writeClientServicesLock();
@@ -1971,9 +1995,13 @@ function activate(context) {
     // no id is not PII, so this is safe pre-consent and gives time_to_wow_ms a real elapsed base
     // (first launch → first session) instead of ~0. Idempotent across activations.
     if (clientServicesLock) {
-      const firstRun = telemetry.firstRunStamp();
-      const isFresh = !!(firstRun && firstRun.created);
-      if (isFresh) telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
+      telemetry.firstRunStamp();
+      // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
+      // (window closed before Done) whose event never sent — the claim persists until
+      // a consented launch/completion actually emits it, exactly once per install.
+      if (telemetry.claimFirstLaunchOnce()) {
+        telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
+      }
     }
   } catch (e) {
     log(`telemetry first-launch: ${e && e.message ? e.message : e}`, "warn");

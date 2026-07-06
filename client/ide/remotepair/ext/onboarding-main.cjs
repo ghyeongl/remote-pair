@@ -232,9 +232,7 @@ function wireIpc(ipcMain, onComplete) {
     _completed = true
     try {
       if (telemetry && telemetry.EVENTS) {
-        const firstRunStamp = _firstRunStamp
-        _firstRunStamp = null
-        if (firstRunStamp && firstRunStamp.created) {
+        if (telemetry.claimFirstLaunchOnce && telemetry.claimFirstLaunchOnce()) {
           telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true })
         }
         const wowBase = telemetry.installTs && telemetry.installTs()
@@ -250,7 +248,6 @@ function wireIpc(ipcMain, onComplete) {
 
 let _win = null
 let _completed = false
-let _firstRunStamp = null
 
 /**
  * Open the pre-workbench onboarding BrowserWindow (loads the onboarding-webview UI). The IDE's
@@ -267,7 +264,7 @@ function openOnboardingWindow({ electron, onComplete, startStep } = {}) {
   // Onboarding is actually opening now, so consume the one-shot force sentinel (if any). This
   // guarantees exactly one forced run — a later normal launch won't re-trigger onboarding.
   clearForceOnboardingSentinel()
-  try { _firstRunStamp = telemetry && telemetry.firstRunStamp ? telemetry.firstRunStamp() : null } catch { _firstRunStamp = null }
+  try { if (telemetry && telemetry.firstRunStamp) telemetry.firstRunStamp() } catch { /* */ }
   // Count the onboarding window as a connected client (fire-and-forget; never blocks/throws).
   try { if (heartbeat && heartbeat.startHeartbeat) heartbeat.startHeartbeat() } catch { /* */ }
   wireIpc(ipcMain, onComplete)

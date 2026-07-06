@@ -44,6 +44,7 @@ const K_SENTRY_DSN = "SENTRY_DSN"; // Sentry DSN; absent => Sentry no-op
 // fires at most once for the lifetime of the install regardless of how many times either lane
 // observes reachability.
 const K_HOST_CONNECTED_STAMP = "TELEMETRY_HOST_CONNECTED_AT"; // epoch ms of first host_connected
+const K_FIRST_LAUNCH_STAMP = "TELEMETRY_FIRST_LAUNCH_AT"; // epoch ms app_first_launch was emitted (claim gate)
 const TELEMETRY_KEYS = Object.freeze([
   K_ANON_ID,
   K_TELEMETRY_CONSENT,
@@ -394,6 +395,22 @@ function claimHostConnectedOnce() {
   }
 }
 
+/**
+ * Once-per-install claim for app_first_launch. Claims ONLY when telemetry consent is on —
+ * a pre-consent claim would mark the event emitted while capture() drops it, losing it for
+ * the abandon-and-resume onboarding case. Same shape as claimHostConnectedOnce(); never throws.
+ */
+function claimFirstLaunchOnce() {
+  try {
+    if (!telemetryConsent()) return false; // not consented yet — leave unclaimed for a consented launch/completion.
+    if (readEnv()[K_FIRST_LAUNCH_STAMP]) return false; // already emitted this install.
+    upsertEnv(K_FIRST_LAUNCH_STAMP, String(Date.now()));
+    return true;
+  } catch (_e) {
+    return false; // on any I/O failure, prefer NOT emitting (de-dup is the priority).
+  }
+}
+
 function envTrue(v) {
   const s = String(v || "").trim().toLowerCase();
   return s === "1" || s === "true" || s === "yes" || s === "on";
@@ -675,6 +692,7 @@ module.exports = {
   installTs,
   firstRunStamp, // stamp install creation time at first run, INDEPENDENT of consent (time_to_wow base).
   claimHostConnectedOnce, // once-per-install host_connected gate (activation-funnel cardinality).
+  claimFirstLaunchOnce, // once-per-install app_first_launch gate (consent-aware; survives abandoned onboarding).
   getConsent,
   setConsent,
   setTelemetryConsent,
