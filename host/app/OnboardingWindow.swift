@@ -379,6 +379,14 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         try data.write(to: URL(fileURLWithPath: onboardingStepPath), options: [.atomic])
     }
 
+    private func tearDownWebViewBridge() {
+        guard let webView else { return }
+        let controller = webView.configuration.userContentController
+        controller.removeScriptMessageHandler(forName: "rpbridge")
+        controller.removeAllUserScripts()
+        self.webView = nil
+    }
+
     /// React Done → complete(): close the window and start serving.
     private func finish() {
         completed = true
@@ -387,6 +395,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         // consent OFF (Noop backend), so this is the first real init when crash consent is now ON.
         SentryBridge.setupIfConsented()
         log(.info, "onboarding complete → starting serving")
+        tearDownWebViewBridge()
         window.close()
         // Revert to menu-bar-only (LSUIElement) now that onboarding is done.
         NSApp.setActivationPolicy(.accessory)
@@ -397,6 +406,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
 
     func windowWillClose(_ notification: Notification) {
         _ = PairingManager.shared.endWindow()
+        tearDownWebViewBridge()
         switch mode {
         case .runGate:
             // Launch gate: AX/SR are the hard serving gate. If they are granted, closing the window

@@ -48,10 +48,15 @@ final class CaptureEngine {
     private var bitrate = 4_000_000
     private var sink: ((Data) -> Void)?
     private var eventSink: ((CaptureEvent) -> Void)?
+    private let sampleQueueKey = DispatchSpecificKey<Bool>()
     private let sampleQueue = DispatchQueue(label: "rp.sck")
     private let errorLock = NSLock()
     private var reportedErrorKinds = Set<CaptureFailureKind>()
     private var startGeneration: UInt64 = 0
+
+    init() {
+        sampleQueue.setSpecific(key: sampleQueueKey, value: true)
+    }
 
     /// Advisory: true while capture is running (a viewer is connected → the sidecar sent capture:start).
     /// Read cross-thread only for the menu-bar status line, so a one-tick-stale value is acceptable.
@@ -198,6 +203,16 @@ final class CaptureEngine {
     /// called again cleanly for the next session. Idempotent.
     func stop() {
         startGeneration &+= 1
+        if DispatchQueue.getSpecific(key: sampleQueueKey) == true {
+            stopOnSampleQueue()
+        } else {
+            sampleQueue.sync {
+                stopOnSampleQueue()
+            }
+        }
+    }
+
+    private func stopOnSampleQueue() {
         if let s = stream {
             s.stopCapture { _ in }
         }
@@ -211,9 +226,7 @@ final class CaptureEngine {
         sink = nil
         eventSink = nil
         stopKeyframeTimer()
-        sampleQueue.sync {
-            resetSampleState()
-        }
+        resetSampleState()
         errorLock.lock()
         reportedErrorKinds.removeAll(keepingCapacity: true)
         errorLock.unlock()
