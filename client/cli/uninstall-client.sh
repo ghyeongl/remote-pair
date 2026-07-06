@@ -129,8 +129,16 @@ else
   say "No shared manifest reverter found; continuing with known paths."
 fi
 
-say "Removing xpair state"
-run rm -rf "$HOME/.xpair"
+# ~/.xpair is a SHARED namespace: ~/.xpair/host holds a co-located host's state (host.env,
+# manifests, logs/status, runtime). A client-only uninstall must NOT wipe that — remove just
+# the client subtree when a host is present, else clear the whole tree (client-only machine).
+if [ -d "$HOME/.xpair/host" ]; then
+  say "Removing xpair client state (preserving ~/.xpair/host — co-located host detected)"
+  run rm -rf "$HOME/.xpair/client"
+else
+  say "Removing xpair state"
+  run rm -rf "$HOME/.xpair"
+fi
 
 say "Removing installed CLIs"
 for p in \
