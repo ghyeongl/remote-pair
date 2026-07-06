@@ -201,6 +201,9 @@ class Impairer {
     this.config = config;
     this.stats = stats;
     this.normalizer = new SeqNormalizer();
+    // RTX stream IDs are randomized per connection like primary ones — normalize
+    // before seeding draws (docs/rd-streaming-loss-benchmark.md: key relative IDs).
+    this.rtxNormalizer = new SeqNormalizer();
     this.sendCounts = new Map();
     this.primarySsrc = null; // first host→client RTP ssrc; others are RTX retransmits
     this.droppedSeqs = new Set();
@@ -323,7 +326,7 @@ class Impairer {
       // A real retransmission: apply RETX_LOSS (residual retransmit loss) but NEVER the
       // primary loss profile, and keep it out of the primary seq space. Still subject to
       // link delay, marked-burst outages, and bandwidth cap.
-      const rtxKey = `rtx:${ssrc}:${packet.seq}`;
+      const rtxKey = `rtx:${this.rtxNormalizer.normalize(packet.seq)}`;
       if (this.config.profile === "marked-burst" && this.markedBurstAt(nowMs)) {
         this.stats.retransmitsDropped += 1;
         return { drop: true, delayMs: 0, reason: "marked-burst", normSeq: null };
