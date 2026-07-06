@@ -1079,7 +1079,7 @@ cmd_attach() {
   else
     printf 'mosh not found → falling back to ssh -t (attach tmux "%s") ...\n' "$session"
   fi
-  ssh -t "$REMOTE_HOST" "$remote_bin/tmux-aqua -S $aqua_sock_q attach -d -t $(sh_quote "=$session")" || rc=$?
+  if ssh -t "$REMOTE_HOST" "$remote_bin/tmux-aqua -S $aqua_sock_q attach -d -t $(sh_quote "=$session")"; then rc=0; else rc=$?; fi
   trap - HUP TERM
   return "$rc"
 }
