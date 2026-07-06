@@ -16,16 +16,24 @@ node --check "$EXT/extension.js" 2>/dev/null && ok "extension.js syntax" || miss
 
 # 2) generated contracts in sync with shared/ (regenerate is a no-op)
 if [[ -f "$GEN" ]]; then
-  before=$(shasum "$GEN" | cut -d' ' -f1)
-  node "$EXT/generate-contracts.mjs" >/dev/null 2>&1 || miss "generator failed"
-  after=$(shasum "$GEN" | cut -d' ' -f1)
-  [[ "$before" == "$after" ]] && ok "generated/ in sync with shared/" || miss "generated/ stale — regenerate & commit"
+  tmp=$(mktemp -t xpair-contracts.XXXXXX)
+  # regenerate with the real generator into a temp file (OUT override) — the check
+  # must never duplicate the generator's mapping, and never dirty the working tree
+  if OUT="$tmp" node "$EXT/generate-contracts.mjs" >/dev/null 2>&1; then
+    committed=$(shasum "$GEN" | cut -d' ' -f1)
+    expected=$(shasum "$tmp" | cut -d' ' -f1)
+    [[ "$committed" == "$expected" ]] && ok "generated/ in sync with shared/" || miss "generated/ stale — run generate-contracts.mjs and commit (working tree left unchanged)"
+  else
+    miss "generator failed"
+  fi
+  rm -f "$tmp"
 else
   miss "generated/contracts.json missing — run generate-contracts.mjs"
 fi
 
 # 3) self-containment: only the generator may reference the parent shared/ (relative parent paths)
 viol=$(grep -rnE '\.\./\.\./shared|\.\./shared' "$EXT" --include='*.js' --include='*.json' 2>/dev/null \
+       | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
        | grep -v 'generate-contracts' || true)
 [[ -z "$viol" ]] && ok "no client/ide/ → parent shared/ deps (generator excepted)" \
                   || { miss "client/ide/ reaches parent shared/:"; echo "$viol"; }

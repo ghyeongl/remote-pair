@@ -40,3 +40,5 @@ run_doctor off
 it "doctor_smb/sync-only-no-gate"
 assert_absent "$RP_OUT" "host File Sharing" "sync-only setup never triggers an SMB gate"
 cleanup_sandbox
+
+finish

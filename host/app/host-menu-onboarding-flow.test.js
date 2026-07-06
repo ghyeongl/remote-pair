@@ -90,12 +90,12 @@ test("Q0441/Q0442/Q0473/Q0493/Q0494 Host onboarding is accessible from the Host 
   );
   assert.match(
     hostOnboarding,
-    /const STEP_TITLES = \["Welcome", "Permissions", "Engine", "Connect", "Done"\]/,
-    "full Host onboarding must include permissions, engine, and connection guidance",
+    /const PERM_START = 3[\s\S]*const ENGINE_IDX = PERM_END \+ 1[\s\S]*const BROADCAST_IDX = ENGINE_IDX \+ 1[\s\S]*const DONE_IDX = BROADCAST_IDX \+ 1/,
+    "full Host onboarding must include split permissions, engine, Broadcast, and Done steps",
   );
   assert.match(
     hostOnboarding,
-    /deepLink === "permissions" \? 1 : deepLink === "engine" \? 2 : deepLink === "connect" \? 3 : 0/,
+    /deepLink === "permissions"\) return PERM_START[\s\S]*deepLink === "engine"\) return ENGINE_IDX[\s\S]*deepLink === "connect"\) return BROADCAST_IDX/,
     "Host onboarding must route menu deep-links and default Set up to Welcome",
   );
 });

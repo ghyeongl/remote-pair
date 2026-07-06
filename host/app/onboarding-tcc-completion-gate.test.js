@@ -4,6 +4,10 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "../..");
 const app = fs.readFileSync(path.join(root, "host/onboarding/src/App.tsx"), "utf8");
+const singlePerm = fs.readFileSync(
+  path.join(root, "host/onboarding/src/components/onboarding/host/StepSinglePerm.tsx"),
+  "utf8",
+);
 const onboardingWindow = fs.readFileSync(
   path.join(root, "host/app/OnboardingWindow.swift"),
   "utf8",
@@ -71,18 +75,18 @@ function hasRequiredTccGateBeforeCompletionSideEffects(source) {
 test("Q0443 host onboarding must not proceed/complete while required TCC permissions are unresolved", () => {
   assert.match(
     permissions,
-    /static func allGranted\(\) -> Bool \{\s*axTrusted\(\) && srGranted\(\)\s*\}/,
-    "required TCC gate must mean both Accessibility and Screen Recording",
+    /static func allGranted\(\) -> Bool \{\s*axTrusted\(\) && srGranted\(\) && loginGranted\(\)\s*\}/,
+    "required native gate must mean Accessibility, Screen Recording, and Remote Login",
+  );
+  assert.match(
+    singlePerm,
+    /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr"\]/,
+    "React permissions readiness must require Remote Login, AX, and SR",
   );
   assert.match(
     app,
-    /perm\.ax === "granted" && perm\.sr === "granted"/,
-    "React permissions readiness must require both AX and SR",
-  );
-  assert.match(
-    app,
-    /w\.index === 1 && !ready/,
-    "Permissions step Next must stay disabled until required TCC is resolved",
+    /inPerms && isRequiredPerm\(currentPermKey\) && !currentPermGranted/,
+    "Required permission step Next must stay disabled until the current required permission is resolved",
   );
   assert.ok(
     hasRequiredTccGateBeforeCompletionSideEffects(onboardingWindow),

@@ -31,7 +31,7 @@ test("approve request waits for permission prompt outcome and branches success/f
   assert.match(skill, /xpair approve/);
   assert.match(skill, /exit 0=handled, 1=failed/);
 
-  assert.match(cmdApprove, /: > "\$APPROVE_TRIGGER"/);
+  assert.match(cmdApprove, /: > "\$approve_trigger"/);
   assert.match(cmdApprove, /observing up to \$\{timeout\}s/);
   assert.match(cmdApprove, /while \[ "\$\(date \+%s\)" -lt "\$end" \]/);
   assert.match(cmdApprove, /grep -qiE 'router:\.\*success'/);

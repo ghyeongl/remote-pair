@@ -32,7 +32,7 @@ test("Q0546 remote relaunch reattaches existing tmux sessions instead of creatin
     "remote setup must detect existing sessions before creating one",
   );
   assert.match(launcher, /if \[ "\\\$NEED_CREATE" = 1 \]; then[\s\S]*tm new-session -d/);
-  assert.match(launcher, /mosh --server="\$MOSH_SERVER" "\$REMOTE_HOST" -- "\$REMOTE_HOME\/\.local\/bin\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$ACTUAL_SESSION"/);
+  assert.match(launcher, /mosh --ssh="ssh \$SSH_ID" --server="\$MOSH_SERVER" "\$REMOTE_HOST" -- "\$REMOTE_HOME\/\.local\/bin\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$ACTUAL_SESSION"/);
 });
 
 test("Q0546 claude sessions resume the exact recorded conversation id when continuing", () => {

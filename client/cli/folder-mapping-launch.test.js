@@ -43,14 +43,18 @@ function runShellFunction(fnSource, env, command) {
 }
 
 test("Q0041/Q0042/Q0043 launcher maps client paths with the longest host prefix", () => {
-  const mapToHost = extractShellFunction(launcher, "map_to_host");
+  const helpers = [
+    extractOneLineFunction(launcher, "map_client_of"),
+    extractOneLineFunction(launcher, "map_host_of"),
+    extractShellFunction(launcher, "map_to_host"),
+  ].join("\n");
   const env = {
     FOLDER_MAPS: "/client::/host;/client/work::/srv/work;/client/work/app::/srv/app",
   };
 
-  assert.equal(runShellFunction(mapToHost, env, "map_to_host '/client/work/app/src'"), "/srv/app/src");
-  assert.equal(runShellFunction(mapToHost, env, "map_to_host '/client/work/other'"), "/srv/work/other");
-  assert.equal(runShellFunction(mapToHost, env, "map_to_host '/outside/project'"), "/outside/project");
+  assert.equal(runShellFunction(helpers, env, "map_to_host '/client/work/app/src'"), "/srv/app/src");
+  assert.equal(runShellFunction(helpers, env, "map_to_host '/client/work/other'"), "/srv/work/other");
+  assert.equal(runShellFunction(helpers, env, "map_to_host '/outside/project'"), "/outside/project");
 });
 
 test("Q0041/Q0042/Q0043 xpair launch resolves unmapped candidates through the same mapping rule", () => {

@@ -69,3 +69,5 @@ it "map_method/infer-non-smb-volumes-sync"
 assert_eq "$(json_method "$EXTERNAL")" "sync" "non-SMB /Volumes path infers sync"
 
 cleanup_sandbox
+
+finish
