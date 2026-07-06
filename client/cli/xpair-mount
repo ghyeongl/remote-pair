@@ -289,7 +289,7 @@ cmd_mount() {
 
   printf '  Mountpoint: %s\n' "$discovered"
   printf '  Tip: add FOLDER_MAPS entry so editors resolve to this path:\n'
-  printf '    xpair config set folder-map %s::%s\n' "$discovered" "$hostpath"
+  printf '    xpair map add %s %s\n' "$discovered" "$hostpath"
 }
 
 # ── subcommand: unmount ──

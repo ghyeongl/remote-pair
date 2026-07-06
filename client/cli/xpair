@@ -96,7 +96,6 @@ FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"          # per-mapping method, keyed by
 LAUNCHER="${LAUNCHER:-$RP_CLIENT_DIR/bin/xpair-launch}"
 # Terminal app for open-gui/onboard. Default iterm2 if iTerm installed, else terminal.
 TERMINAL_APP="${TERMINAL_APP:-$( [ -d /Applications/iTerm.app ] && echo iterm2 || echo terminal )}"
-TMUXB="$LOCAL_BIN/tmux-aqua"
 RP_YES="${RP_YES:-0}"
 
 rp_ssh_control_path() {
@@ -1070,8 +1069,9 @@ cmd_attach() {
     if mosh --ssh="ssh $SSH_ID" ${_clientarg[@]+"${_clientarg[@]}"} --server="${MOSH_SERVER:-$HOME/.local/bin/mosh-server}" "$REMOTE_HOST" -- "$HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$session"; then
       trap - HUP TERM
       return 0
+    else
+      rc=$?
     fi
-    rc=$?
     # mosh failed — e.g. the host was bundled WITHOUT a mosh-server (install treats that as the
     # ssh-fallback case), so the remote mosh-server is absent. Degrade to the ssh attach path
     # instead of giving up; the detach-on-close trap stays armed across the fallback.
@@ -1506,21 +1506,6 @@ rp_tailscale_bin() {
   done
   p="$(command -v tailscale 2>/dev/null || true)"; [ -n "$p" ] && { printf '%s' "$p"; return 0; }
   return 1
-}
-
-# Is <name-or-host> already in ~/.ssh/config (managed or foreign Host alias)?
-_rp_in_ssh_config() {
-  local q="$1"; [ -f "$RP_SSH_CFG" ] || return 1
-  awk -v q="$q" 'BEGIN{IGNORECASE=1} /^[[:space:]]*Host([[:space:]]|=)/ {for(i=2;i<=NF;i++) if($i==q) {f=1}} END{exit f?0:1}' "$RP_SSH_CFG"
-}
-# status for a peer: reconnect (known in config / REMOTE_HOST), else connect (Xpair role), else setup.
-_rp_peer_status() {
-  local name="$1" addr="$2" role="$3"
-  if [ -n "$name" ] && _rp_in_ssh_config "$name"; then printf 'reconnect'; return; fi
-  if [ -n "$addr" ] && _rp_in_ssh_config "$addr"; then printf 'reconnect'; return; fi
-  if [ -n "${REMOTE_HOST:-}" ] && { [ "$REMOTE_HOST" = "$name" ] || [ "$REMOTE_HOST" = "$addr" ]; }; then printf 'reconnect'; return; fi
-  # A peer advertising the Xpair service (any role) → key-auth connect; otherwise plain SSH setup.
-  case "$role" in host|both|client) printf 'connect' ;; *) printf 'setup' ;; esac
 }
 
 cmd_discover() {
