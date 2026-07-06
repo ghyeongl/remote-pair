@@ -133,54 +133,7 @@ write_config() {
 }
 
 reload_runtime_env_after_migration() {
-  set -a
-  local f
-  local runtime_env_files
-  if [ "$ROLE" = host ]; then
-    runtime_env_files="$RP_CLIENT_DIR/common.env
-$RP_CLIENT_DIR/client.env
-$RP_HOST_DIR/common.env
-$RP_HOST_DIR/host.env"
-  else
-    runtime_env_files="$RP_HOST_DIR/common.env
-$RP_HOST_DIR/host.env
-$RP_CLIENT_DIR/common.env
-$RP_CLIENT_DIR/client.env"
-  fi
-  while IFS= read -r f; do
-    # shellcheck disable=SC1090
-    [ -f "$f" ] && . "$f"
-  done <<EOF
-$runtime_env_files
-EOF
-  set +a
-
-  RP_ORG="${RP_ORG:-com.x10lab}"
-  BUNDLE_PREFIX="${BUNDLE_PREFIX:-${RP_ORG}.xpair-host}"
-  APP_NAME="${APP_NAME:-XpairHost}"
-  SIGN_CN="${SIGN_CN:-RemotePair Local Signing}"
-  GH_REPO="${GH_REPO:-x10lab/xpair}"
-  APP_LABEL="$BUNDLE_PREFIX"; WATCHDOG_LABEL="${BUNDLE_PREFIX}-watchdog"
-  APP_PATH="/Applications/${APP_NAME}.app"; APP_EXEC="$APP_PATH/Contents/MacOS/${APP_NAME}"
-  APPROVE_TRIGGER="${APPROVE_TRIGGER:-/tmp/xpair.approve-request}"
-  LOG_FILE="${LOG_FILE:-$LOG_DIR/xpair.log}"
-  HEARTBEAT_FILE="${HEARTBEAT_FILE:-$LOG_DIR/xpair.heartbeat}"
-  LOG_LEVEL="${REMOTEPAIR_LOG:-${LOG_LEVEL:-info}}"
-  RULES_FILE="${RULES_FILE:-$RP_DIR/rules.txt}"
-
-  REMOTE_HOST="${REMOTE_HOST:-}"
-  FOLDER_MAPS="${FOLDER_MAPS:-${SYNC_ROOTS:-}}"
-  FOLDER_MAP_MODES="${FOLDER_MAP_MODES:-}"
-  LAUNCHER="${LAUNCHER:-$RP_CLIENT_DIR/bin/xpair-launch}"
-  TERMINAL_APP="${TERMINAL_APP:-$( [ -d /Applications/iTerm.app ] && echo iterm2 || echo terminal )}"
-  EDITOR_PORT="${EDITOR_PORT:-8080}"
-  SYNC_BACKEND="${SYNC_BACKEND:-syncthing}"
-  MOUNT_BACKEND="${MOUNT_BACKEND:-smb}"
-  LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
-  AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux.sock}"
-  LAUNCH_AGENTS="${LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
-  SERVICES_DIR="${SERVICES_DIR:-$HOME/Library/Services}"
-  RP_REPO_ROOT="${RP_REPO_ROOT:-$REPO_ROOT}"
+  . "$HERE/config.sh"
 }
 
 migrate_layout || warn "layout migration skipped some steps; continuing"
@@ -268,6 +221,8 @@ fi
 if is_host; then
   use_host_manifest
   mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
+  say "[host] shared logger → $RP_DIR/bin/logging.sh"
+  install_file "$HERE/logging.sh" "$RP_DIR/bin/logging.sh" 644
   say "[host] approve rules → $RULES_FILE"
   install_file "$HOST_DIR/rules.txt" "$RULES_FILE"
   if [ -d "$HOST_DIR/skills" ]; then
@@ -402,6 +357,12 @@ if is_client; then
   [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize" 755
   say "[client] shared logger → $RP_CLIENT_DIR/bin/logging.sh"
   install_file "$HERE/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" 644
+  if [ -f "$HOST_DIR/uninstall-host.sh" ]; then
+    say "[client] host uninstaller → $RP_CLIENT_DIR/share/uninstall-host.sh"
+    install_file "$HOST_DIR/uninstall-host.sh" "$RP_CLIENT_DIR/share/uninstall-host.sh" 755
+  else
+    say "[client] host uninstaller not in this bundle — skipped (self-update stages it)"
+  fi
   install_file "$CLIENT_DIR/xpair-launch" "$LAUNCHER" 755
 
   # ── Web-tab launchers: editor (M4 code-server) + desktop (M5 Screen Sharing). manifest-recorded → reversible. ──
@@ -451,7 +412,7 @@ if [ "$DO_SYNC" = 1 ]; then
     [ -z "$line" ] && continue; case "$line" in \#*) continue ;; esac
     add_gitignore "$line"
   done < "$HERE/claude.gitignore"
-  "$HERE/sync-setup.sh"
+  MANIFEST="$MANIFEST" "$HERE/sync-setup.sh"
 else
   say "sync off — ~/.claude not synced (enable with --with-sync)"
 fi

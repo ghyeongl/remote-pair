@@ -9,8 +9,8 @@
 # Isolation: HOME is a tempdir. All config.sh-derived paths (RP_HOST_DIR/RP_CLIENT_DIR/LOCAL_BIN/...) land
 #   inside the sandbox. External commands (ssh/mosh/pbs/brew/osascript/launchctl) are dropped into MOCKBIN
 #   (on PATH) so the real system is never touched. SERVICES_DIR is overridden to the sandbox to skip the
-#   pbs(-flush) branch entirely. REMOTE_HOST=dummy + RP_YES=1 + non-tty → no onboard prompt / real connection
-#   (doctor uses the mock ssh).
+#   pbs(-flush) branch entirely. RP_YES=1 + non-tty → no onboard prompt; scenarios that need
+#   REMOTE_HOST set use SBX_REMOTE_HOST explicitly (doctor uses the mock ssh).
 #
 # Uses only bash 3.2-compatible constructs.
 
@@ -28,9 +28,15 @@ make_client_mocks() {
 # run_install [args...] — run install.sh in the sandbox. MOCKBIN-on-PATH.
 #   SERVICES_DIR is overridden to the sandbox to skip the absolute-path pbs(-flush) branch.
 run_install() {
-  RP_OUT="$(PATH="$MOCKBIN:$PATH" HOME="$HOME" RP_DIR="$RP_DIR" \
-            SERVICES_DIR="$SBX/Services" REMOTE_HOST="${SBX_REMOTE_HOST-dummy}" RP_YES=1 \
-            bash "$INSTALL_SRC" "$@" </dev/null 2>"$RP_ERRFILE")"; RP_RC=$?
+  if [ "${SBX_REMOTE_HOST+x}" ]; then
+    RP_OUT="$(PATH="$MOCKBIN:$PATH" HOME="$HOME" RP_DIR="$RP_DIR" \
+              SERVICES_DIR="$SBX/Services" REMOTE_HOST="$SBX_REMOTE_HOST" RP_YES=1 \
+              bash "$INSTALL_SRC" "$@" </dev/null 2>"$RP_ERRFILE")"; RP_RC=$?
+  else
+    RP_OUT="$(PATH="$MOCKBIN:$PATH" HOME="$HOME" RP_DIR="$RP_DIR" \
+              SERVICES_DIR="$SBX/Services" RP_YES=1 \
+              bash "$INSTALL_SRC" "$@" </dev/null 2>"$RP_ERRFILE")"; RP_RC=$?
+  fi
   RP_ERR="$(cat "$RP_ERRFILE" 2>/dev/null)"
 }
 
@@ -132,6 +138,57 @@ it "upgrade-preserves-config/folder-map-modes"
 assert_contains "$UPGRADED_ENV" "FOLDER_MAP_MODES=$HOME/sync::sync" "migrated FOLDER_MAP_MODES survives write_config"
 cleanup_sandbox
 
+new_sandbox
+make_client_mocks
+mkdir -p "$RP_CLIENT_DIR"
+printf 'REMOTE_HOST=file-host\n' > "$RP_CLIENT_DIR/client.env"
+SBX_REMOTE_HOST=caller-host run_install --role client --no-sync
+unset SBX_REMOTE_HOST
+
+it "config-precedence/env-over-role-file"
+assert_rc "$RP_RC" 0 "client reinstall with REMOTE_HOST env rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$(cat "$RP_CLIENT_DIR/client.env" 2>/dev/null)" "REMOTE_HOST=caller-host" "caller REMOTE_HOST overrides role env file across repeated config sources"
+cleanup_sandbox
+
+new_sandbox
+make_client_mocks
+mkdir -p "$RP_HOST_DIR" "$RP_CLIENT_DIR"
+printf 'LOCAL_BIN=%q\n' "$SBX/client-bin" > "$RP_CLIENT_DIR/common.env"
+printf 'LOCAL_BIN=%q\n' "$SBX/host-bin" > "$RP_HOST_DIR/common.env"
+CONFIG_PRECEDENCE_OUT="$(
+  unset _XPAIR_ENV_SNAPSHOT LOCAL_BIN
+  export XPAIR_CONFIG_ROLE=client
+  . "$_REPO_ROOT/shared/config.sh"
+  export XPAIR_CONFIG_ROLE=host
+  . "$_REPO_ROOT/shared/config.sh"
+  printf '%s' "$LOCAL_BIN"
+)"
+
+it "config-precedence/no-second-source-laundering"
+assert_eq "$CONFIG_PRECEDENCE_OUT" "$SBX/host-bin" "host role source uses host role env over earlier client role values"
+cleanup_sandbox
+
+new_sandbox
+make_client_mocks
+mkdir -p "$HOME/.claude"
+export SYNC_URL="file://$SBX/claude-remote.git"
+run_install --role client --with-sync
+unset SYNC_URL
+
+it "sync-setup/records-gitremote-in-client-manifest"
+assert_rc "$RP_RC" 0 "client install with sync rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$(cat "$RP_CLIENT_DIR/.manifest-client" 2>/dev/null)" "GITREMOTE	origin" "sync reversal is recorded in client role manifest"
+assert_absent "$(cat "$RP_HOST_DIR/.install-manifest" 2>/dev/null)" "GITREMOTE	origin" "sync reversal is not recorded in legacy host manifest"
+run_uninstall --role client
+it "sync-setup/client-uninstall-removes-gitremote"
+assert_rc "$RP_RC" 0 "client uninstall after sync rc=0 :: stderr=[$RP_ERR]"
+if git -C "$HOME/.claude" remote get-url origin >/dev/null 2>&1; then
+  _fail "client uninstall left origin remote behind"
+else
+  _pass "client uninstall removed origin remote"
+fi
+cleanup_sandbox
+
 # ────────────────────────────────────────────────────────────────────────────
 # MANIFEST ATTRIBUTION: both installs record by target runtime dir
 # ────────────────────────────────────────────────────────────────────────────
@@ -224,7 +281,7 @@ for a in "$@"; do
 done
 [ -n "$out" ] || exit 2
 case "$out" in
-  */xpair|*/xpair-launch|*/hangul-romanize|*/xpair-askpass|*/xpair-mount|*/xpair-desktop|*/xpair-editor|*/logging.sh)
+  */xpair|*/xpair-launch|*/hangul-romanize|*/xpair-askpass|*/xpair-mount|*/xpair-desktop|*/xpair-editor|*/logging.sh|*/uninstall-host.sh)
     printf 'updated %s\n' "$(basename "$out")" > "$out"
     ;;
   *) exit 22 ;;
@@ -241,6 +298,7 @@ assert_contains "$(cat "$MOCKBIN/xpair-mount" 2>/dev/null)" "updated xpair-mount
 assert_contains "$(cat "$MOCKBIN/xpair-desktop" 2>/dev/null)" "updated xpair-desktop" "self-update refreshes xpair-desktop"
 assert_contains "$(cat "$MOCKBIN/xpair-editor" 2>/dev/null)" "updated xpair-editor" "self-update refreshes xpair-editor"
 assert_contains "$(cat "$MOCKBIN/xpair-askpass" 2>/dev/null)" "updated xpair-askpass" "self-update refreshes askpass helper"
+assert_contains "$(cat "$RP_CLIENT_DIR/share/uninstall-host.sh" 2>/dev/null)" "updated uninstall-host.sh" "self-update stages canonical host uninstaller"
 cleanup_sandbox
 
 new_sandbox

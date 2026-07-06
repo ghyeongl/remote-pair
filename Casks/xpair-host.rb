@@ -23,9 +23,19 @@ cask "xpair-host" do
                    args: ["-dr", "com.apple.quarantine", "#{appdir}/XpairHost.app"]
   end
 
-  uninstall quit: "com.x10lab.xpair-host"
+  uninstall launchctl: [
+              "com.x10lab.xpair-host",
+              "com.x10lab.xpair-host-watchdog",
+            ],
+            quit: "com.x10lab.xpair-host",
+            trash: [
+              "~/Library/LaunchAgents/com.x10lab.xpair-host.plist",
+              "~/Library/LaunchAgents/com.x10lab.xpair-host-watchdog.plist",
+            ]
 
   zap trash: [
+    "~/Library/LaunchAgents/com.x10lab.xpair-host.plist",
+    "~/Library/LaunchAgents/com.x10lab.xpair-host-watchdog.plist",
     "~/.xpair/host",
     "~/.local/share/xpair",
   ]

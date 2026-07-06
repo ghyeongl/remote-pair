@@ -55,6 +55,7 @@ it "migration/host-files-untouched"
 
 cleanup_sandbox
 
+unset _XPAIR_ENV_SNAPSHOT
 new_sandbox
 mkdir -p "$RP_CLIENT_DIR" "$RP_HOST_DIR"
 printf 'TELEMETRY_INSTALL_TS=12345\nTELEMETRY_ANON_ID=abc\n' > "$RP_CLIENT_DIR/client.env"

@@ -439,7 +439,6 @@ migrate_layout() {
       "$host_dir/.force-onboarding" \
       "$host_dir/bin/xpair-launch" \
       "$host_dir/bin/hangul-romanize" \
-      "$host_dir/bin/logging.sh" \
       "$host_dir/.manifest-client"; do
       [ -e "$f" ] && did_move=1
     done
@@ -457,7 +456,6 @@ migrate_layout() {
       _move_if_present "$host_dir/.manifest-client" "$client_dir/.manifest-client"
       _move_if_present "$host_dir/bin/xpair-launch" "$client_dir/bin/xpair-launch"
       _move_if_present "$host_dir/bin/hangul-romanize" "$client_dir/bin/hangul-romanize"
-      _move_if_present "$host_dir/bin/logging.sh" "$client_dir/bin/logging.sh"
       for name in xpair.log code-server.log claude-launch.err.log cli.log; do
         _move_if_present "$host_dir/logs/$name" "$client_dir/logs/$name"
       done
