@@ -25,7 +25,7 @@ jobs:
               *)
                 [ -f "$f" ] || { printf '%s\n' "$f"; continue; }
                 first="$(sed -n '1p' "$f" 2>/dev/null || true)"
-                printf '%s\n' "$first" | grep -Eq '^#!.*\b(ba)?sh' && printf '%s\n' "$f"
+                printf '%s\n' "$first" | grep -Eq '^#!.*[/ ](ba)?sh([[:space:]]|$)' && printf '%s\n' "$f"
                 ;;
             esac
           done > "$list"
