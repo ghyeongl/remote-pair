@@ -82,14 +82,29 @@ _write_env() {
     local k; for k in "$@"; do printf '%s=%q\n' "$k" "${!k}"; done
   } > "$f"
 }
+_role_has_host() { [ "$1" = host ] || [ "$1" = both ]; }
+_role_has_client() { [ "$1" = client ] || [ "$1" = both ]; }
 write_config() {
-  local existing_host_role="" existing_client_role="" effective_role="$ROLE"
+  local existing_host_role="" existing_client_role="" effective_role="host" has_host=0 has_client=0 maintain_client_role=0
   [ -f "$RP_HOST_DIR/role" ] && existing_host_role="$(cat "$RP_HOST_DIR/role" 2>/dev/null || true)"
   [ -f "$RP_CLIENT_DIR/role" ] && existing_client_role="$(cat "$RP_CLIENT_DIR/role" 2>/dev/null || true)"
-  if is_host && { [ "$existing_client_role" = client ] || [ "$existing_client_role" = both ] || [ -f "$RP_CLIENT_DIR/.manifest-client" ]; }; then
+  _role_has_host "$ROLE" && has_host=1
+  _role_has_client "$ROLE" && has_client=1
+  _role_has_host "$existing_host_role" && has_host=1
+  _role_has_client "$existing_host_role" && has_client=1
+  _role_has_host "$existing_client_role" && has_host=1
+  _role_has_client "$existing_client_role" && has_client=1
+  { [ -f "$RP_HOST_DIR/.manifest-host" ] || [ -s "$RP_HOST_DIR/host.env" ]; } && has_host=1
+  { [ -f "$RP_CLIENT_DIR/.manifest-client" ] || [ -s "$RP_CLIENT_DIR/client.env" ]; } && has_client=1
+  if [ "$has_host" = 1 ] && [ "$has_client" = 1 ]; then
     effective_role=both
-  elif is_client && { [ "$existing_host_role" = host ] || [ "$existing_host_role" = both ] || [ -f "$RP_HOST_DIR/.manifest-host" ]; }; then
-    effective_role=both
+  elif [ "$has_client" = 1 ]; then
+    effective_role=client
+  else
+    effective_role=host
+  fi
+  if is_client || [ -d "$RP_CLIENT_DIR" ] || [ -f "$RP_CLIENT_DIR/role" ] || [ -f "$RP_CLIENT_DIR/client.env" ] || [ -f "$RP_CLIENT_DIR/.manifest-client" ]; then
+    maintain_client_role=1
   fi
 
   if is_host; then
@@ -109,7 +124,11 @@ write_config() {
   if is_client; then
     use_client_manifest; _write_env "$CLIENT_COMMON_ENV" "${COMMON_KEYS[@]}"
     use_client_manifest; _write_env "$CLIENT_ENV" "${CLIENT_KEYS[@]}"
-    use_client_manifest; printf '%s\n' "$effective_role" | write_file "$RP_CLIENT_DIR/role" 644
+  fi
+  if [ "$maintain_client_role" = 1 ]; then
+    if is_client; then use_client_manifest; else use_host_manifest; fi
+    mk_dir "$RP_CLIENT_DIR"; chmod 700 "$RP_CLIENT_DIR"
+    printf '%s\n' "$effective_role" | write_file "$RP_CLIENT_DIR/role" 644
   fi
 }
 

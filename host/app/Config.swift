@@ -16,20 +16,27 @@ let CLIENT_ENV_FILE = "\(CLIENT_DIR)/client.env" // present = client installed o
 let LEGACY_CLIENT_ENV_FILE = "\(RP_DIR)/client.env" // pre-split client runtime location
 let RD_SESSION_TOKEN_FILE = "\(RP_DIR)/rd-session-token" // 0600 token read by the authenticated SSH client before RD signaling.
 
-/// This machine's role. ROLE_FILE trimmed and used as-is (host|client|both); "" if absent or empty (= default host).
+func readRoleFile(_ file: String) -> String {
+    guard let raw = try? String(contentsOfFile: file, encoding: .utf8) else { return "" }
+    return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// This machine's effective role. host/client markers are unioned; "both" in either location is host-capable.
 /// Parsing is kept consistent with Installer.shouldSkipSelfInstall(Installer.swift:50-55).
 func currentRole() -> String {
     // Absent ROLE_FILE = default host (""), the common case → stay silent. Only an *unexpected* read
     // error (file present but unreadable, e.g. perms) is worth a .debug; a missing file is not an error.
-    do {
-        return try String(contentsOfFile: ROLE_FILE, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    } catch {
-        if FileManager.default.fileExists(atPath: ROLE_FILE) {
-            log(.debug, "ROLE: present but unreadable at \(ROLE_FILE): \(error) — defaulting to host")
-        }
-        return ""
+    let hostRole = readRoleFile(ROLE_FILE)
+    let clientRole = readRoleFile(CLIENT_ROLE_FILE)
+    if FileManager.default.fileExists(atPath: ROLE_FILE), hostRole.isEmpty {
+        log(.debug, "ROLE: present but unreadable/empty at \(ROLE_FILE) — checking client marker/defaulting to host")
     }
+    if hostRole == "both" || clientRole == "both" { return "both" }
+    if hostRole == "host" || clientRole == "host" {
+        return (hostRole == "client" || clientRole == "client") ? "both" : "host"
+    }
+    if hostRole == "client" || clientRole == "client" { return "client" }
+    return ""
 }
 
 /// Does this machine act as a host? host / both / empty (unset = default host) → true.  Only client is false.
@@ -52,10 +59,8 @@ func readClientEnvFile() -> String? {
     return try? String(contentsOfFile: LEGACY_CLIENT_ENV_FILE, encoding: .utf8)
 }
 
-func roleFileContainsClient(_ file: String) -> Bool {
-    guard let raw = try? String(contentsOfFile: file, encoding: .utf8) else { return false }
-    let role = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    return role == "client" || role == "both"
+func roleFileIsClientOnly(_ file: String) -> Bool {
+    return readRoleFile(file) == "client"
 }
 
 func clientEnvHasRemoteHost() -> Bool {

@@ -89,6 +89,38 @@ function assertNoSecrets(blob, label) {
   }
 }
 
+console.log("legacy telemetry env migration:");
+
+check("legacy telemetry keys migrate out of client.env on first read", () => {
+  const legacyHostDir = path.join(TMP_HOME, ".xpair/host");
+  fs.mkdirSync(legacyHostDir, { recursive: true });
+  fs.rmSync(TELEMETRY_ENV, { force: true });
+  fs.writeFileSync(
+    CLIENT_ENV,
+    "REMOTE_HOST=client-host\nTELEMETRY_INSTALL_TS=12345\nTELEMETRY_CONSENT=true\n",
+  );
+  fs.writeFileSync(
+    path.join(legacyHostDir, "client.env"),
+    "POSTHOG_HOST=https://ph.example\nFOLDER_MAPS=/c::/h\n",
+  );
+  assert.deepStrictEqual(t.getConsent(), { telemetry: true, crashReport: false });
+  assert.strictEqual(t.installTs(), 12345);
+  const telemetryRaw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(telemetryRaw.includes('TELEMETRY_INSTALL_TS="12345"'));
+  assert.ok(telemetryRaw.includes('TELEMETRY_CONSENT="true"'));
+  assert.ok(telemetryRaw.includes('POSTHOG_HOST="https://ph.example"'));
+  const clientRaw = fs.readFileSync(CLIENT_ENV, "utf8");
+  const legacyRaw = fs.readFileSync(path.join(legacyHostDir, "client.env"), "utf8");
+  assert.ok(!clientRaw.includes("TELEMETRY_INSTALL_TS="), "client.env should lose install stamp");
+  assert.ok(!clientRaw.includes("TELEMETRY_CONSENT="), "client.env should lose consent");
+  assert.ok(!legacyRaw.includes("POSTHOG_HOST="), "legacy host/client.env should lose PostHog host");
+  assert.ok(clientRaw.includes("REMOTE_HOST=client-host"), "non-telemetry client config remains");
+  assert.ok(legacyRaw.includes("FOLDER_MAPS=/c::/h"), "non-telemetry legacy config remains");
+  fs.rmSync(TELEMETRY_ENV, { force: true });
+  fs.rmSync(CLIENT_ENV, { force: true });
+  fs.rmSync(legacyHostDir, { recursive: true, force: true });
+});
+
 console.log("strictScrub — masks IP/path/tailnet:");
 
 check("strictScrub masks each PII fixture", () => {

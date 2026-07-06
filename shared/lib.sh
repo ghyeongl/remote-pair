@@ -176,6 +176,59 @@ _migrate_client_env_has_real_config() {
   _migrate_env_key_nonempty "$file" REMOTE_HOST || _migrate_env_key_nonempty "$file" FOLDER_MAPS
 }
 
+_migrate_telemetry_key_list() {
+  printf '%s\n' "TELEMETRY_ANON_ID TELEMETRY_CONSENT CRASH_REPORT_CONSENT TELEMETRY_INSTALL_TS POSTHOG_KEY POSTHOG_HOST SENTRY_DSN TELEMETRY_HOST_CONNECTED_AT"
+}
+
+_migrate_client_env_telemetry_keys() {
+  local src="$1" dst="$2" keys tmp_dst tmp_src
+  [ -f "$src" ] || return 0
+  keys="$(_migrate_telemetry_key_list)"
+  mkdir -p "$(dirname "$dst")" 2>/dev/null || true
+  [ -f "$dst" ] || : > "$dst"
+  tmp_dst="$dst.tmp.$$"
+  tmp_src="$src.tmp.$$"
+  awk -v keys="$keys" '
+    BEGIN {
+      split(keys, k, " ")
+      for (i in k) want[k[i]] = 1
+    }
+    FNR == NR {
+      print
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*=.*/, "", key)
+      if (want[key]) seen[key] = 1
+      next
+    }
+    {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*=.*/, "", key)
+      if (want[key]) {
+        if (!seen[key]) {
+          print
+          seen[key] = 1
+        }
+        next
+      }
+    }
+  ' "$dst" "$src" > "$tmp_dst" && mv "$tmp_dst" "$dst" || { rm -f "$tmp_dst"; return 0; }
+  awk -v keys="$keys" '
+    BEGIN {
+      split(keys, k, " ")
+      for (i in k) want[k[i]] = 1
+    }
+    {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*=.*/, "", key)
+      if (want[key]) next
+      print
+    }
+  ' "$src" > "$tmp_src" && mv "$tmp_src" "$src" || rm -f "$tmp_src"
+}
+
 _migrate_merge_legacy_client_env() {
   local legacy="$1" dst="$2" tmp
   [ -f "$legacy" ] || return 0
@@ -364,6 +417,11 @@ migrate_layout() {
       _migrate_note "skip IDE server-data rename: move failed"
     fi
   fi
+
+  # Telemetry is now decoupled from client.env. Move the frozen telemetry key set into
+  # telemetry.env before deciding whether client.env contains real client runtime config.
+  _migrate_client_env_telemetry_keys "$host_dir/client.env" "$client_dir/telemetry.env" || true
+  _migrate_client_env_telemetry_keys "$client_dir/client.env" "$client_dir/telemetry.env" || true
 
   # 2. Move legacy client runtime state out of ~/.xpair/host. A telemetry-only
   # ~/.xpair/client/client.env is not a real runtime marker; merge legacy config into it.

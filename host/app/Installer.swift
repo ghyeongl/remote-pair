@@ -50,7 +50,7 @@ enum Installer {
             log(.warn, "launched from non-installed location (\(p)) — refusing host self-install (build/dev launch guard)")
             return true
         }
-        if roleFileContainsClient(ROLE_FILE) || roleFileContainsClient(CLIENT_ROLE_FILE) {
+        if roleFileIsClientOnly(ROLE_FILE) || roleFileIsClientOnly(CLIENT_ROLE_FILE) {
             log(.info, "client role marker — skipping host self-install")
             return true
         }

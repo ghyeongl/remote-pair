@@ -44,6 +44,17 @@ const K_SENTRY_DSN = "SENTRY_DSN"; // Sentry DSN; absent => Sentry no-op
 // fires at most once for the lifetime of the install regardless of how many times either lane
 // observes reachability.
 const K_HOST_CONNECTED_STAMP = "TELEMETRY_HOST_CONNECTED_AT"; // epoch ms of first host_connected
+const TELEMETRY_KEYS = Object.freeze([
+  K_ANON_ID,
+  K_TELEMETRY_CONSENT,
+  K_CRASH_CONSENT,
+  K_INSTALL_TS,
+  K_POSTHOG_KEY,
+  K_POSTHOG_HOST,
+  K_SENTRY_DSN,
+  K_HOST_CONNECTED_STAMP,
+]);
+const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 
 // Cloud EU default (endpoint-agnostic: swappable to self-host via POSTHOG_HOST in telemetry.env).
 const DEFAULT_POSTHOG_HOST = "https://eu.i.posthog.com";
@@ -130,9 +141,76 @@ function readEnvFile(file) {
   return env;
 }
 
+function stripTelemetryKeysFromEnvFile(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch (_e) {
+    return;
+  }
+  const kept = [];
+  let changed = false;
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    const eq = t.indexOf("=");
+    const key = eq >= 0 ? t.slice(0, eq).trim() : "";
+    if (key && TELEMETRY_KEY_SET.has(key)) {
+      changed = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  if (!changed) return;
+  try {
+    fs.writeFileSync(file, kept.join("\n").replace(/\n+$/, "\n"));
+  } catch (_e) {
+    /* best effort */
+  }
+}
+
+let legacyTelemetryMigrationAttempted = false;
+function migrateLegacyTelemetryEnv(currentEnv) {
+  const additions = {};
+  for (const file of [CLIENT_ENV, LEGACY_CLIENT_ENV]) {
+    const legacy = readEnvFile(file);
+    for (const key of TELEMETRY_KEYS) {
+      if (currentEnv[key] === undefined && additions[key] === undefined && legacy[key] !== undefined) {
+        additions[key] = legacy[key];
+      }
+    }
+    stripTelemetryKeysFromEnvFile(file);
+  }
+  const entries = Object.entries(additions);
+  if (!entries.length) return;
+  let lines = [];
+  try {
+    lines = fs.readFileSync(TELEMETRY_ENV, "utf8").split("\n");
+  } catch (_e) {
+    /* file may not exist yet */
+  }
+  for (const [key, val] of entries) {
+    lines.push(`${key}="${val}"`);
+  }
+  try {
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(RP_CLIENT_DIR, 0o700);
+    } catch (_e) {}
+    fs.writeFileSync(TELEMETRY_ENV, lines.join("\n").replace(/\n+$/, "\n"));
+  } catch (_e) {
+    /* best effort */
+  }
+}
+
 /** Parse telemetry.env (KEY=VALUE, optional quotes) into a flat object. Never throws. */
 function readEnv() {
-  return readEnvFile(TELEMETRY_ENV);
+  let env = readEnvFile(TELEMETRY_ENV);
+  if (!legacyTelemetryMigrationAttempted && TELEMETRY_KEYS.some((key) => env[key] === undefined)) {
+    legacyTelemetryMigrationAttempted = true;
+    migrateLegacyTelemetryEnv(env);
+    env = readEnvFile(TELEMETRY_ENV);
+  }
+  return env;
 }
 
 /** Upsert KEY="value" in telemetry.env (creates the file/dir if missing). Never throws. */

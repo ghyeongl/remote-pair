@@ -206,11 +206,41 @@ run_install --role host --no-native --no-sync
 it "host-install/existing-client-runtime-stays-host-manifest"
 assert_rc "$RP_RC" 0 "host install over existing client runtime rc=0 :: stderr=[$RP_ERR]"
 assert_eq "$(cat "$RP_HOST_DIR/role" 2>/dev/null)" "both" "host role marker records co-located both role"
-assert_eq "$(cat "$RP_CLIENT_DIR/role" 2>/dev/null)" "client" "host install does not rewrite client role marker"
+assert_eq "$(cat "$RP_CLIENT_DIR/role" 2>/dev/null)" "both" "host install updates client role marker to co-located both role"
 HOST_MAN_TXT="$(cat "$RP_HOST_DIR/.manifest-host" 2>/dev/null)"
 CLIENT_MAN_TXT="$(cat "$RP_CLIENT_DIR/.manifest-client" 2>/dev/null)"
 assert_contains "$HOST_MAN_TXT" "FILE	$RP_HOST_DIR/host.env" "host env recorded in host manifest"
 assert_absent "$CLIENT_MAN_TXT" "$RP_HOST_DIR/host.env" "host install does not record host env in client manifest"
+cleanup_sandbox
+
+new_sandbox
+cat > "$MOCKBIN/curl" <<'EOS'
+#!/bin/bash
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$a"; break; fi
+  prev="$a"
+done
+[ -n "$out" ] || exit 2
+case "$out" in
+  */xpair|*/xpair-launch|*/hangul-romanize|*/xpair-askpass|*/xpair-mount|*/xpair-desktop|*/xpair-editor|*/logging.sh)
+    printf 'updated %s\n' "$(basename "$out")" > "$out"
+    ;;
+  *) exit 22 ;;
+esac
+EOS
+chmod +x "$MOCKBIN/curl"
+printf 'old cli\n' > "$MOCKBIN/xpair"; chmod +x "$MOCKBIN/xpair"
+RP_OUT="$(PATH="$MOCKBIN:$PATH" HOME="$HOME" bash "$_REPO_ROOT/client/cli/xpair" self-update testref 2>"$RP_ERRFILE")"; RP_RC=$?
+RP_ERR="$(cat "$RP_ERRFILE" 2>/dev/null)"
+
+it "self-update/refreshes-client-helper-siblings"
+assert_rc "$RP_RC" 0 "xpair self-update rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$(cat "$MOCKBIN/xpair-mount" 2>/dev/null)" "updated xpair-mount" "self-update refreshes xpair-mount"
+assert_contains "$(cat "$MOCKBIN/xpair-desktop" 2>/dev/null)" "updated xpair-desktop" "self-update refreshes xpair-desktop"
+assert_contains "$(cat "$MOCKBIN/xpair-editor" 2>/dev/null)" "updated xpair-editor" "self-update refreshes xpair-editor"
+assert_contains "$(cat "$MOCKBIN/xpair-askpass" 2>/dev/null)" "updated xpair-askpass" "self-update refreshes askpass helper"
 cleanup_sandbox
 
 new_sandbox
@@ -256,14 +286,16 @@ printf 'LOCAL_BIN=%q\n' "$SBX/host-bin" > "$RP_HOST_DIR/common.env"
 printf 'LOCAL_BIN=%q\n' "$SBX/client-bin" > "$RP_CLIENT_DIR/common.env"
 printf 'host cli\n' > "$SBX/host-bin/xpair"; chmod +x "$SBX/host-bin/xpair"
 printf 'client cli\n' > "$SBX/client-bin/xpair"; chmod +x "$SBX/client-bin/xpair"
-printf 'NOTE\thost\t\n' > "$RP_HOST_DIR/.manifest-host"
-printf 'NOTE\tclient\t\n' > "$RP_CLIENT_DIR/.manifest-client"
+printf 'FILE\t%s\t\nNOTE\thost\t\n' "$RP_HOST_DIR/common.env" > "$RP_HOST_DIR/.manifest-host"
+printf 'FILE\t%s\t\nNOTE\tclient\t\n' "$RP_CLIENT_DIR/common.env" > "$RP_CLIENT_DIR/.manifest-client"
 run_uninstall --role all
 
 it "uninstall-all/removes-each-role-local-bin"
 assert_rc "$RP_RC" 0 "uninstall --role all with different role LOCAL_BIN rc=0 :: stderr=[$RP_ERR]"
 [ -e "$SBX/host-bin/xpair" ] && _fail "host LOCAL_BIN xpair remaining" || _pass "host LOCAL_BIN xpair removed"
 [ -e "$SBX/client-bin/xpair" ] && _fail "client LOCAL_BIN xpair remaining" || _pass "client LOCAL_BIN xpair removed"
+[ -e "$RP_HOST_DIR/common.env" ] && _fail "host common.env remaining after FILE revert" || _pass "host common.env reverted before shared CLI cleanup"
+[ -e "$RP_CLIENT_DIR/common.env" ] && _fail "client common.env remaining after FILE revert" || _pass "client common.env reverted before shared CLI cleanup"
 cleanup_sandbox
 
 # ────────────────────────────────────────────────────────────────────────────

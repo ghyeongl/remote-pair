@@ -151,8 +151,46 @@ canonical_engine() {
 
 STATUS_FILE="${STATUS_FILE:-$RP_HOST_DIR/logs/status.json}"
 
-tm() { "$TMUXB" -S "$AQUA_SOCK" "$@"; }
-host_up() { [ -x "$TMUXB" ] && tm has-session >/dev/null 2>&1; }
+host_common_value() {
+  local key="$1"
+  (
+    LOCAL_BIN="$HOME/.local/bin"
+    AQUA_SOCK="/tmp/aqua-tmux.sock"
+    set -a
+    # shellcheck disable=SC1090
+    [ -f "$RP_HOST_DIR/common.env" ] && . "$RP_HOST_DIR/common.env"
+    set +a
+    case "$key" in
+      LOCAL_BIN) printf '%s' "$LOCAL_BIN" ;;
+      AQUA_SOCK) printf '%s' "$AQUA_SOCK" ;;
+    esac
+  )
+}
+host_env_value() {
+  local key="$1"
+  (
+    LOG_FILE="$RP_HOST_DIR/logs/xpair.log"
+    HEARTBEAT_FILE="$RP_HOST_DIR/logs/xpair.heartbeat"
+    APPROVE_TRIGGER="/tmp/xpair.approve-request"
+    set -a
+    # shellcheck disable=SC1090
+    [ -f "$RP_HOST_DIR/host.env" ] && . "$RP_HOST_DIR/host.env"
+    set +a
+    case "$key" in
+      LOG_FILE) printf '%s' "$LOG_FILE" ;;
+      HEARTBEAT_FILE) printf '%s' "$HEARTBEAT_FILE" ;;
+      APPROVE_TRIGGER) printf '%s' "$APPROVE_TRIGGER" ;;
+    esac
+  )
+}
+host_tmux_bin() { printf '%s/tmux-aqua' "$(host_common_value LOCAL_BIN)"; }
+host_aqua_sock() { host_common_value AQUA_SOCK; }
+host_log_file() { host_env_value LOG_FILE; }
+host_heartbeat_file() { host_env_value HEARTBEAT_FILE; }
+host_approve_trigger() { host_env_value APPROVE_TRIGGER; }
+
+tm() { "$(host_tmux_bin)" -S "$(host_aqua_sock)" "$@"; }
+host_up() { [ -x "$(host_tmux_bin)" ] && tm has-session >/dev/null 2>&1; }
 # launchctl is authoritative for our LaunchAgent. pgrep -f MISSES .app-bundle processes on macOS
 # (false "not running"), which is what misleads agents — so check the label first, pgrep only as fallback.
 app_pid() {
@@ -1068,7 +1106,7 @@ cmd_status() {
   local p; p="$(app_pid)"
   if [ -n "$p" ]; then printf '%-14s %s\n' "app" "running (pid $p)"
   else                 printf '%-14s %s\n' "app" "NOT running"; fi
-  printf '%-14s %s\n' "host server" "$(host_up && echo "up ($AQUA_SOCK)" || echo down)"
+  printf '%-14s %s\n' "host server" "$(host_up && echo "up ($(host_aqua_sock))" || echo down)"
   # Ground truth from the app's status.json — AX/SR are the real computer-use gates.
   # This lets you tell "app up but NOT granted" (→ re-grant) from "app down" (→ start it) —
   # instead of guessing. The app rewrites this every ~1s while alive.
@@ -1083,8 +1121,9 @@ cmd_status() {
   elif [ -n "$p" ] || host_up; then
     printf '%-14s %s\n' "permissions" "unknown (no status.json yet — update host app)"
   fi
-  if [ -f "$HEARTBEAT_FILE" ]; then
-    local age=$(( $(date +%s) - $(_stat_mtime "$HEARTBEAT_FILE" || echo 0) ))
+  local hb_file; hb_file="$(host_heartbeat_file)"
+  if [ -f "$hb_file" ]; then
+    local age=$(( $(date +%s) - $(_stat_mtime "$hb_file" || echo 0) ))
     printf '%-14s %s\n' "heartbeat" "${age}s ago $([ "$age" -le 90 ] && echo "(fresh)" || echo "(STALE)")"
   else printf '%-14s %s\n' "heartbeat" "none (app not running?)"; fi
   in_host_session && printf '%-14s %s\n' "this session" "INSIDE Xpair host → computer-use available here"
@@ -1202,23 +1241,26 @@ cmd_approve() {
   # the host app instead of silently sending a trigger nobody will pick up.
   if ! app_available; then need_app_guidance; return 1; fi
   # base0 = log length just before triggering (so we show only this request's router log to the agent)
-  local base0=0; [ -f "$LOG_FILE" ] && base0=$(wc -l < "$LOG_FILE")
+  local router_log approve_trigger
+  router_log="$(host_log_file)"
+  approve_trigger="$(host_approve_trigger)"
+  local base0=0; [ -f "$router_log" ] && base0=$(wc -l < "$router_log")
   local base="$base0"
   # Pass the hint: the router reads the .label file to prioritize the matching rule + use it as a haiku prior, then consumes it.
-  if [ -n "$forhint" ]; then printf '%s\n' "$forhint" > "$APPROVE_TRIGGER.label" 2>/dev/null || true
-  else rm -f "$APPROVE_TRIGGER.label" 2>/dev/null || true; fi
-  if [ -n "$type" ]; then printf '%s\n' "$type" > "$APPROVE_TRIGGER.type" 2>/dev/null || true
-  else rm -f "$APPROVE_TRIGGER.type" 2>/dev/null || true; fi
-  : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
+  if [ -n "$forhint" ]; then printf '%s\n' "$forhint" > "$approve_trigger.label" 2>/dev/null || true
+  else rm -f "$approve_trigger.label" 2>/dev/null || true; fi
+  if [ -n "$type" ]; then printf '%s\n' "$type" > "$approve_trigger.type" 2>/dev/null || true
+  else rm -f "$approve_trigger.type" 2>/dev/null || true; fi
+  : > "$approve_trigger" 2>/dev/null || { echo "failed to write trigger: $approve_trigger" >&2; return 1; }
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"
   # Print only this request's router log lines (so the agent can read the result and decide next steps).
-  _router_trail() { [ -f "$LOG_FILE" ] || return 0; local tot; tot=$(wc -l < "$LOG_FILE"); [ "$tot" -gt "$base0" ] && tail -n "$(( tot - base0 ))" "$LOG_FILE" | grep 'router:'; }
+  _router_trail() { [ -f "$router_log" ] || return 0; local tot; tot=$(wc -l < "$router_log"); [ "$tot" -gt "$base0" ] && tail -n "$(( tot - base0 ))" "$router_log" | grep 'router:'; }
   local end=$(( $(date +%s) + timeout ))
   while [ "$(date +%s)" -lt "$end" ]; do
-    if [ -f "$LOG_FILE" ]; then
-      local now; now=$(wc -l < "$LOG_FILE")
+    if [ -f "$router_log" ]; then
+      local now; now=$(wc -l < "$router_log")
       if [ "$now" -gt "$base" ]; then
-        local new; new=$(tail -n "$(( now - base ))" "$LOG_FILE")
+        local new; new=$(tail -n "$(( now - base ))" "$router_log")
         if printf '%s\n' "$new" | grep -qiE 'router:.*success'; then
           _router_trail | sed 's/^/  /'
           echo "✓ handled (window-close verified)"; return 0
@@ -1232,7 +1274,7 @@ cmd_approve() {
   echo "✗ not handled within ${timeout}s — router log:" >&2
   local trail; trail="$(_router_trail)"
   if [ -n "$trail" ]; then printf '%s\n' "$trail" | sed 's/^/  /' >&2
-  else echo "  (no router log — check app/permissions/trigger. full: $LOG_FILE)" >&2; fi
+  else echo "  (no router log — check app/permissions/trigger. full: $router_log)" >&2; fi
   echo "  → If the window appears late: re-trigger non-blocking, then immediately retry the blocked call. For an unknown window, add a rule to $RP_HOST_DIR/rules.txt." >&2
   return 1
 }
@@ -1319,7 +1361,7 @@ cmd_self_update() {
   c "self-update ← $repo@$ref"
   local tmp; tmp="$(mktemp -d)" || { warn "mktemp failed"; return 1; }
   local got=0 f
-  for f in xpair xpair-launch hangul-romanize xpair-askpass; do
+  for f in xpair xpair-launch hangul-romanize xpair-askpass xpair-mount xpair-desktop xpair-editor; do
     curl -fsSL "$base/$f" -o "$tmp/$f" 2>/dev/null && [ -s "$tmp/$f" ] && got=$((got+1))
   done
   # logging.sh lives in shared/, not client/ — fetch separately so a flat client loop won't 404.
@@ -1337,6 +1379,12 @@ cmd_self_update() {
   elif [ -s "$tmp/xpair" ]; then
     warn "skipped CLI update: xpair-askpass download incomplete — the FIFO password bootstrap needs both; re-run self-update"
   fi
+  local sibling_dir; sibling_dir="$(dirname "$SELF_CLI")"
+  for f in xpair-mount xpair-desktop xpair-editor; do
+    [ -s "$tmp/$f" ] || continue
+    chmod +x "$tmp/$f"
+    mv "$tmp/$f" "$sibling_dir/$f" && ok "$f → $sibling_dir/$f"
+  done
   [ -s "$tmp/xpair-launch" ] && { chmod +x "$tmp/xpair-launch"; mkdir -p "$(dirname "$LAUNCHER")"; mv "$tmp/xpair-launch" "$LAUNCHER" && ok "launcher → $LAUNCHER"; }
   [ -s "$tmp/hangul-romanize" ]    && { chmod +x "$tmp/hangul-romanize";    mkdir -p "$RP_CLIENT_DIR/bin"; mv "$tmp/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize"; }
   [ -s "$tmp/logging.sh" ]         && { mkdir -p "$RP_CLIENT_DIR/bin"; mv "$tmp/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" && ok "logger → $RP_CLIENT_DIR/bin/logging.sh"; }
@@ -2268,7 +2316,7 @@ EOF
   else
     c "no local repo — glue hot-swap via network self-update (GitHub @$ref)"
     cmd_self_update "$ref"
-    warn "network self-update covers CLI/launcher/romanize only. For the full glue layer (approve rules/skills, host hooks), run from a repo checkout or re-run host install."
+    warn "network self-update covers client CLI/launcher/helpers only. For the full glue layer (approve rules/skills, host hooks), run from a repo checkout or re-run host install."
   fi
 }
 

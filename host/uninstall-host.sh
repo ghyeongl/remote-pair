@@ -68,7 +68,22 @@ confirm() {
 client_install_remains() {
   [ -f "$HOME/.xpair/client/.manifest-client" ] && return 0
   [ -f "$HOME/.xpair/client/role" ] && return 0
+  [ -f "$HOME/.xpair/client/client.env" ] && return 0
+  client_env_has_real_config "$HOME/.xpair/host/client.env" && return 0
   return 1
+}
+
+client_env_has_real_config() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  (
+    unset REMOTE_HOST FOLDER_MAPS SYNC_ROOTS
+    set -a
+    # shellcheck disable=SC1090
+    . "$file" >/dev/null 2>&1 || true
+    set +a
+    [ -n "${REMOTE_HOST:-}" ] || [ -n "${FOLDER_MAPS:-${SYNC_ROOTS:-}}" ]
+  )
 }
 
 stash_file() {
@@ -110,6 +125,7 @@ set_remaining_client_role_marker() {
       [ -f "$role_file" ] && run rm -f "$role_file"
       ;;
   esac
+  return 0
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

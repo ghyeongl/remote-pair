@@ -59,7 +59,7 @@ new_sandbox
 mkdir -p "$RP_CLIENT_DIR" "$RP_HOST_DIR"
 printf 'TELEMETRY_INSTALL_TS=12345\nTELEMETRY_ANON_ID=abc\n' > "$RP_CLIENT_DIR/client.env"
 LEGACY_MOUNT_NO_MODE="$RP_HOST_DIR/mounts/legacy-host/no-mode"
-printf 'REMOTE_HOST=legacy-host\nFOLDER_MAPS="%s::/Users/alice/no-mode"\nENGINE=codex\n' "$LEGACY_MOUNT_NO_MODE" > "$RP_HOST_DIR/client.env"
+printf 'REMOTE_HOST=legacy-host\nFOLDER_MAPS="%s::/Users/alice/no-mode"\nENGINE=codex\nPOSTHOG_HOST=https://ph.example\n' "$LEGACY_MOUNT_NO_MODE" > "$RP_HOST_DIR/client.env"
 
 . "$_REPO_ROOT/shared/config.sh"
 . "$_REPO_ROOT/shared/lib.sh"
@@ -67,7 +67,13 @@ migrate_layout >/dev/null 2>&1 || true
 
 it "migration/telemetry-only-client-env-merged"
 MERGED_ENV="$(cat "$RP_CLIENT_DIR/client.env" 2>/dev/null)"
-assert_contains "$MERGED_ENV" "TELEMETRY_INSTALL_TS=12345" "telemetry stamp is preserved"
+TELEMETRY_ENV="$(cat "$RP_CLIENT_DIR/telemetry.env" 2>/dev/null)"
+assert_contains "$TELEMETRY_ENV" "TELEMETRY_INSTALL_TS=12345" "telemetry stamp migrates to telemetry.env"
+assert_contains "$TELEMETRY_ENV" "TELEMETRY_ANON_ID=abc" "telemetry anon id migrates to telemetry.env"
+assert_contains "$TELEMETRY_ENV" "POSTHOG_HOST=https://ph.example" "legacy host/client.env telemetry key migrates to telemetry.env"
+assert_absent "$MERGED_ENV" "TELEMETRY_INSTALL_TS=12345" "telemetry stamp removed from client.env"
+assert_absent "$MERGED_ENV" "TELEMETRY_ANON_ID=abc" "telemetry anon id removed from client.env"
+assert_absent "$MERGED_ENV" "POSTHOG_HOST=https://ph.example" "legacy telemetry key stripped from merged client.env"
 assert_contains "$MERGED_ENV" "REMOTE_HOST=legacy-host" "legacy REMOTE_HOST merged into telemetry-only client.env"
 assert_contains "$MERGED_ENV" "ENGINE=codex" "legacy ENGINE merged into telemetry-only client.env"
 [ ! -e "$RP_HOST_DIR/client.env" ] && _pass "legacy host/client.env removed after merge" \
@@ -86,7 +92,8 @@ it "config/legacy-client-env-fallback"
 assert_contains "$CONFIG_SWIFT" 'let LEGACY_CLIENT_ENV_FILE = "\(RP_DIR)/client.env"' "Config defines legacy pre-split client.env path"
 assert_contains "$CONFIG_SWIFT" 'func clientEnvFileExists() -> Bool' "Config exposes split+legacy client env existence helper"
 assert_contains "$CONFIG_SWIFT" 'func clientEnvHasRemoteHost() -> Bool' "Config exposes real client.env signal helper"
+assert_contains "$CONFIG_SWIFT" 'if hostRole == "both" || clientRole == "both" { return "both" }' "Config treats role=both in either marker as host-capable"
 assert_contains "$INSTALLER_SWIFT" 'clientEnvHasRemoteHost() && !fm.fileExists(atPath: HOST_ENV)' "self-install guard checks REMOTE_HOST instead of bare client.env existence"
-assert_contains "$INSTALLER_SWIFT" 'roleFileContainsClient(ROLE_FILE) || roleFileContainsClient(CLIENT_ROLE_FILE)' "self-install guard checks host/client role markers"
+assert_contains "$INSTALLER_SWIFT" 'roleFileIsClientOnly(ROLE_FILE) || roleFileIsClientOnly(CLIENT_ROLE_FILE)' "self-install guard skips only explicit client role markers"
 
 finish

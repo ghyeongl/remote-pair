@@ -114,8 +114,29 @@ assert_contains "$RP_OUT" "set $HOME/.xpair/host/role to client" "host role mark
 cleanup_sandbox
 
 new_sandbox
+mkdir -p "$HOME/.xpair/host/bin" "$HOME/.xpair/host/logs" "$HOME/.local/bin"
+rm -rf "$HOME/.xpair/client"
+rm -f "$HOME/.xpair/host/host.env" "$HOME/.xpair/host/.manifest-host"
+printf 'REMOTE_HOST=legacy-host\nFOLDER_MAPS=/tmp/client::/tmp/host\n' > "$HOME/.xpair/host/client.env"
+printf 'key\n' > "$HOME/.xpair/host/pairing_ed25519"
+printf 'LOCAL_BIN=%q\n' "$HOME/.local/bin" > "$HOME/.xpair/host/common.env"
+run_host_uninstall -y --dry-run --force
+it "host/preserves-pre-split-client-state"
+assert_rc "$RP_RC" 0 "pre-split co-located host uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
+assert_contains "$RP_OUT" "Removing host-owned xpair state (client install remains)" "host wipe detects legacy host/client.env as client state"
+if printf '%s\n' "$RP_OUT" | grep -Fx "DRY: rm -rf $HOME/.xpair/host" >/dev/null 2>&1; then
+  _fail "host wipe should not remove entire host dir when legacy client state remains"
+else
+  _pass "host wipe does not remove entire host dir when legacy client state remains"
+fi
+assert_absent "$RP_OUT" "rm -f $HOME/.xpair/host/pairing_ed25519" "host wipe preserves pre-split client pairing key"
+assert_absent "$RP_OUT" "rm -f $HOME/.xpair/host/common.env" "host wipe preserves pre-split shared common.env"
+cleanup_sandbox
+
+new_sandbox
 ORIG_HOST_UNINSTALL="$HOST_UNINSTALL"
 mkdir -p "$SBX/standalone/host" "$HOME/.xpair/host"
+rm -rf "$HOME/.xpair/client"
 cp "$ORIG_HOST_UNINSTALL" "$SBX/standalone/host/uninstall-host.sh"
 HOST_UNINSTALL="$SBX/standalone/host/uninstall-host.sh"
 LEGACY_BOTH_FILE="$HOME/.local/bin/legacy-both-host"
@@ -137,6 +158,7 @@ if [ "$(uname)" != Darwin ]; then
   _pass "skipped on non-macOS (PlistBuddy/app bundle version scan)"
 else
   new_sandbox
+  rm -rf "$HOME/.xpair/client"
   make_fake_app "$HOME/Applications/RemotePairHost.app" "0.4.9"
   run_host_uninstall -y --dry-run
   it "host/protected-legacy-refuses"
@@ -144,6 +166,7 @@ else
   cleanup_sandbox
 
   new_sandbox
+  rm -rf "$HOME/.xpair/client"
   make_fake_app "$HOME/Applications/RemotePairHost.app" "0.4.9"
   run_host_uninstall -y --dry-run --force
   it "host/force-removes-legacy"

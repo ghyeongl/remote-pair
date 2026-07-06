@@ -124,6 +124,7 @@ case "$ROLE" in
     ;;
 esac
 found=0
+SELECTED_LOCAL_BINS="$(selected_local_bins)"
 for m in "${mans[@]}"; do
   [ -f "$m" ] || continue
   found=1
@@ -150,7 +151,7 @@ else
       [ -e "$p" ] && rm -f "$p" && echo "  rm   $p"
     done
   done <<EOF
-$(selected_local_bins)
+$SELECTED_LOCAL_BINS
 EOF
 fi
 
