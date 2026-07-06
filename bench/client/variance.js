@@ -2,6 +2,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { rateFromCounter } = require("../score/score");
 
 const METRICS = [
   "framesDecoded",
@@ -47,23 +48,6 @@ function runMetric(record, metric) {
     return null;
   }
   return numberOrNull(summary[metric]);
-}
-
-// score.js's rate-from-counter, replicated so baseline pliRate uses the same math.
-function rateFromCounter(record, key) {
-  const samples = Array.isArray(record.samples) ? record.samples : [];
-  let first = null;
-  let last = null;
-  for (const s of samples) {
-    const v = numberOrNull(s[key]);
-    if (v !== null) {
-      if (first === null) first = v;
-      last = v;
-    }
-  }
-  const durationMs = numberOrNull(record.summary && record.summary.durationMs);
-  if (first === null || last === null || !durationMs || durationMs <= 0) return null;
-  return Math.max(0, last - first) / (durationMs / 1000);
 }
 
 function runDerived(record, metric) {

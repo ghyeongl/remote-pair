@@ -11,7 +11,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
-export HOST_BIN="${HOST_BIN:-$HOME/rd-enh/screen-pli}"
+export HOST_BIN="${HOST_BIN:-$HOME/.xpair/host/bin/screen}"
 export RP_SCREENCAP="${RP_SCREENCAP:-$HOME/.xpair/host/bin/rp-screencap}"
 export PATH="/opt/homebrew/bin:$PATH"
 REPS="${REPS:-3}"; DURATION="${DURATION:-20}"; CONTENT="${CONTENT:-motion}"

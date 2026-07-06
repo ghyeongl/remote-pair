@@ -201,6 +201,9 @@ class Impairer {
     this.config = config;
     this.stats = stats;
     this.normalizer = new SeqNormalizer();
+    // RTX stream IDs are randomized per connection like primary ones — normalize
+    // before seeding draws (docs/rd-streaming-loss-benchmark.md: key relative IDs).
+    this.rtxNormalizer = new SeqNormalizer();
     this.sendCounts = new Map();
     this.primarySsrc = null; // first host→client RTP ssrc; others are RTX retransmits
     this.droppedSeqs = new Set();
@@ -281,12 +284,12 @@ class Impairer {
     return null;
   }
 
-  delayFor(normSeq) {
+  delayFor(key) {
     if (this.isPassthrough()) return 0;
     const fixed = this.config.latencyMs;
     const jitter = this.config.jitterMs;
     if (fixed <= 0 && jitter <= 0) return 0;
-    const draw = seededFloat(this.config.seed, `jitter:${normSeq}`);
+    const draw = seededFloat(this.config.seed, `jitter:${key}`);
     const offset = jitter > 0 ? (draw * 2 - 1) * jitter : 0;
     return Math.max(0, Math.round(fixed + offset));
   }
@@ -308,6 +311,8 @@ class Impairer {
       return { drop: false, delayMs: 0, reason: null, normSeq: null };
     }
 
+    const nowMs = Date.now();
+
     // Reached only for host→client RTP (guarded above). Identify the RTX retransmission
     // stream by SSRC: RFC 4588 RTX retransmits carry their OWN ssrc and seq, so they
     // never reuse the primary media sequence. Detecting retransmits by seq-reuse (the
@@ -320,27 +325,33 @@ class Impairer {
     if (isRtx) {
       // A real retransmission: apply RETX_LOSS (residual retransmit loss) but NEVER the
       // primary loss profile, and keep it out of the primary seq space. Still subject to
-      // the bandwidth cap (retransmits consume real link capacity).
+      // link delay, marked-burst outages, and bandwidth cap.
+      const rtxKey = `rtx:${this.rtxNormalizer.normalize(packet.seq)}`;
+      if (this.config.profile === "marked-burst" && this.markedBurstAt(nowMs)) {
+        this.stats.retransmitsDropped += 1;
+        return { drop: true, delayMs: 0, reason: "marked-burst", normSeq: null };
+      }
       if (!this.isPassthrough() && this.config.retxLoss > 0 &&
-        seededFloat(this.config.seed, `rtx:${ssrc}:${packet.seq}`) < this.config.retxLoss) {
+        seededFloat(this.config.seed, rtxKey) < this.config.retxLoss) {
         this.stats.retransmitsDropped += 1;
         return { drop: true, delayMs: 0, reason: "retxLoss", normSeq: null };
       }
-      const bwRtx = this.bandwidthDecision(length, Date.now());
+      const delayMs = this.delayFor(rtxKey);
+      const bwRtx = this.bandwidthDecision(length, nowMs);
       if (bwRtx.drop) {
         this.stats.bandwidthDropped += 1;
         return { drop: true, delayMs: 0, reason: "bandwidth", normSeq: null };
       }
       this.stats.retransmitsPassed += 1;
-      return { drop: false, delayMs: bwRtx.delayMs, reason: null, normSeq: null };
+      return { drop: false, delayMs: delayMs + bwRtx.delayMs, reason: null, normSeq: null };
     }
 
     // Primary media stream. Anchor the marked-burst schedule to its first packet.
-    if (this.mediaStartMs === null) this.anchorBursts(Date.now());
+    if (this.mediaStartMs === null) this.anchorBursts(nowMs);
     const normSeq = this.normalizer.normalize(packet.seq);
     const count = (this.sendCounts.get(normSeq) || 0) + 1;
     this.sendCounts.set(normSeq, count);
-    const selectedProfile = this.selectedProfileForRtp(normSeq, length, Date.now());
+    const selectedProfile = this.selectedProfileForRtp(normSeq, length, nowMs);
     const delayMs = this.delayFor(normSeq);
     if (selectedProfile && count === 1) {
       this.droppedSeqs.add(normSeq);
@@ -359,7 +370,7 @@ class Impairer {
     }
     // Bandwidth cap applies to every forwarded packet (incl. retransmits, which
     // consume real link capacity → congestion spiral under tight caps).
-    const bw = this.bandwidthDecision(length, Date.now());
+    const bw = this.bandwidthDecision(length, nowMs);
     if (bw.drop) {
       this.droppedSeqs.add(normSeq);
       this.stats.uniqueSeqsDropped = this.droppedSeqs.size;
