@@ -357,8 +357,12 @@ if is_client; then
   [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize" 755
   say "[client] shared logger → $RP_CLIENT_DIR/bin/logging.sh"
   install_file "$HERE/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" 644
-  say "[client] host uninstaller → $RP_CLIENT_DIR/share/uninstall-host.sh"
-  install_file "$HOST_DIR/uninstall-host.sh" "$RP_CLIENT_DIR/share/uninstall-host.sh" 755
+  if [ -f "$HOST_DIR/uninstall-host.sh" ]; then
+    say "[client] host uninstaller → $RP_CLIENT_DIR/share/uninstall-host.sh"
+    install_file "$HOST_DIR/uninstall-host.sh" "$RP_CLIENT_DIR/share/uninstall-host.sh" 755
+  else
+    say "[client] host uninstaller not in this bundle — skipped (self-update stages it)"
+  fi
   install_file "$CLIENT_DIR/xpair-launch" "$LAUNCHER" 755
 
   # ── Web-tab launchers: editor (M4 code-server) + desktop (M5 Screen Sharing). manifest-recorded → reversible. ──

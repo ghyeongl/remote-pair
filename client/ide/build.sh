@@ -198,6 +198,10 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
     [ -e "$CLI_SRC/$f" ] && cp "$CLI_SRC/$f" "$_cli/client/cli/$f"
   done
   cp -R "$CLI_SRC/Launch Xpair.workflow" "$_cli/client/cli/Launch Xpair.workflow"
+  # The canonical host uninstaller: install.sh stages it to ~/.xpair/client/share so the
+  # client-side uninstall-host wrapper streams ONE teardown implementation over ssh.
+  mkdir -p "$_cli/host"
+  cp "$HERE/../../host/uninstall-host.sh" "$_cli/host/uninstall-host.sh"
   chmod -R u+w "$_cli"
   echo "→ bundled Xpair client CLI → $(basename "$app")/Contents/Resources/app/extensions/remotepair/cli"
   # Static mosh + mosh-client (brew-free client attach). build-mosh.sh emits both to ~/.local/bin

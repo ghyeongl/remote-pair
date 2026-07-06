@@ -128,7 +128,9 @@ set_remaining_client_role_marker() {
   return 0
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# BASH_SOURCE is unset when streamed via `bash -s` (client wrapper over ssh) — fall back to $0;
+# every SCRIPT_DIR consumer probes [ -f ] with recorded-root/installed fallbacks, so a wrong dir is harmless.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SHARED="$REPO_ROOT/shared"
 
