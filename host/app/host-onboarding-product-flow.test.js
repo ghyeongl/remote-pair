@@ -6,12 +6,12 @@ const root = path.resolve(__dirname, "../..");
 const appDelegate = fs.readFileSync(path.join(root, "host/app/AppDelegate.swift"), "utf8");
 const onboardingWindow = fs.readFileSync(path.join(root, "host/app/OnboardingWindow.swift"), "utf8");
 const hostApp = fs.readFileSync(path.join(root, "host/onboarding/src/App.tsx"), "utf8");
-const stepPermissions = fs.readFileSync(
-  path.join(root, "host/onboarding/src/components/onboarding/host/StepPermissions.tsx"),
+const stepSinglePerm = fs.readFileSync(
+  path.join(root, "host/onboarding/src/components/onboarding/host/StepSinglePerm.tsx"),
   "utf8",
 );
-const stepWaiting = fs.readFileSync(
-  path.join(root, "host/onboarding/src/components/onboarding/host/StepWaiting.tsx"),
+const stepBroadcast = fs.readFileSync(
+  path.join(root, "host/onboarding/src/components/onboarding/host/StepBroadcast.tsx"),
   "utf8",
 );
 
@@ -49,7 +49,7 @@ function completeBridgeIsTccGated(source) {
 test("Q0441 Q0442 Q0443 Host onboarding exists in the Host app/menu bar and cannot complete before required TCC", () => {
   assert.match(
     appDelegate,
-    /if !Permissions\.allGranted\(\) \{[\s\S]*OnboardingWindow\(onComplete:[\s\S]*startServing\(\)/,
+    /if !Permissions\.allGranted\(\) \{[\s\S]*OnboardingWindow\(onComplete:[\s\S]*startServingAndOpenPairingIfNeeded\(\)/,
     "launch-time host serving must be gated behind the onboarding completion callback",
   );
   assert.match(appDelegate, /menu\.addItem\(withTitle: "Permissions…", action: #selector\(grantPermissions\)/);
@@ -59,16 +59,19 @@ test("Q0441 Q0442 Q0443 Host onboarding exists in the Host app/menu bar and cann
   assert.match(appDelegate, /OnboardingWindow\(mode: \.grantOnly, initialStep: "connect"/);
   assert.match(appDelegate, /OnboardingWindow\(mode: \.grantOnly, initialStep: nil/);
 
-  assert.match(hostApp, /const STEP_TITLES = \["Welcome", "Permissions", "Engine", "Connect", "Done"\]/);
-  assert.match(hostApp, /perm\.ax === "granted" && perm\.sr === "granted"/);
-  assert.match(hostApp, /w\.index === 1 && !ready/);
-  assert.match(stepPermissions, /window\.xpair\.requestPermission\(r\.key\)/);
-  assert.match(stepPermissions, /window\.xpair\.openPermissionPane\(r\.key\)/);
-  assert.match(stepWaiting, /window\.xpair\s*\.\s*connectedClients\(\)/);
+  assert.match(hostApp, /const PERM_START = 3/);
+  assert.match(hostApp, /const ENGINE_IDX = PERM_END \+ 1/);
+  assert.match(hostApp, /const BROADCAST_IDX = ENGINE_IDX \+ 1/);
+  assert.match(stepSinglePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr"\]/);
+  assert.match(hostApp, /inPerms && isRequiredPerm\(currentPermKey\) && !currentPermGranted/);
+  assert.match(hostApp, /await window\.xpair\.requestPermission\(key\)/);
+  assert.match(hostApp, /await window\.xpair\.openPermissionPane\(key\)/);
+  assert.match(hostApp, /window\.xpair\.beginPairing\(force\)/);
+  assert.match(stepBroadcast, /export type BroadcastState =[\s\S]*"waiting"[\s\S]*"incoming"[\s\S]*"accepted-pending-proof"[\s\S]*"accepted"[\s\S]*"denied"/);
 
   assert.ok(
     completeBridgeIsTccGated(onboardingWindow),
-    "React complete() can call finish() without rechecking Permissions.allGranted(), so Host onboarding can end before the required TCC flow is resolved",
+    "React complete() must recheck Permissions.allGranted() before finish()",
   );
 });
 
