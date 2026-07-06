@@ -1368,6 +1368,8 @@ cmd_self_update() {
   # logging.sh lives in shared/, not client/ — fetch separately so a flat client loop won't 404.
   local shared_base="https://raw.githubusercontent.com/$repo/$ref/shared"
   curl -fsSL "$shared_base/logging.sh" -o "$tmp/logging.sh" 2>/dev/null && [ -s "$tmp/logging.sh" ] && got=$((got+1))
+  local host_base="https://raw.githubusercontent.com/$repo/$ref/host"
+  curl -fsSL "$host_base/uninstall-host.sh" -o "$tmp/uninstall-host.sh" 2>/dev/null && [ -s "$tmp/uninstall-host.sh" ] && got=$((got+1))
   [ "$got" -ge 2 ] || { warn "download failed (got=$got) — check network/repo"; rm -rf "$tmp"; return 1; }
   # The new CLI's --password-stdin FIFO bootstrap REQUIRES the RP_ASKPASS_FIFO-aware xpair-askpass
   # (resolved as a CLI sibling). Install them ATOMICALLY: never land the new CLI without the matching
@@ -1389,6 +1391,7 @@ cmd_self_update() {
   [ -s "$tmp/xpair-launch" ] && { chmod +x "$tmp/xpair-launch"; mkdir -p "$(dirname "$LAUNCHER")"; mv "$tmp/xpair-launch" "$LAUNCHER" && ok "launcher → $LAUNCHER"; }
   [ -s "$tmp/hangul-romanize" ]    && { chmod +x "$tmp/hangul-romanize";    mkdir -p "$RP_CLIENT_DIR/bin"; mv "$tmp/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize"; }
   [ -s "$tmp/logging.sh" ]         && { mkdir -p "$RP_CLIENT_DIR/bin"; mv "$tmp/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" && ok "logger → $RP_CLIENT_DIR/bin/logging.sh"; }
+  [ -s "$tmp/uninstall-host.sh" ]  && { chmod +x "$tmp/uninstall-host.sh"; mkdir -p "$RP_CLIENT_DIR/share"; mv "$tmp/uninstall-host.sh" "$RP_CLIENT_DIR/share/uninstall-host.sh" && ok "host uninstaller → $RP_CLIENT_DIR/share/uninstall-host.sh"; }
   rm -rf "$tmp"; ok "self-update complete — applies from the next invocation"
 }
 

@@ -26,8 +26,6 @@ CLAUDE="$(command -v claude 2>/dev/null || true)"
 
 RULES="${RULES_FILE:-$RP_DIR/rules.txt}"; [ -f "$RULES" ] || RULES="$HOME/.claude/auto-approve/rules.txt"
 LOG="${LOG_FILE:-$RP_DIR/logs/xpair.log}"; mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-# size-cap rotation (5MB → .1) at startup — shared xpair.log, append-only writers tolerate it
-{ _sz="$(stat -f %z "$LOG" 2>/dev/null || echo 0)"; [ "$_sz" -gt 5000000 ] && mv -f "$LOG" "$LOG.1" 2>/dev/null; } || true
 SHOT="${RP_SHOT:-/tmp/rp-router.png}"          # when RP_SHOT is set, use that image (test, one-shot)
 DRY="${RP_DRY:-0}"                             # RP_DRY=1 = don't actually click/press keys (intent only)
 

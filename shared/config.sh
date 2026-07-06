@@ -17,6 +17,53 @@
 # Priority: environment variable > role env file > derived default.
 # Personal values (hostname, sync paths) are not hard-coded here.
 
+_XPAIR_ENV_KEYS=(
+  RP_HOST_DIR RP_CLIENT_DIR RP_IDE_DIR RP_IDE_SERVER_DIR RP_DIR CLAUDE_DIR
+  HOST_COMMON_ENV CLIENT_COMMON_ENV COMMON_ENV HOST_ENV CLIENT_ENV MANIFEST BACKUP_DIR
+  LOG_DIR CLIENT_LOG_DIR RP_ORG BUNDLE_PREFIX APP_NAME SIGN_CN GH_REPO
+  APPROVE_TRIGGER LOG_FILE HEARTBEAT_FILE REMOTEPAIR_LOG LOG_LEVEL RULES_FILE
+  REMOTE_HOST FOLDER_MAPS FOLDER_MAP_MODES SYNC_ROOTS LAUNCHER TERMINAL_APP
+  EDITOR_PORT SYNC_BACKEND MOUNT_BACKEND LOCAL_BIN AQUA_SOCK LAUNCH_AGENTS
+  SERVICES_DIR RP_REPO_ROOT
+)
+_xpair_capture_env_snapshot() {
+  local _k
+  for _k in "${_XPAIR_ENV_KEYS[@]}"; do
+    if [ "${!_k+x}" ]; then
+      printf -v "_XPAIR_ENV_SNAPSHOT_${_k}" '%s' "${!_k}"
+      printf -v "_XPAIR_ENV_SNAPSHOT_SET_${_k}" '%s' 1
+    else
+      unset "_XPAIR_ENV_SNAPSHOT_${_k}" "_XPAIR_ENV_SNAPSHOT_SET_${_k}"
+    fi
+  done
+}
+_xpair_reapply_env_snapshot() {
+  local _k _set _value
+  for _k in "${_XPAIR_ENV_KEYS[@]}"; do
+    _set="_XPAIR_ENV_SNAPSHOT_SET_${_k}"
+    if [ "${!_set:-}" = 1 ]; then
+      _value="_XPAIR_ENV_SNAPSHOT_${_k}"
+      printf -v "$_k" '%s' "${!_value}"
+      export "$_k"
+    fi
+  done
+}
+_xpair_reset_to_env_snapshot() {
+  local _k _set _value
+  for _k in "${_XPAIR_ENV_KEYS[@]}"; do
+    _set="_XPAIR_ENV_SNAPSHOT_SET_${_k}"
+    if [ "${!_set:-}" = 1 ]; then
+      _value="_XPAIR_ENV_SNAPSHOT_${_k}"
+      printf -v "$_k" '%s' "${!_value}"
+      export "$_k"
+    else
+      unset "$_k"
+    fi
+  done
+}
+[ -n "${_XPAIR_ENV_SNAPSHOT:-}" ] || { _xpair_capture_env_snapshot; _XPAIR_ENV_SNAPSHOT=1; }
+_xpair_reset_to_env_snapshot
+
 # ── Paths (role namespaces) ──
 RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
 RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
@@ -24,11 +71,11 @@ RP_IDE_DIR="${RP_IDE_DIR:-$HOME/.xpair/ide}"
 RP_IDE_SERVER_DIR="${RP_IDE_SERVER_DIR:-$HOME/.xpair/ide-server}"
 RP_DIR="$RP_HOST_DIR"                                  # legacy alias: host runtime dir.
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"               # Claude harness (skills). Xpair only installs here; does not depend on it.
-HOST_COMMON_ENV="$RP_HOST_DIR/common.env"; CLIENT_COMMON_ENV="$RP_CLIENT_DIR/common.env"
-COMMON_ENV="$HOST_COMMON_ENV"; HOST_ENV="$RP_HOST_DIR/host.env"; CLIENT_ENV="$RP_CLIENT_DIR/client.env"
-MANIFEST="$RP_HOST_DIR/.install-manifest"; BACKUP_DIR="$RP_HOST_DIR/backups"
-LOG_DIR="$RP_HOST_DIR/logs"
-CLIENT_LOG_DIR="$RP_CLIENT_DIR/logs"
+HOST_COMMON_ENV="${HOST_COMMON_ENV:-$RP_HOST_DIR/common.env}"; CLIENT_COMMON_ENV="${CLIENT_COMMON_ENV:-$RP_CLIENT_DIR/common.env}"
+COMMON_ENV="${COMMON_ENV:-$HOST_COMMON_ENV}"; HOST_ENV="${HOST_ENV:-$RP_HOST_DIR/host.env}"; CLIENT_ENV="${CLIENT_ENV:-$RP_CLIENT_DIR/client.env}"
+MANIFEST="${MANIFEST:-$RP_HOST_DIR/.install-manifest}"; BACKUP_DIR="${BACKUP_DIR:-$RP_HOST_DIR/backups}"
+LOG_DIR="${LOG_DIR:-$RP_HOST_DIR/logs}"
+CLIENT_LOG_DIR="${CLIENT_LOG_DIR:-$RP_CLIENT_DIR/logs}"
 
 # Load role files (only those that exist). Host-role tooling sources the host common file last so
 # shared keys such as LOCAL_BIN/AQUA_SOCK are not inherited from a co-located client install.
@@ -38,9 +85,10 @@ case "${XPAIR_CONFIG_ROLE:-}" in
 esac
 for _f in "${_role_env_files[@]}"; do
   # shellcheck disable=SC1090
-  [ -f "$_f" ] && { set -a; . "$_f"; set +a; }
+  [ -f "$_f" ] && { set -a; . "$_f"; set +a; _xpair_reapply_env_snapshot; }
 done
 unset _role_env_files
+_xpair_reapply_env_snapshot
 
 # ── Host identity (org-level defaults, no personal values) ──
 RP_ORG="${RP_ORG:-com.x10lab}"

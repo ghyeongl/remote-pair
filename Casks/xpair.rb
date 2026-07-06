@@ -24,7 +24,11 @@ cask "xpair" do
 
   uninstall quit: "com.x10lab.xpair"
 
-  zap trash: "~/.xpair/client"
+  zap trash: [
+    "~/.xpair/client",
+    "~/.xpair/ide",
+    "~/.xpair/ide-server",
+  ]
 
   caveats <<~EOS
     Xpair (client IDE) is self-signed (not notarized). Gatekeeper quarantine is stripped on
