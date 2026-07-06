@@ -292,6 +292,33 @@ struct PeerResources {
     input_rx: Option<InputRx>,
 }
 
+struct PeerSetup {
+    pc: Arc<webrtc::peer_connection::RTCPeerConnection>,
+}
+
+impl PeerSetup {
+    fn new(pc: Arc<webrtc::peer_connection::RTCPeerConnection>) -> Self {
+        Self { pc }
+    }
+
+    async fn close_with<T>(self, error: SessionError) -> Result<T, SessionError> {
+        let _ = self.pc.close().await;
+        Err(error)
+    }
+
+    fn into_resources(
+        self,
+        _input_dcs: Vec<Arc<webrtc::data_channel::RTCDataChannel>>,
+        input_rx: InputRx,
+    ) -> PeerResources {
+        PeerResources {
+            pc: self.pc,
+            _input_dcs,
+            input_rx: Some(input_rx),
+        }
+    }
+}
+
 struct NegotiatingSession {
     seq: u64,
     token: SessionToken,
@@ -320,16 +347,11 @@ struct ConnectedSession {
     abr_cancel: CancellationToken,
 }
 
-enum Session {
-    Negotiating(NegotiatingSession),
-    Connected(ConnectedSession),
-}
-
 fn pli_should_force(last: Option<Instant>, now: Instant, cooldown: Duration) -> bool {
     if cooldown == Duration::from_millis(0) {
         return true;
     }
-    last.map_or(true, |last| now.duration_since(last) >= cooldown)
+    last.is_none_or(|last| now.duration_since(last) >= cooldown)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1318,6 +1340,7 @@ async fn serve_session(
             .await
             .map_err(SessionError::from)?,
     );
+    let peer_setup = PeerSetup::new(pc);
 
     let track = Arc::new(TrackLocalStaticSample::new(
         RTCRtpCodecCapability {
@@ -1330,10 +1353,15 @@ async fn serve_session(
         "video".to_owned(),
         "xpair-screen".to_owned(),
     ));
-    let rtp_sender = pc
+    let rtp_sender = match peer_setup
+        .pc
         .add_track(track.clone() as Arc<dyn TrackLocal + Send + Sync>)
         .await
-        .map_err(SessionError::from)?;
+        .map_err(SessionError::from)
+    {
+        Ok(sender) => sender,
+        Err(error) => return peer_setup.close_with(error).await,
+    };
     let abr_loss = Arc::new(Mutex::new(AbrSignalState::default()));
     let abr_frames = Arc::new(AtomicU64::new(0));
 
@@ -1390,9 +1418,9 @@ async fn serve_session(
                             if rr.reports.len() == 1 {
                                 rr.reports.first()
                             } else {
-                                rr.reports.iter().max_by(|a, b| {
-                                    a.fraction_lost.cmp(&b.fraction_lost)
-                                })
+                                rr.reports
+                                    .iter()
+                                    .max_by(|a, b| a.fraction_lost.cmp(&b.fraction_lost))
                             }
                         });
                         if let Some(report) = selected {
@@ -1428,7 +1456,7 @@ async fn serve_session(
     let (sig_tx, sig_rx) = mpsc::unbounded_channel::<String>();
     {
         let sig_tx = sig_tx.clone();
-        pc.on_ice_candidate(Box::new(move |cand| {
+        peer_setup.pc.on_ice_candidate(Box::new(move |cand| {
             let sig_tx = sig_tx.clone();
             Box::pin(async move {
                 if let Some(c) = cand {
@@ -1448,24 +1476,26 @@ async fn serve_session(
     // Peer-state callback is a gate, not a shared flag: Connected is delivered
     // over a channel, and only that transition can construct ConnectedSession.
     let (state_tx, state_rx) = mpsc::unbounded_channel::<PeerEvent>();
-    pc.on_peer_connection_state_change(Box::new(move |s| {
-        use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-        tracing::info!("serve-webrtc: peer connection state: {s}");
-        match s {
-            RTCPeerConnectionState::Connected => {
-                let _ = state_tx.send(PeerEvent::Connected);
+    peer_setup
+        .pc
+        .on_peer_connection_state_change(Box::new(move |s| {
+            use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+            tracing::info!("serve-webrtc: peer connection state: {s}");
+            match s {
+                RTCPeerConnectionState::Connected => {
+                    let _ = state_tx.send(PeerEvent::Connected);
+                }
+                RTCPeerConnectionState::Disconnected => {}
+                RTCPeerConnectionState::Failed => {
+                    let _ = state_tx.send(PeerEvent::Terminal(PeerFailureKind::Failed));
+                }
+                RTCPeerConnectionState::Closed => {
+                    let _ = state_tx.send(PeerEvent::Terminal(PeerFailureKind::Closed));
+                }
+                _ => {}
             }
-            RTCPeerConnectionState::Disconnected => {}
-            RTCPeerConnectionState::Failed => {
-                let _ = state_tx.send(PeerEvent::Terminal(PeerFailureKind::Failed));
-            }
-            RTCPeerConnectionState::Closed => {
-                let _ = state_tx.send(PeerEvent::Terminal(PeerFailureKind::Closed));
-            }
-            _ => {}
-        }
-        Box::pin(async {})
-    }));
+            Box::pin(async {})
+        }));
 
     let (au_tx, mut au_rx) = mpsc::channel::<Vec<u8>>(16);
 
@@ -1535,32 +1565,50 @@ async fn serve_session(
     });
 
     // --- remote input: create TWO DataChannels BEFORE the offer ---
-    // host creates both channels so the m=application (SCTP) section is in the
-    // first offer (no renegotiation); the client only uses `ondatachannel` (B3).
+    // Host-created channels put the m=application (SCTP) section in the first
+    // offer (no renegotiation). Client-created channels are also accepted here;
+    // the channel-ownership redesign is tracked separately.
     // rp-ctl = reliable/ordered (text/keys/clicks); rp-move = unreliable/unordered
     // (mousemove — stale positions are worthless, dropping is correct) (B4).
-    let (_input_dcs, input_rx) = configure_input_data_channels(&pc).await?;
+    let (_input_dcs, input_rx) = match configure_input_data_channels(&peer_setup.pc).await {
+        Ok(channels) => channels,
+        Err(error) => return peer_setup.close_with(error).await,
+    };
 
     // --- create offer, send to browser ---
-    let offer = pc.create_offer(None).await.map_err(SessionError::from)?;
-    pc.set_local_description(offer.clone()).await?;
+    let offer = match peer_setup
+        .pc
+        .create_offer(None)
+        .await
+        .map_err(SessionError::from)
+    {
+        Ok(offer) => offer,
+        Err(error) => return peer_setup.close_with(error).await,
+    };
+    if let Err(error) = peer_setup
+        .pc
+        .set_local_description(offer.clone())
+        .await
+        .map_err(SessionError::from)
+    {
+        return peer_setup.close_with(error).await;
+    }
     let offer_msg = serde_json::json!({ "type": "offer", "sdp": offer.sdp }).to_string();
-    ws_tx
+    if let Err(error) = ws_tx
         .send(Message::Text(offer_msg.into()))
         .await
-        .map_err(|e| SessionError::WsHandshake(format!("send offer: {e}")))?;
+        .map_err(|e| SessionError::WsHandshake(format!("send offer: {e}")))
+    {
+        return peer_setup.close_with(error).await;
+    }
 
     let io = SignalingIo {
         ws_tx,
         ws_rx,
         sig_rx,
     };
-    let peer = PeerResources {
-        pc,
-        _input_dcs,
-        input_rx: Some(input_rx),
-    };
-    let session = Session::Negotiating(NegotiatingSession {
+    let peer = peer_setup.into_resources(_input_dcs, input_rx);
+    NegotiatingSession {
         seq,
         token,
         started: Instant::now(),
@@ -1574,17 +1622,11 @@ async fn serve_session(
         cancel,
         abr_loss,
         abr_frames,
-    });
-    let session = match session {
-        Session::Negotiating(negotiating) => {
-            Session::Connected(negotiating.run_until_connected().await?)
-        }
-        connected @ Session::Connected(_) => connected,
-    };
-    match session {
-        Session::Connected(connected) => connected.run().await,
-        Session::Negotiating(_) => Ok(()),
     }
+    .run_until_connected()
+    .await?
+    .run()
+    .await
 }
 
 impl NegotiatingSession {
@@ -1629,7 +1671,10 @@ impl NegotiatingSession {
                     }
                 }
                 Some(out) = self.io.sig_rx.recv() => {
-                    self.send_signaling(out).await?;
+                    if let Err(error) = self.send_signaling(out).await {
+                        let _ = self.peer.pc.close().await;
+                        return Err(error);
+                    }
                 }
                 msg = self.io.ws_rx.next() => {
                     let Some(msg) = msg else {
@@ -1643,7 +1688,14 @@ impl NegotiatingSession {
                             return Err(SessionError::WsHandshake(e.to_string()));
                         }
                     };
-                    if self.apply_ws_message(msg).await? {
+                    let closed = match self.apply_ws_message(msg).await {
+                        Ok(closed) => closed,
+                        Err(error) => {
+                            let _ = self.peer.pc.close().await;
+                            return Err(error);
+                        }
+                    };
+                    if closed {
                         let _ = self.peer.pc.close().await;
                         return Err(SessionError::SignalingClosed);
                     }
@@ -1671,6 +1723,7 @@ impl NegotiatingSession {
                         );
                     }
                 }
+                let _ = self.peer.pc.close().await;
                 return Err(e.error);
             }
         };
@@ -2224,6 +2277,7 @@ impl CaptureHandle {
     fn stop(&self) {
         if let Ok(mut c) = self.child.lock() {
             let _ = c.kill();
+            let _ = c.wait();
         }
     }
 
@@ -2264,10 +2318,7 @@ fn spawn_screencap(
     let mut child = command.spawn().map_err(|e| format!("spawn '{bin}': {e}"))?;
     let mut stdout = child.stdout.take().ok_or("no helper stdout")?;
     let control_stdin = if abr_enabled() {
-        child
-            .stdin
-            .take()
-            .map(|stdin| Arc::new(Mutex::new(stdin)))
+        child.stdin.take().map(|stdin| Arc::new(Mutex::new(stdin)))
     } else {
         None
     };
@@ -2338,7 +2389,7 @@ mod tests {
     }
 
     fn token(ch: char) -> String {
-        std::iter::repeat(ch).take(SESSION_TOKEN_MIN_LEN).collect()
+        std::iter::repeat_n(ch, SESSION_TOKEN_MIN_LEN).collect()
     }
 
     fn test_capture_config() -> CaptureConfig {
