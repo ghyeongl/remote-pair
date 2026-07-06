@@ -16,8 +16,9 @@
 set -euo pipefail
 
 RP_DIR="$HOME/.xpair/client"
+RP_CLIENT_DIR="${RP_CLIENT_DIR:-$RP_DIR}"
 RP_HOST_DIR="$HOME/.xpair/host"
-CLIENT_ENV="$RP_DIR/client.env"
+CLIENT_ENV="$RP_CLIENT_DIR/client.env"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 YES=0
@@ -31,6 +32,14 @@ for a in "$@"; do
   esac
 done
 
+if [ -f "$RP_CLIENT_DIR/bin/maplib.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$RP_CLIENT_DIR/bin/maplib.sh"
+else
+  echo "maplib.sh missing — run: xpair self-update" >&2
+  exit 1
+fi
+
 # Resolve xpair-mount (installed or on PATH) for backend-correct unmounts.
 RPM=""
 if command -v xpair-mount >/dev/null 2>&1; then RPM="$(command -v xpair-mount)"
@@ -42,26 +51,6 @@ if [ "$YES" != 1 ]; then
   case "${ans:-n}" in [yY]*) ;; *) echo "Aborted."; exit 1 ;; esac
 fi
 
-map_client_of() { printf '%s' "${1%%::*}"; }
-map_host_of() { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '%s' "$h"; }
-map_mode_infer() {
-  local d="$1" host="${REMOTE_HOST:-}" inferred=""
-  case "$d" in /Volumes/*) : ;; *) printf 'sync'; return ;; esac
-  [ -n "$host" ] || { printf 'sync'; return; }
-  host="${host#*@}"
-  inferred="$(mount 2>/dev/null | awk -v d="$d" -v h="$host" '
-    index($0, " (smbfs") {
-      start = index($0, " on "); if (!start) next
-      src = substr($0, 1, start - 1)
-      rest = substr($0, start + 4)
-      idx = index(rest, " (smbfs"); if (!idx) next
-      mp = substr(rest, 1, idx - 1)
-      if (!(index(src, "@" h "/") || index(src, "//" h "/") == 1)) next
-      if (d == mp || index(d, mp "/") == 1) { print "mount"; exit }
-    }
-  ' || true)"
-  [ "$inferred" = mount ] && printf 'mount' || printf 'sync'
-}
 map_mode_for() {
   local client="$1" e c IFS=';'
   for e in ${FOLDER_MAP_MODES:-}; do

@@ -95,6 +95,8 @@ cleanup_sandbox
 load_launch_guard() {
   sed -n '/^# ── path mapping:/,/^# ── human-readable deterministic session name ──/p' "$LAUNCHER_SRC" | sed '$d' > "$SBX/launch-guard.sh"
   # shellcheck disable=SC1090
+  . "$RP_CLIENT_DIR/bin/maplib.sh"
+  # shellcheck disable=SC1090
   . "$SBX/launch-guard.sh"
 }
 

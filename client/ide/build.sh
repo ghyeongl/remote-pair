@@ -197,6 +197,10 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
   for f in xpair xpair-launch xpair-mount xpair-desktop xpair-editor xpair-askpass hangul-romanize; do
     [ -e "$CLI_SRC/$f" ] && cp "$CLI_SRC/$f" "$_cli/client/cli/$f"
   done
+  if [ -f "$CLI_SRC/bin/maplib.sh" ]; then
+    mkdir -p "$_cli/client/cli/bin"
+    cp "$CLI_SRC/bin/maplib.sh" "$_cli/client/cli/bin/maplib.sh"
+  fi
   cp -R "$CLI_SRC/Launch Xpair.workflow" "$_cli/client/cli/Launch Xpair.workflow"
   # The canonical host uninstaller: install.sh stages it to ~/.xpair/client/share so the
   # client-side uninstall-host wrapper streams ONE teardown implementation over ssh.

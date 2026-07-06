@@ -49,6 +49,7 @@ new_sandbox() {
   RP_ERRFILE="$SBX/launch.err"
   SSH_CAPTURE="$SBX/ssh-capture"     # stores the remote script received by the mock ssh
   mkdir -p "$RP_HOST_DIR/logs" "$RP_HOST_DIR/bin" "$RP_CLIENT_DIR/logs" "$RP_CLIENT_DIR/bin" "$MOCKBIN"
+  cp "$_REPO_ROOT/client/cli/bin/maplib.sh" "$RP_CLIENT_DIR/bin/maplib.sh"
   # must export so the mocks (launched as children of the launcher) can see them
   export HOME RP_DIR RP_HOST_DIR RP_CLIENT_DIR MOCKBIN MOCKLOG SSH_CAPTURE SBX
   : > "$MOCKLOG"

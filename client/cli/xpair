@@ -115,25 +115,19 @@ TERMINAL_PATH="/System/Applications/Utilities/Terminal.app"
 [ -f "$RP_CLIENT_DIR/bin/logging.sh" ] && . "$RP_CLIENT_DIR/bin/logging.sh"
 type rp_log >/dev/null 2>&1 || { rp_log(){ :; }; log_info(){ :; }; log_warn(){ printf '%s\n' "$*" >&2; }; log_error(){ printf '%s\n' "$*" >&2; }; err(){ printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; }; info(){ printf '\033[1;36m▸ %s\033[0m\n' "$*"; }; warn(){ printf '\033[1;33m⚠ %s\033[0m\n' "$*" >&2; }; }
 
+if [ -f "$RP_CLIENT_DIR/bin/maplib.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$RP_CLIENT_DIR/bin/maplib.sh"
+else
+  err "maplib.sh missing — run: xpair self-update"
+  exit 1
+fi
+
 # ── UI helpers (err/info/warn come from logging.sh or the fallback above) ──
 c()  { printf '\033[1;36m▸ %s\033[0m\n' "$*"; }
 ok() { printf '\033[1;32m✓ %s\033[0m\n' "$*"; }
 
 sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
-
-valid_host() {
-  local target="${1:-}" user="" host=""
-  case "$target" in ''|-*) return 1 ;; esac
-  case "$target" in
-    *@*)
-      case "$target" in *@*@*|@*|*@) return 1 ;; esac
-      user="${target%@*}"; host="${target#*@}"
-      case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
-      ;;
-    *) host="$target" ;;
-  esac
-  case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
-}
 
 if [ -n "$REMOTE_HOST" ] && ! valid_host "$REMOTE_HOST"; then
   warn "invalid REMOTE_HOST ignored: $REMOTE_HOST"
@@ -262,29 +256,7 @@ rp_set() {
 }
 
 # ── mappings ──
-map_client_of() { printf '%s' "${1%%::*}"; }
-map_host_of()   { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '%s' "$h"; }
-
 # ── per-mapping access method (FOLDER_MAP_MODES, keyed by clientPath) ──
-# A /Volumes path is mount-mode only when mount(8) shows it is an smbfs mount from REMOTE_HOST.
-map_mode_infer() {
-  local d="$1" host="${REMOTE_HOST:-}" inferred=""
-  case "$d" in /Volumes/*) : ;; *) printf 'sync'; return ;; esac
-  [ -n "$host" ] || { printf 'sync'; return; }
-  host="${host#*@}"
-  inferred="$(mount 2>/dev/null | awk -v d="$d" -v h="$host" '
-    index($0, " (smbfs") {
-      start = index($0, " on "); if (!start) next
-      src = substr($0, 1, start - 1)
-      rest = substr($0, start + 4)
-      idx = index(rest, " (smbfs"); if (!idx) next
-      mp = substr(rest, 1, idx - 1)
-      if (!(index(src, "@" h "/") || index(src, "//" h "/") == 1)) next
-      if (d == mp || index(d, mp "/") == 1) { print "mount"; exit }
-    }
-  ' || true)"
-  [ "$inferred" = mount ] && printf 'mount' || printf 'sync'
-}
 # Stored method for a clientPath, or the inferred fallback when not explicitly recorded.
 map_mode_of() {
   local d="$1" e c IFS=';'
@@ -351,41 +323,9 @@ mapping_for_dir() {
   [ -n "$best" ] && printf '%s' "$best"
 }
 
-resolve_host() { # $1=clientDir → echo hostDir (longest-prefix; same path if unmapped)
-  local d="$1" best_c="" best_h="" c h pair IFS=';'
-  for pair in $FOLDER_MAPS; do
-    [ -n "$pair" ] || continue
-    c="$(map_client_of "$pair")"; h="$(map_host_of "$pair")"
-    case "$d" in "$c"|"$c"/*) [ "${#c}" -gt "${#best_c}" ] && { best_c="$c"; best_h="$h"; } ;; esac
-  done
-  [ -n "$best_c" ] && printf '%s%s' "$best_h" "${d#"$best_c"}" || printf '%s' "$d"
-}
 is_mapped() { local d="$1" c pair IFS=';'; for pair in $FOLDER_MAPS; do [ -n "$pair" ] || continue; c="$(map_client_of "$pair")"; case "$d" in "$c"|"$c"/*) return 0 ;; esac; done; return 1; }
 # Does any mapping use the mount (SMB) method? (the per-mapping trigger for SMB readiness gating)
 has_mount_mapping() { local pair c IFS=';'; for pair in $FOLDER_MAPS; do [ -n "$pair" ] || continue; c="$(map_client_of "$pair")"; [ "$(map_mode_of "$c")" = mount ] && return 0; done; return 1; }
-
-smb_host() {
-  case "${REMOTE_HOST:-}" in *@*) printf '%s' "${REMOTE_HOST#*@}" ;; *) printf '%s' "${REMOTE_HOST:-}" ;; esac
-}
-share_name_for_hostpath() {
-  basename "$1"
-}
-expected_mountpoint_for_hostpath() {
-  printf '/Volumes/%s' "$(share_name_for_hostpath "$1")"
-}
-discover_mountpoint_for_hostpath() {
-  local hostpath="$1" share src
-  share="$(share_name_for_hostpath "$hostpath")"
-  src="@$(smb_host)/${share} on "
-  mount 2>/dev/null | awk -v src="$src" '
-    index($0, src) && index($0, " (smbfs") {
-      start = index($0, " on ")
-      rest = substr($0, start + 4)
-      idx = index(rest, " (smbfs")
-      if (idx) { print substr(rest, 1, idx - 1); exit }
-    }
-  ' || true
-}
 
 resolve_xpair_mount_tool() {
   if [ -x "$LOCAL_BIN/xpair-mount" ]; then
@@ -439,7 +379,7 @@ ensure_launch_arg_mount_best_effort() {
       warn "xpair-mount not found; cannot ensure mount-method folder map before launch"
       return 0
     }
-    expected="$(expected_mountpoint_for_hostpath "$host_path")"
+    expected="$(expected_mountpoint "$host_path")"
     if out="$("$tool" --backend smb mount "$host_path" 2>&1)"; then
       [ -n "$out" ] && printf '%s\n' "$out"
       mountpoint="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Mountpoint:[[:space:]]*//p' | tail -1)"
@@ -454,22 +394,6 @@ ensure_launch_arg_mount_best_effort() {
     fi
     return 0
   done
-}
-
-# Best-effort probe of the host's File Sharing (SMB) state over SSH → echoes on|off|unknown.
-# No sudo: reads launchctl's disabled-override db (authoritative for the System Settings toggle),
-# then falls back to the LaunchDaemon plist. Any failure ⇒ unknown (never blocks).
-host_smb_status() {
-  case "${REMOTE_HOST:-}" in ''|-*|*[!A-Za-z0-9._-]*) printf 'unknown'; return ;; esac
-  ssh -o BatchMode=yes -o ConnectTimeout=6 "$REMOTE_HOST" '
-    v=$(launchctl print-disabled system 2>/dev/null | sed -n "s/.*\"com.apple.smbd\" => \(.*\)/\1/p")
-    case "$v" in *true*|*disabled*) echo off; exit 0 ;; *false*|*enabled*) echo on; exit 0 ;; esac
-    # Fallback when print-disabled yields nothing: the static LaunchDaemon plist is NOT authoritative
-    # for the live System-Settings toggle (Disabled=1 by factory default), so only an explicit
-    # Disabled=0 means "on"; anything else is unknown — Gate 2 (the real mount) catches a genuine off.
-    case "$(defaults read /System/Library/LaunchDaemons/com.apple.smbd Disabled 2>/dev/null)" in
-      0) echo on ;; *) echo unknown ;; esac
-  ' 2>/dev/null || printf 'unknown'
 }
 
 ensure_mapped_host_dir_ready() {
@@ -1365,12 +1289,18 @@ cmd_self_update() {
   for f in xpair xpair-launch hangul-romanize xpair-askpass xpair-mount xpair-desktop xpair-editor; do
     curl -fsSL "$base/$f" -o "$tmp/$f" 2>/dev/null && [ -s "$tmp/$f" ] && got=$((got+1))
   done
+  curl -fsSL "$base/bin/maplib.sh" -o "$tmp/maplib.sh" 2>/dev/null && [ -s "$tmp/maplib.sh" ] && got=$((got+1))
   # logging.sh lives in shared/, not client/ — fetch separately so a flat client loop won't 404.
   local shared_base="https://raw.githubusercontent.com/$repo/$ref/shared"
   curl -fsSL "$shared_base/logging.sh" -o "$tmp/logging.sh" 2>/dev/null && [ -s "$tmp/logging.sh" ] && got=$((got+1))
   local host_base="https://raw.githubusercontent.com/$repo/$ref/host"
   curl -fsSL "$host_base/uninstall-host.sh" -o "$tmp/uninstall-host.sh" 2>/dev/null && [ -s "$tmp/uninstall-host.sh" ] && got=$((got+1))
   [ "$got" -ge 2 ] || { warn "download failed (got=$got) — check network/repo"; rm -rf "$tmp"; return 1; }
+  if { [ -s "$tmp/xpair" ] || [ -s "$tmp/xpair-launch" ] || [ -s "$tmp/xpair-mount" ]; } && [ ! -s "$tmp/maplib.sh" ]; then
+    warn "skipped mapping-aware CLI update: maplib.sh download incomplete — re-run self-update"
+    rm -f "$tmp/xpair" "$tmp/xpair-launch" "$tmp/xpair-mount"
+  fi
+  [ -s "$tmp/maplib.sh" ]        && { mkdir -p "$RP_CLIENT_DIR/bin"; mv "$tmp/maplib.sh" "$RP_CLIENT_DIR/bin/maplib.sh" && ok "map helpers → $RP_CLIENT_DIR/bin/maplib.sh"; }
   # The new CLI's --password-stdin FIFO bootstrap REQUIRES the RP_ASKPASS_FIFO-aware xpair-askpass
   # (resolved as a CLI sibling). Install them ATOMICALLY: never land the new CLI without the matching
   # helper — a partial fetch (CLI ok, askpass missing) would otherwise leave password bootstrap broken.

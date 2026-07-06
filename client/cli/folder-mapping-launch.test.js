@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 const testFile = path.relative(process.cwd(), __filename);
 const cli = fs.readFileSync(path.join(__dirname, "xpair"), "utf8");
 const launcher = fs.readFileSync(path.join(__dirname, "xpair-launch"), "utf8");
+const maplib = fs.readFileSync(path.join(__dirname, "bin/maplib.sh"), "utf8");
 
 let passed = 0;
 let failed = 0;
@@ -44,9 +45,9 @@ function runShellFunction(fnSource, env, command) {
 
 test("Q0041/Q0042/Q0043 launcher maps client paths with the longest host prefix", () => {
   const helpers = [
-    extractOneLineFunction(launcher, "map_client_of"),
-    extractOneLineFunction(launcher, "map_host_of"),
-    extractShellFunction(launcher, "map_to_host"),
+    extractOneLineFunction(maplib, "map_client_of"),
+    extractOneLineFunction(maplib, "map_host_of"),
+    extractShellFunction(maplib, "map_to_host"),
   ].join("\n");
   const env = {
     FOLDER_MAPS: "/client::/host;/client/work::/srv/work;/client/work/app::/srv/app",
@@ -59,9 +60,10 @@ test("Q0041/Q0042/Q0043 launcher maps client paths with the longest host prefix"
 
 test("Q0041/Q0042/Q0043 xpair launch resolves unmapped candidates through the same mapping rule", () => {
   const helpers = [
-    extractOneLineFunction(cli, "map_client_of"),
-    extractOneLineFunction(cli, "map_host_of"),
-    extractShellFunction(cli, "resolve_host"),
+    extractOneLineFunction(maplib, "map_client_of"),
+    extractOneLineFunction(maplib, "map_host_of"),
+    extractShellFunction(maplib, "map_to_host"),
+    extractOneLineFunction(maplib, "resolve_host"),
   ].join("\n");
   const env = {
     FOLDER_MAPS: "/Users/me/Spaces::/Volumes/Host/Spaces;/Users/me/Spaces/Work::/srv/work",
