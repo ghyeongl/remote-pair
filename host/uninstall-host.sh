@@ -212,11 +212,7 @@ APP_PATH=""
 VER=""
 PROTECTED_APP_PATH=""
 PROTECTED_VER=""
-# Include the legacy RemotePairHost.app app name: a 0.4.x production host may still be the
-# legacy bundle, and it shares LaunchAgents + ~/.xpair state with any test copy — so the
-# protected-version gate below must see it too, else the destructive path runs unguarded.
-for p in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app" \
-         "/Applications/RemotePairHost.app" "$HOME/Applications/RemotePairHost.app"; do
+for p in "/Applications/$APP_NAME.app" "$HOME/Applications/$APP_NAME.app"; do
   [ -d "$p" ] || continue
   v="$(app_version "$p")"
   [ -n "$v" ] || continue
