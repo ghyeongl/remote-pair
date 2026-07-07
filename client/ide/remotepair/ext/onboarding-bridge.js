@@ -144,20 +144,6 @@ function compareVersions(a, b) {
   return 0;
 }
 
-/** Resolve the tailscale binary path (macOS .app / brew / std locations), or null if absent.
- *  Sync existsSync probe — Tailscale on macOS often has NO `tailscale` on PATH, only the .app. */
-function resolveTailscale() {
-  const cands = [
-    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    "/opt/homebrew/bin/tailscale",
-    "/usr/local/bin/tailscale",
-  ];
-  for (const c of cands) {
-    try { if (fs.existsSync(c)) return c; } catch { /* ignore */ }
-  }
-  return null;
-}
-
 /** The standard user-tool PATH a GUI Electron app is missing (its inherited PATH is minimal). */
 const RICH_PATH = `${HOME}/.local/bin:${HOME}/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`;
 
@@ -1129,65 +1115,6 @@ const ENGINE_PROBE = {
     'else echo RP_ENGINE_INSTALLED=0; fi',
 };
 
-// Per-engine host install command — each engine's OFFICIAL native installer, run non-interactively.
-// No brew/npm: claude/codex land in ~/.local/bin, opencode in ~/.opencode/bin (PATH_PERSIST wires both
-// onto the host's login PATH). The installers' own rc-PATH edits are suppressed where supported
-// (opencode --no-modify-path) since PATH_PERSIST owns PATH persistence. Mirrored in EngineGuard.swift.
-const ENGINE_INSTALL = {
-  claude: "bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash'",
-  shell: 'true',
-  codex: "bash -c 'set -o pipefail; curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'",
-  opencode: "bash -c 'set -o pipefail; curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path'",
-};
-
-// PATH persistence (engine-agnostic): write ~/.xpair/env with the canonical PATH (incl. the native
-// install dirs ~/.local/bin and ~/.opencode/bin) and source it from zsh/bash login + interactive rc
-// files via an idempotent xpair-delimited block — so a bare `claude`/`codex` resolves in the host's own
-// Terminal. Idempotent: the delimited block + sourced file are rewritten, never duplicated. Mirrored in
-// host/app/EngineGuard.swift (pathPersistScript).
-const PATH_PERSIST =
-  'set -e; ' +
-  'mkdir -p "$HOME/.xpair"; ' +
-  'printf \'%s\\n\' \'export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"\' > "$HOME/.xpair/env"; ' +
-  'for RC in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"; do ' +
-  'touch "$RC"; TMP="$(mktemp)"; ' +
-  'grep -vF \'# >>> xpair PATH >>>\' "$RC" | grep -vF \'. "$HOME/.xpair/env"\' | grep -vF \'# <<< xpair PATH <<<\' > "$TMP" || true; ' +
-  'cat "$TMP" > "$RC"; rm -f "$TMP"; ' +
-  '{ echo \'# >>> xpair PATH >>>\'; echo \'[ -f "$HOME/.xpair/env" ] && . "$HOME/.xpair/env"\'; echo \'# <<< xpair PATH <<<\'; } >> "$RC"; ' +
-  'done; echo RP_PATH_OK=1';
-
-// Per-engine host auth WRITER — a remote shell command that reads ONE secret line from STDIN
-// (`read -r KEY`) and persists it. The key NEVER appears on argv/log/disk on either side:
-//   codex     — pipe the key into `codex login --with-api-key` (reads stdin → ~/.codex/auth.json).
-//   claude    — append `export ANTHROPIC_API_KEY=...` to the login shell rc (idempotent: drop any
-//               prior Xpair-managed line first). claude + opencode both read the provider env at runtime.
-//   opencode  — same provider-env export (opencode reads ANTHROPIC_API_KEY natively).
-// The rc writer rewrites a single Xpair-delimited block so re-running replaces (not duplicates) it,
-// and chmods the rc 600. `read -r KEY` strips the trailing newline; the key stays out of argv.
-function rcExportWriter(varName) {
-  // Determine the login shell rc (zsh default on macOS, bash fallback), append a managed export block.
-  return (
-    'read -r KEY; ' +
-    'case "${SHELL:-}" in *zsh) RC="$HOME/.zshrc";; *bash) RC="$HOME/.bashrc";; *) RC="$HOME/.zshrc";; esac; ' +
-    'touch "$RC"; chmod 600 "$RC" 2>/dev/null || true; ' +
-    'TMP="$(mktemp)"; ' +
-    // Drop ONLY the previous Xpair-managed block (the lines between, and including, the markers) —
-    // NOT every `export VAR=` line. A blanket grep would silently delete a user's own hand-maintained
-    // export that lives outside our block. awk skips the delimited region and keeps everything else.
-    'awk -v b="# >>> xpair ' + varName + ' >>>" -v e="# <<< xpair ' + varName + ' <<<" \'$0==b{skip=1;next} $0==e{skip=0;next} skip!=1\' "$RC" > "$TMP" || true; ' +
-    'mv "$TMP" "$RC"; ' +
-    '{ echo "# >>> xpair ' + varName + ' >>>"; printf \'export ' + varName + '=%s\\n\' "$KEY"; echo "# <<< xpair ' + varName + ' <<<"; } >> "$RC"; ' +
-    'echo RP_AUTH_OK=1'
-  );
-}
-const ENGINE_AUTH_WRITE = {
-  claude: rcExportWriter("ANTHROPIC_API_KEY"),
-  codex:
-    PATH_PREFIX +
-    'read -r KEY; printf %s "$KEY" | codex login --with-api-key >/dev/null 2>&1 && echo RP_AUTH_OK=1',
-  opencode: rcExportWriter("ANTHROPIC_API_KEY"),
-};
-
 /** Parse a KEY="value" env file into an object. */
 function parseEnv(file) {
   const env = {};
@@ -1231,11 +1158,6 @@ function upsertEnv(key, val) {
 }
 
 const bridge = {
-  // Bridge + real values: this machine's real identity (replaces hardcoded host/user).
-  hostInfo() {
-    return { hostname: os.hostname(), user: os.userInfo().username };
-  },
-
   // CLI hard guard (global): is the `xpair` CLI actually usable on THIS machine? The whole onboarding
   // shells out to it, so if it isn't there every "real" step silently ENOENTs (code -1) and the wizard
   // would otherwise sail past. Two checks, both required:
@@ -1343,37 +1265,6 @@ const bridge = {
     };
   },
 
-  // Connection — Tailscale-first reachability probe. On macOS Tailscale commonly ships ONLY as
-  // /Applications/Tailscale.app (no `tailscale` on PATH), so a naive `which tailscale` false-negatives
-  // ("not installed" despite being installed). Probe the app/brew binary too — matching the CLI's
-  // cmd_discover probe — so this agrees with `xpair discover`.
-  async tailscaleStatus() {
-    const bin = resolveTailscale();
-    if (!bin) return { installed: false, up: false };
-    const st = await run(bin, ["status"]);
-    return { installed: true, up: st.code === 0 };
-  },
-
-  // Connection — full SSH-assist: generate ed25519 if missing, return the pubkey to add to the host.
-  // `keygenNew` tells the UI whether a fresh key was created (feeds ssh_config_completed.keygen_new).
-  async sshKeygen() {
-    let keygenNew = false;
-    if (!fs.existsSync(SSH_KEY)) {
-      const sshDir = path.join(HOME, ".ssh");
-      fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 });
-      fs.chmodSync(sshDir, 0o700);
-      await run("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", SSH_KEY, "-q"]);
-      keygenNew = fs.existsSync(SSH_KEY);
-    }
-    let pubkey = "";
-    try {
-      pubkey = fs.readFileSync(SSH_KEY + ".pub", "utf8").trim();
-    } catch {
-      /* keygen may have failed */
-    }
-    return { pubkey, keygenNew };
-  },
-
   // Connection — real reachability check (hard-gate for the Connect step).
   async sshReachable(host) {
     const h = String(host || "").trim();
@@ -1395,23 +1286,12 @@ const bridge = {
     return cli(["config", "set", "host", host]);
   },
 
-  // Engine — persist the chosen session engine via the CLI (`config set engine <claude|codex|opencode|shell>`,
-  // → client.env ENGINE, consumed by `xpair launch`). Validates the engine here too so a bad value
-  // never reaches the CLI. Returns {code, out, err}.
-  async setEngine(engine) {
-    if (!SESSION_ENGINES.has(String(engine))) {
-      return { code: -1, out: "", err: `unknown engine: ${engine}` };
-    }
-    return cli(["config", "set", "engine", String(engine)]);
-  },
-
   // --- Engine host-readiness hard guard (component — same philosophy as the CLI/host-app guards) ---
   //
   // The chosen session engine runs ON THE HOST (xpair launch SSHes in and execs `claude`/`codex`/
-  // `opencode`, or a plain shell, there). So before pairing we must confirm THAT engine is available
+  // `opencode`, or a plain shell, there). So before launch we must confirm THAT engine is available
   // on the host, or `xpair launch` dead-ends with "<engine> not found on host" / an auth prompt the
-  // GUI can never answer. These three methods mirror installHost's pattern: probe → install → set
-  // auth, all over key-auth SSH (BatchMode, never prompts).
+  // GUI can never answer.
 
   // Engine — is `engine` installed AND authenticated on the host? One SSH round-trip (key auth,
   // BatchMode) runs an engine-specific probe and prints a parseable RP_* block. Auth detection is
@@ -1480,79 +1360,6 @@ const bridge = {
     };
   },
 
-  // Engine — install `engine` on the host over SSH via its official native installer (non-interactive,
-  // no tty). PATH_PREFIX puts curl + the install dirs on PATH; after a non-shell install we run
-  // PATH_PERSIST so a bare `claude`/`codex` resolves in the host's own Terminal later. Returns {ok, err}.
-  // Re-probe with hostEngineStatus afterwards — never trust the exit code alone (a curl|sh exit 0 means
-  // "ran", not "binary is launch-able"). Mirrored in host/app/EngineGuard.swift.
-  async installHostEngine(engine) {
-    const e = String(engine || "");
-    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
-    if (!host) return { ok: false, err: "REMOTE_HOST not set" };
-    if (!validSshTarget(host)) {
-      return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
-    }
-    if (!ENGINE_INSTALL[e]) return { ok: false, err: `unknown engine: ${e}` };
-    // Run the native installer, then persist PATH (skip for shell — nothing was installed).
-    const persist = e === "shell" ? "" : ` && { ${PATH_PERSIST}; }`;
-    const cmd = `${PATH_PREFIX}${ENGINE_INSTALL[e]}${persist}`;
-    const r = await run("ssh", [...sshProbeOpts(host, 20), host, cmd], { /* installer can take a while */ });
-    if (r.code !== 0) {
-      const s = sshResult(r, `install exited ${r.code}`);
-      return { ok: false, err: s.err, state: s.state, action: s.action };
-    }
-    return { ok: true, err: "" };
-  },
-
-  // Engine — set the host-side API key for `engine`. SECURITY (Principle 2): the key is handed to the
-  // host over the SSH STDIN pipe (runSecret-style: written once, fd closed), NEVER on argv (visible in
-  // `ps`), NEVER in a log line, NEVER an env VALUE. The remote writer reads ONE line from stdin and
-  // persists it engine-specifically (ENGINE_AUTH_WRITE) — codex via its own `login --with-api-key`,
-  // claude/opencode via a provider-env export appended to the host login shell rc (idempotent). The
-  // key is dropped here right after. Returns {ok, err}.
-  async setHostEngineAuth(engine, apiKey) {
-    const e = String(engine || "");
-    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
-    if (!host) return { ok: false, err: "REMOTE_HOST not set" };
-    if (!validSshTarget(host)) {
-      return { ok: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
-    }
-    if (!apiKey) return { ok: false, err: "no API key" };
-    const writer = ENGINE_AUTH_WRITE[e];
-    if (!writer) return { ok: false, err: `unknown engine: ${e}` };
-    // The remote command reads the key from stdin (`read -r KEY`) — the key never appears on argv.
-    // We pipe it over ssh's stdin via runSecretStdin (fd0), not fd3, since ssh forwards fd0 to the
-    // remote shell directly.
-    const r = await runSecretStdin("ssh", [...sshProbeOpts(host, 15), host, writer], apiKey);
-    if (r.code !== 0) {
-      const s = sshResult(r, `auth write exited ${r.code}`);
-      return { ok: false, err: s.err, state: s.state, action: s.action };
-    }
-    return { ok: true, err: "" };
-  },
-
-  // Method — record the chosen file-access backend (mount | third-party-sync).
-  setBackend(syncBackend, mountBackend) {
-    if (syncBackend) upsertEnv("SYNC_BACKEND", syncBackend);
-    if (mountBackend) upsertEnv("MOUNT_BACKEND", mountBackend);
-    return { code: 0 };
-  },
-
-  // Mappings — check whether a path exists on the remote host over SSH.
-  // Uses `test -e` which returns 0 if the path exists (file, dir, or symlink).
-  async hostPathExists(p) {
-    if (!p) return { exists: false, err: "no path" };
-    const host = String(parseEnv(clientEnvPath()).REMOTE_HOST || "").trim();
-    if (!host) return { exists: false, err: "REMOTE_HOST not set" };
-    if (!validSshTarget(host)) {
-      return { exists: false, err: invalidSshTarget(host), state: SSH_STATE.INVALID_HOST, action: SSH_ACTION.ABORT };
-    }
-    const r = await run("ssh", [...sshProbeOpts(host, 5), host, "test -e " + shPathQuotePreserveHome(p)]);
-    if (r.code === 0) return { exists: true, err: "", state: SSH_STATE.READY, action: SSH_ACTION.CONTINUE };
-    const s = sshResult(r);
-    return { exists: false, err: s.err, state: s.state, action: s.action };
-  },
-
   // Mappings — resolve a host folder over SSH before saving it. The webview's sample host
   // browser emits "~" paths, but FOLDER_MAPS must store an absolute path that exists on the host.
   async resolveHostPath(sshTarget, hostPath) {
@@ -1565,8 +1372,7 @@ const bridge = {
     }
     // ssh appends extra argv to the remote command STRING (space-joined); it does NOT set $1. So the
     // path must be embedded — safely quoted, leading ~ left unquoted so the remote shell expands it —
-    // directly into the command. Mirrors hostPathExists' shPathQuotePreserveHome usage. cd verifies
-    // existence; pwd returns the absolute path.
+    // directly into the command. cd verifies existence; pwd returns the absolute path.
     const r = await run("ssh", [...sshProbeOpts(h, 5), h, "cd " + shPathQuotePreserveHome(p) + " 2>/dev/null && pwd"]);
     if (r.code === 0 && String(r.out || "").trim()) {
       return { ok: true, path: String(r.out || "").trim().split("\n").pop(), err: "" };
@@ -1635,16 +1441,6 @@ const bridge = {
     const c = expandClientHome(String(clientPath || "").trim());
     if (!c) return { code: -1, out: "", err: "removeMapping requires a client path" };
     return cli(["map", "rm", c]);
-  },
-
-  // Host File Sharing (SMB) readiness probe → "on" | "off" | "unknown" (best-effort over SSH).
-  // Gate 1: a mount-method mapping cannot work until this is "on"; the wizard blocks + guides
-  // (we never enable File Sharing for the user). "unknown" is non-blocking (don't trap on a
-  // transient SSH hiccup) — only a definite "off" blocks.
-  async hostSmbStatus() {
-    const r = await cli(["smb-status"]);
-    const s = ((r && r.out) || "").trim().toLowerCase();
-    return s === "on" || s === "off" ? s : "unknown";
   },
 
   // --- Discovery / remote-install (component ⑤ — shells to the CLI brain) -----------------------
@@ -1950,20 +1746,6 @@ const bridge = {
     }
   },
 
-  // TOFU display — fetch the host-key fingerprint the CLI observes for `host`, so the connect
-  // step can show "Matches what <host> shows?" before any key is trusted. Returns {fp, err}.
-  async hostKeyFingerprint(host) {
-    if (!host) return { fp: "", err: "no host" };
-    const r = await cli(["discover", "--fingerprint", String(host)]);
-    if (r.code !== 0) return { fp: "", err: r.err };
-    try {
-      const parsed = JSON.parse(r.out.trim());
-      return { fp: parsed.fp || "", err: parsed.err || "" };
-    } catch {
-      return { fp: "", err: "fingerprint: bad JSON: " + r.out.trim() };
-    }
-  },
-
   // Gateway-MAC roaming is a convenience guard only (blueprint §6.4). Unknown/changed network state
   // fails CLOSED for auto-connect; auth remains SSH host-key TOFU + the approved client key.
   gatewayMacStatus,
@@ -2053,21 +1835,6 @@ const bridge = {
       return hostKeyMismatch("host key changed before it could be pinned");
     }
     return { ok: true, err: "" };
-  },
-
-  async hasDurableHostKey(host) {
-    const h = String(host || "").trim();
-    if (!validSshTarget(h)) return { ok: false, present: false, err: invalidSshTarget(h) };
-    const r = await run("ssh", [
-      ...sshDurablePinOpts(8),
-      "-o", "StrictHostKeyChecking=yes",
-      h,
-      "true",
-    ]);
-    const err = r.err || r.out || "";
-    if (isSshNetworkFailure(err)) return { ok: false, present: false, err };
-    if (isHostKeyVerificationFailure(err)) return { ok: true, present: false, err: "" };
-    return { ok: true, present: true, err: "" };
   },
 
   // Host-app hard guard (Connect / Reconnect step): being able to SSH to the host (reachable) is NOT
@@ -2188,12 +1955,6 @@ const bridge = {
     };
   },
 
-  // Client version (the 0.5.0a{N} lockstep stamp) — exposed so the UI can show "client Y" in an
-  // incompatibility message without re-deriving it.
-  clientVersion() {
-    return clientVersion();
-  },
-
   // --- Telemetry (consent-gated PostHog; all no-ops until the user opts in) -------------------
 
   // Fire a Phase-1 PostHog event from the webview. The bridge re-validates the event name and
@@ -2212,15 +1973,6 @@ const bridge = {
     }
     telemetry.capture(event, p);
     return { ok: true };
-  },
-
-  // Phase-1 event-name + enum catalog, so the webview references frozen constants (no string typos).
-  tCatalog() {
-    return {
-      EVENTS: telemetry.EVENTS,
-      REASONS: telemetry.REASONS,
-      PATHS: telemetry.PATHS,
-    };
   },
 
   // Consent flags for the first-run consent UI (both default false / opt-in).

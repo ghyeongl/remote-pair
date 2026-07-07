@@ -80,9 +80,9 @@ test("every new-flow seed path passes the stored modes into parseFolderMaps", ()
   );
 });
 
-test("preload bridges the method arg and hostSmbStatus to window.remotepair", () => {
+test("preload bridges the live mapping methods to window.remotepair", () => {
   // The webview only sees what the Electron preload exposes — a bridge method missing here is
-  // undefined at runtime even though global.d.ts/types compile. Guards both gate + C0 write paths.
+  // undefined at runtime even though global.d.ts/types compile.
   assert.match(
     preload,
     /addMapping: \(clientPath, hostPath, method\) => rp\('addMapping', \[clientPath, hostPath, method\]\)/,
@@ -97,11 +97,6 @@ test("preload bridges the method arg and hostSmbStatus to window.remotepair", ()
     preload,
     /resolveHostPath: \(target, hostPath\) => rp\('resolveHostPath', \[target, hostPath\]\)/,
     "preload resolveHostPath must expose SSH host-path expansion before saving mappings",
-  );
-  assert.match(
-    preload,
-    /hostSmbStatus: \(\) => rp\('hostSmbStatus', \[\]\)/,
-    "preload must expose hostSmbStatus (else Gate 1's call is undefined at runtime)",
   );
 });
 

@@ -1,4 +1,4 @@
-// AppDelegate.swift — menu bar (NSStatusItem) + dynamic session list + permissions/settings/update/About routing.
+// AppDelegate.swift — menu bar (NSStatusItem) + dynamic session list + permissions/update/About routing.
 //
 // Separation of responsibilities: tmux host=HostManager, approve=ApproveManager, session query/control=Sessions,
 //            permissions=Permissions, updates=Updater, setup/onboarding=OnboardingWindow.
@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ensureDirs()
         XpairAuthorizedKeys.expirePendingProofs()
         // Telemetry consent flags — both default OFF (opt-in). Registered so a never-toggled key reads false
-        // (zero network calls by default). Toggled in SettingsWindow.
+        // (zero network calls by default).
         UserDefaults.standard.register(defaults: [
             TelemetryClient.consentKey: false,
             SentryBridge.consentKey: false,
@@ -125,10 +125,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.host.ensureServer()
             if isHostRole { self.advertiser.ensureAdvertising() }   // ① watchdog: re-advertise if listener died
-        }
-
-        if UserDefaults.standard.bool(forKey: SettingsWindowController.autoUpdateKey) {
-            Updater.checkForUpdates(interactive: false)
         }
     }
 

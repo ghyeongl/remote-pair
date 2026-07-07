@@ -2040,8 +2040,7 @@ function activate(context) {
   //    Shows the configured host NAME + live reachability status instead of the
   //    generic SSH "$(remote)" glyph: $(vm-active) host when reachable, red
   //    background + $(vm-outline) when down, $(sync~spin) while probing, and a
-  //    "Set host" affordance when none is configured. Click still opens the
-  //    endpoint quickpick (remotepair.connectHost).
+  //    "Set host" affordance when none is configured.
   const hostBtn = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100000000);
   // Click = non-destructive re-onboarding (detach/reattach; sessions persist) — the canonical
   // "set up / switch host" action. The button still DISPLAYS host name + reachability below.
@@ -2067,19 +2066,19 @@ function activate(context) {
     const host = getValidHost();
     if (!host) {
       hostBtn.text = "$(gear) Set host";
-      hostBtn.tooltip = "Xpair: no host configured — click to set up";
+      hostBtn.tooltip = "Xpair: no host configured — click to set up again.";
       hostBtn.backgroundColor = undefined;
     } else if (hostReachable === true) {
       hostBtn.text = `$(vm-active) ${host}`;
-      hostBtn.tooltip = `Xpair: ${host} — reachable. Click to connect.`;
+      hostBtn.tooltip = `Xpair: ${host} — reachable. Click to set up again.`;
       hostBtn.backgroundColor = undefined;
     } else if (hostReachable === false) {
       hostBtn.text = `$(vm-outline) ${host}`;
-      hostBtn.tooltip = `Xpair: ${host} — unreachable. Click to connect / retry.`;
+      hostBtn.tooltip = `Xpair: ${host} — unreachable. Click to set up again.`;
       hostBtn.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
     } else {
       hostBtn.text = `$(sync~spin) ${host}`;
-      hostBtn.tooltip = `Xpair: ${host} — checking reachability…`;
+      hostBtn.tooltip = `Xpair: ${host} — checking reachability. Click to set up again.`;
       hostBtn.backgroundColor = undefined;
     }
     hostBtn.show();

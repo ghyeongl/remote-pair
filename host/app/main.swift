@@ -2,7 +2,7 @@
 //
 // Menu-bar-only accessory app: no Dock icon + holds a graphic session (the gating condition for AX synthetic input).
 // Responsibilities are split across the individual .swift files: Config / HostManager / ApproveManager / Sessions /
-//   Permissions / Updater / SettingsWindow / AppDelegate.
+//   Permissions / Updater / AppDelegate.
 
 import Cocoa
 
@@ -12,6 +12,16 @@ if CommandLine.arguments.contains("--pairing-self-test") {
         exit(0)
     } catch {
         FileHandle.standardError.write(Data("pairing security self-test failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+if CommandLine.arguments.contains("--capture-control-self-test") {
+    do {
+        try CaptureControlTests.runAll()
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("capture control self-test failed: \(error)\n".utf8))
         exit(1)
     }
 }

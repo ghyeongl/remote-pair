@@ -3,8 +3,7 @@
 // The CLIENT writes one heartbeat file per client at ~/.xpair/host/clients/<id>.json, shaped
 // {"name":"<client hostname>","user":"<client user>","ts":<unix epoch seconds>}. A client counts as
 // "connected" if its ts is within the freshness window of now. There is NO disconnect/revoke — this is
-// read-only status. Reused by both the menu bar (AppDelegate.rebuildMenu) and the onboarding bridge
-// (OnboardingWindow's `connectedClients` method). Foundation only.
+// read-only status. Reused by the menu bar (AppDelegate.rebuildMenu). Foundation only.
 
 import Foundation
 
@@ -20,7 +19,7 @@ enum ConnectedClients {
     }
 
     /// Connected clients (ts within `freshnessSec` of now), sorted by name. Never throws — any
-    /// read/parse failure is logged and skipped so callers (menu, renderer) always get an array.
+    /// read/parse failure is logged and skipped so callers always get an array.
     static func list() -> [(name: String, user: String, ageSec: Int)] {
         let dir = "\(RP_DIR)/clients"
         let fm = FileManager.default

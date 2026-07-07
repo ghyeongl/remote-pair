@@ -50,4 +50,5 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           # Compile via SwiftPM (mirrors build-host.sh: `swift build --package-path host -c release`)
           swift build --package-path host -c release
+          "$(swift build --package-path host -c release --show-bin-path)/XpairHost" --capture-control-self-test
           echo "RemotePairHost compiles ✓"

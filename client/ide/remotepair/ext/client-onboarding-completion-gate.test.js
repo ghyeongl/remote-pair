@@ -69,7 +69,7 @@ test("Q0369 Q0402 Q0474 client onboarding reaches completion only from gated Don
 
   assert.doesNotMatch(
     closedHandler,
-    /!\s*_completed[\s\S]*onComplete\s*\(/,
+    /onComplete\s*\(/,
     "closing the onboarding window before completion must not call onComplete/open the workbench",
   );
 });

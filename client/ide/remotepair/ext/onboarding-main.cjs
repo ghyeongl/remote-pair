@@ -75,6 +75,27 @@ const START_STEP = Object.freeze({
 })
 const START_STEPS = new Set(Object.values(START_STEP))
 const SESSION_ENGINES = new Set(['claude', 'shell', 'codex', 'opencode'])
+const RENDERER_METHODS = new Set([
+  'getConfig',
+  'cliReady',
+  'installCli',
+  'openHostOnboarding',
+  'hostAppStatus',
+  'setHost',
+  'addMapping',
+  'removeMapping',
+  'resolveHostPath',
+  'mount',
+  'defaultMountpoint',
+  'discover',
+  'sendPairingRequest',
+  'pairingStatus',
+  'installHost',
+  'pinHostKey',
+  'tCapture',
+  'tGetConsent',
+  'tSetConsent',
+])
 // Mirrors `xpair launch`'s CLIENT_ENGINE_FALLBACK=${ENGINE:-claude}: the engine actually exec'd when
 // neither host.env nor client.env names one. The readiness guard checks this so an un-configured setup
 // doesn't skip the check and then dead-end at launch time.
@@ -94,11 +115,6 @@ function readClientEnv() {
 
 function configuredRemoteHost(env = readClientEnv()) {
   return (env.REMOTE_HOST || '').trim()
-}
-
-function configuredEngine(env = readClientEnv()) {
-  const engine = (env.ENGINE || 'claude').trim()
-  return SESSION_ENGINES.has(engine) ? engine : 'claude'
 }
 
 async function configuredHostEngine(host, probeBridge = bridge) {
@@ -211,14 +227,14 @@ let _ipcWired = false
 function wireIpc(ipcMain, onComplete) {
   if (_ipcWired) return
   _ipcWired = true
-  // Data calls → onboarding-bridge.js (own-property guard; argv-safe; never throws to the renderer).
+  // Data calls → onboarding-bridge.js (explicit renderer allowlist; argv-safe; never throws to the renderer).
   ipcMain.handle('rp', async (_e, msg) => {
     const method = msg && msg.method
-    if (!method || !Object.prototype.hasOwnProperty.call(bridge, method)) {
-      return { error: 'unknown method: ' + method }
+    if (!method || !RENDERER_METHODS.has(method)) {
+      return { error: 'unknown method' }
     }
     const fn = bridge[method]
-    if (typeof fn !== 'function') return { error: 'unknown method: ' + method }
+    if (typeof fn !== 'function') return { error: 'unknown method' }
     try {
       const args = Array.isArray(msg.args) ? msg.args : []
       return await fn.apply(bridge, args)
@@ -229,7 +245,6 @@ function wireIpc(ipcMain, onComplete) {
   // Completion → close the onboarding window and hand control back to electron-main to open the
   // workbench (SAME process; no second app, no app.quit). onComplete() is provided by the hook.
   ipcMain.handle('onboarding:complete', () => {
-    _completed = true
     try {
       if (telemetry && telemetry.EVENTS) {
         if (telemetry.claimFirstLaunchOnce && telemetry.claimFirstLaunchOnce()) {
@@ -247,7 +262,6 @@ function wireIpc(ipcMain, onComplete) {
 }
 
 let _win = null
-let _completed = false
 
 /**
  * Open the pre-workbench onboarding BrowserWindow (loads the onboarding-webview UI). The IDE's
@@ -298,7 +312,7 @@ function openOnboardingWindow({ electron, onComplete, startStep } = {}) {
 
   const normalizedStartStep = normalizeStartStep(startStep)
   if (normalizedStartStep) {
-    _win.loadFile(WEBVIEW_INDEX, { query: { startStep: normalizedStartStep, engine: configuredEngine() } })
+    _win.loadFile(WEBVIEW_INDEX, { query: { startStep: normalizedStartStep } })
   } else {
     _win.loadFile(WEBVIEW_INDEX)
   }
