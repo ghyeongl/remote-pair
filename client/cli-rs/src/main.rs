@@ -59,6 +59,19 @@ fn main() -> ExitCode {
     match cmd {
         "--version" | "-V" | "version" => {
             println!("xpair {VERSION}");
+            if args.get(1).is_some_and(|arg| arg == "--verbose") {
+                println!(
+                    "bridge-serving-marker {}",
+                    host_permissions::BRIDGE_SERVING_MARKER
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        "__caps" => {
+            println!(
+                "bridge-serving-marker {}",
+                host_permissions::BRIDGE_SERVING_MARKER
+            );
             ExitCode::SUCCESS
         }
         "--help" | "-h" | "help" => {
@@ -141,7 +154,13 @@ fn cmd_status(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let aqua_sock = resolve_aqua_sock();
+    let aqua_sock = match resolve_aqua_sock(&path) {
+        Ok(aqua_sock) => aqua_sock,
+        Err(err) => {
+            eprintln!("xpair status: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let status_json = match fs::read_to_string(status::status_file_path(&path)) {
         Ok(status_json) => Some(status_json),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
@@ -322,7 +341,13 @@ fn cmd_ls(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let aqua_sock = resolve_aqua_sock();
+    let aqua_sock = match resolve_aqua_sock(&path) {
+        Ok(aqua_sock) => aqua_sock,
+        Err(err) => {
+            eprintln!("xpair ls: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let transport = SshTransport;
 
     if json {
@@ -690,7 +715,9 @@ fn run_tool_or_windows_gate(verb: &str, tool: &str, args: &[String]) -> ExitCode
     if Os::current() == Os::Windows {
         match verb {
             "editor" | "desktop" => eprintln!("xpair {verb}: IDE-driven on Windows"),
-            "mount" => eprintln!("xpair mount: replaced by UNC mappings on Windows"),
+            "mount" => eprintln!(
+                "xpair mount: Windows uses UNC paths — add the mapping with: xpair map add <UNC-or-drive path> <host path>"
+            ),
             _ => eprintln!("xpair {verb}: unavailable on Windows"),
         }
         return ExitCode::from(2);
@@ -698,8 +725,13 @@ fn run_tool_or_windows_gate(verb: &str, tool: &str, args: &[String]) -> ExitCode
     tools::run_passthrough(tool, args)
 }
 
-fn resolve_aqua_sock() -> String {
-    non_empty_env("AQUA_SOCK").unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string())
+fn resolve_aqua_sock(path: &Path) -> std::io::Result<String> {
+    if let Some(aqua_sock) = non_empty_env("AQUA_SOCK") {
+        return Ok(aqua_sock);
+    }
+    Ok(config::get(path, "AQUA_SOCK")?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()))
 }
 
 fn non_empty_env(key: &str) -> Option<String> {

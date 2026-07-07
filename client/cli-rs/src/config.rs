@@ -53,16 +53,21 @@ pub fn default_local_bin() -> io::Result<PathBuf> {
     if let Some(local_bin) = non_empty_env("LOCAL_BIN") {
         return Ok(PathBuf::from(local_bin));
     }
+    let client_env = default_client_env_path()?;
+    if let Some(local_bin) = get(&client_env, "LOCAL_BIN")?.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(local_bin));
+    }
 
     Ok(home_dir()?.join(".local").join("bin"))
 }
 
-/// Read one config key from `path`.
+/// Read one effective config key from the bash-parity env-file stack.
 ///
-/// Missing files behave like an empty config, matching the bash startup path that sources
-/// role files only when they exist.
+/// Runtime sourcing order is `common.env` before `client.env`; later assignments win. When
+/// the default client env is absent, the legacy host-dir `{common,client}.env` fallback is
+/// used exactly like `client/cli/xpair`.
 pub fn get(path: impl AsRef<Path>, key: &str) -> io::Result<Option<String>> {
-    let lines = read_lines(path.as_ref())?;
+    let lines = read_lookup_lines(path.as_ref())?;
     Ok(lines.into_iter().rev().find_map(|line| match line {
         Line::Pair { key: k, value, .. } if k == key => Some(value),
         _ => None,
@@ -78,7 +83,7 @@ pub fn set(path: impl AsRef<Path>, key: &str, value: &str) -> io::Result<()> {
     validate_env_key(key)?;
 
     let path = path.as_ref();
-    let lines = read_lines(path)?;
+    let lines = read_file_lines(path)?;
     let mut out = Vec::with_capacity(lines.len() + 1);
     let mut replaced = false;
 
@@ -114,7 +119,7 @@ pub fn set(path: impl AsRef<Path>, key: &str, value: &str) -> io::Result<()> {
 /// If a key appears more than once, the returned list includes each parsed assignment. The
 /// writer removes duplicates only for the key it is updating.
 pub fn list(path: impl AsRef<Path>) -> io::Result<Vec<(String, String)>> {
-    Ok(read_lines(path.as_ref())?
+    Ok(read_file_lines(path.as_ref())?
         .into_iter()
         .filter_map(|line| match line {
             Line::Pair { key, value, .. } => Some((key, value)),
@@ -203,24 +208,38 @@ fn resolve_raw_maps(path: &Path) -> io::Result<String> {
     Ok(get(path, "SYNC_ROOTS")?.unwrap_or_default())
 }
 
-fn read_lines(path: &Path) -> io::Result<Vec<Line>> {
+fn read_lookup_lines(path: &Path) -> io::Result<Vec<Line>> {
+    let mut lines = Vec::new();
+    for path in lookup_env_paths(path)? {
+        lines.extend(read_file_lines(&path)?);
+    }
+    Ok(lines)
+}
+
+fn read_file_lines(path: &Path) -> io::Result<Vec<Line>> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            if let Some(legacy_path) = legacy_client_env_for(path)? {
-                match fs::read_to_string(&legacy_path) {
-                    Ok(text) => text,
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-                    Err(err) => return Err(err),
-                }
-            } else {
-                return Ok(Vec::new());
-            }
-        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err),
     };
 
     Ok(text.lines().map(parse_line).collect())
+}
+
+fn lookup_env_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let common = |env_path: &Path| {
+        env_path
+            .parent()
+            .map(|parent| parent.join("common.env"))
+            .unwrap_or_else(|| PathBuf::from("common.env"))
+    };
+
+    if use_legacy_host_env_stack(path)? {
+        let host_client = default_rp_dir()?.join("client.env");
+        return Ok(vec![common(&host_client), host_client]);
+    }
+
+    Ok(vec![common(path), path.to_path_buf()])
 }
 
 fn parse_line(line: &str) -> Line {
@@ -536,9 +555,9 @@ fn default_client_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".xpair").join("client"))
 }
 
-fn legacy_client_env_for(path: &Path) -> io::Result<Option<PathBuf>> {
+fn use_legacy_host_env_stack(path: &Path) -> io::Result<bool> {
     if non_empty_env("CLIENT_ENV").is_some() {
-        return Ok(None);
+        return Ok(false);
     }
 
     let default_client_env = if let Some(rp_client_dir) = non_empty_env("RP_CLIENT_DIR") {
@@ -548,10 +567,10 @@ fn legacy_client_env_for(path: &Path) -> io::Result<Option<PathBuf>> {
     };
 
     if path != default_client_env {
-        return Ok(None);
+        return Ok(false);
     }
 
-    Ok(Some(default_rp_dir()?.join("client.env")))
+    Ok(!path.is_file())
 }
 
 fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
@@ -569,9 +588,12 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct TestPath {
         path: PathBuf,
@@ -617,6 +639,70 @@ mod tests {
                 }
             }
         }
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> TestDir {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "xpair-config-test-{}-{nonce}-{id}-{name}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir(&path).unwrap();
+            TestDir { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(values: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let saved = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn with_env<T>(values: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set(values);
+        f()
     }
 
     #[test]
@@ -699,6 +785,70 @@ mod tests {
 
         assert_eq!(get(&tmp.path, "REMOTE_HOST").unwrap(), None);
         assert_eq!(list(&tmp.path).unwrap(), Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn get_sources_common_before_client_env() {
+        let tmp = TestDir::new("common-before-client");
+        let client_env = tmp.path.join("client.env");
+        fs::write(
+            tmp.path.join("common.env"),
+            "LOCAL_BIN=/opt/xpair/bin\nAQUA_SOCK=/tmp/common.sock\n",
+        )
+        .unwrap();
+        fs::write(&client_env, "AQUA_SOCK=/tmp/client.sock\n").unwrap();
+
+        assert_eq!(
+            get(&client_env, "LOCAL_BIN").unwrap(),
+            Some("/opt/xpair/bin".to_string())
+        );
+        assert_eq!(
+            get(&client_env, "AQUA_SOCK").unwrap(),
+            Some("/tmp/client.sock".to_string())
+        );
+        assert_eq!(
+            list(&client_env).unwrap(),
+            vec![("AQUA_SOCK".to_string(), "/tmp/client.sock".to_string())]
+        );
+    }
+
+    #[test]
+    fn get_uses_legacy_host_env_stack_when_default_client_env_is_absent() {
+        with_env(
+            &[
+                ("CLIENT_ENV", None),
+                ("RP_CLIENT_DIR", None),
+                ("RP_HOST_DIR", None),
+                ("RP_DIR", None),
+                ("USERPROFILE", None),
+                ("HOMEDRIVE", None),
+                ("HOMEPATH", None),
+            ],
+            || {
+                let tmp = TestDir::new("legacy-host-stack");
+                let home = tmp.path.join("home");
+                let host_dir = home.join(".xpair").join("host");
+                fs::create_dir_all(&host_dir).unwrap();
+                fs::write(host_dir.join("common.env"), "LOCAL_BIN=/legacy/bin\n").unwrap();
+                fs::write(
+                    host_dir.join("client.env"),
+                    "LOCAL_BIN=/legacy/client/bin\nREMOTE_HOST=legacy-host\n",
+                )
+                .unwrap();
+                let home_s = home.to_string_lossy().into_owned();
+                let _guard = EnvGuard::set(&[("HOME", Some(&home_s))]);
+                let client_env = default_client_env_path().unwrap();
+
+                assert_eq!(
+                    get(&client_env, "LOCAL_BIN").unwrap(),
+                    Some("/legacy/client/bin".to_string())
+                );
+                assert_eq!(
+                    get(&client_env, "REMOTE_HOST").unwrap(),
+                    Some("legacy-host".to_string())
+                );
+            },
+        );
     }
 
     #[test]

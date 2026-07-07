@@ -14,6 +14,7 @@ pub type FolderMap = (String, String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MapError {
     WslPath { path: String },
+    MappingRequired { path: String },
 }
 
 impl fmt::Display for MapError {
@@ -22,6 +23,10 @@ impl fmt::Display for MapError {
             MapError::WslPath { path } => {
                 write!(f, "unsupported WSL path for native xpair client: {path}")
             }
+            MapError::MappingRequired { path } => write!(
+                f,
+                "Windows launch path is outside FOLDER_MAPS: {path}; add the mapping with: xpair map add <UNC-or-drive path> <host path>"
+            ),
         }
     }
 }
@@ -81,6 +86,9 @@ pub fn map_to_host_for_os(
         }
     }
 
+    if best_client.is_empty() && os == Os::Windows {
+        return Err(MapError::MappingRequired { path });
+    }
     if best_client.is_empty() {
         return Ok(to_posix_path(&path));
     }
@@ -319,8 +327,20 @@ mod tests {
     fn windows_case_insensitive_prefix_still_requires_boundary() {
         let maps = parse_maps(r"C:\Users\Alice\Project::/host/project");
         assert_eq!(
-            map_to_host_for_os(r"c:\users\alice\projectile", &maps, Os::Windows).unwrap(),
-            "C:/users/alice/projectile"
+            map_to_host_for_os(r"c:\users\alice\projectile", &maps, Os::Windows),
+            Err(MapError::MappingRequired {
+                path: "C:/users/alice/projectile".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn windows_requires_mapping_instead_of_identity_fallback() {
+        assert_eq!(
+            map_to_host_for_os(r"C:\Users\me\project", &[], Os::Windows),
+            Err(MapError::MappingRequired {
+                path: r"C:/Users/me/project".to_string(),
+            })
         );
     }
 

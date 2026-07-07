@@ -363,7 +363,13 @@ fn run_local_macos(path: &Path, host: &str, req: &LaunchReq) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let aqua_sock = resolve_aqua_sock();
+    let aqua_sock = match resolve_aqua_sock(path) {
+        Ok(aqua_sock) => aqua_sock,
+        Err(err) => {
+            eprintln!("xpair launch: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let engine = match resolve_engine(path, req) {
         Ok(engine) => engine,
         Err(err) => {
@@ -419,13 +425,6 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         return ExitCode::from(1);
     }
 
-    let dir = match absolutize_existing_dir(&req.dir) {
-        Ok(dir) => dir,
-        Err(_) => {
-            eprintln!("folder not found");
-            return ExitCode::from(1);
-        }
-    };
     let raw_maps = match resolve_raw_maps(path) {
         Ok(raw_maps) => raw_maps,
         Err(err) => {
@@ -433,7 +432,24 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
             return ExitCode::from(1);
         }
     };
-    let pairs = parse_maps(&raw_maps);
+    let raw_modes = match resolve_raw_modes(path) {
+        Ok(raw_modes) => raw_modes,
+        Err(err) => {
+            eprintln!("xpair launch: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mount_state =
+        ensure_launch_arg_mount_best_effort(path, &req.dir, host, &raw_maps, &raw_modes);
+
+    let dir = match absolutize_existing_dir(&mount_state.dir) {
+        Ok(dir) => dir,
+        Err(_) => {
+            eprintln!("folder not found");
+            return ExitCode::from(1);
+        }
+    };
+    let pairs = parse_maps(&mount_state.raw_maps);
     let client_dir = dir.to_string_lossy().into_owned();
     let host_dir = match map_to_host_for_os(&client_dir, &pairs, Os::current()) {
         Ok(host_dir) => host_dir,
@@ -445,7 +461,13 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
     // Deferred: the interactive unmapped-dir host probe from `client/cli/xpair:919-953`.
     // The Rust path maps deterministically and lets the remote tmux setup surface failures.
 
-    let aqua_sock = resolve_aqua_sock();
+    let aqua_sock = match resolve_aqua_sock(path) {
+        Ok(aqua_sock) => aqua_sock,
+        Err(err) => {
+            eprintln!("xpair launch: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let session = remote_session_name_for(host, &host_dir);
     let transport = SshTransport;
     let engine = match resolve_remote_engine(path, req, host, &transport) {
@@ -481,6 +503,342 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         &session,
         &session::pairing_identity_args(),
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaunchMountState {
+    dir: String,
+    raw_maps: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MountCommandOutput {
+    success: bool,
+    output: String,
+}
+
+struct LaunchMountEnsure<'a> {
+    os: Os,
+    target: &'a str,
+    host: &'a str,
+    raw_maps: &'a str,
+    raw_modes: &'a str,
+    mount_tool: Option<PathBuf>,
+}
+
+fn ensure_launch_arg_mount_best_effort(
+    path: &Path,
+    target: &str,
+    host: &str,
+    raw_maps: &str,
+    raw_modes: &str,
+) -> LaunchMountState {
+    let tool = resolve_xpair_mount_tool(path);
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
+    ensure_launch_arg_mount_best_effort_with(
+        LaunchMountEnsure {
+            os: Os::current(),
+            target,
+            host,
+            raw_maps,
+            raw_modes,
+            mount_tool: tool,
+        },
+        |host_path| discover_mountpoint_for_hostpath(host_path, host),
+        run_mount_tool,
+        &mut stdout,
+        &mut stderr,
+    )
+}
+
+fn ensure_launch_arg_mount_best_effort_with<D, M, W, E>(
+    input: LaunchMountEnsure<'_>,
+    mut discover_mountpoint: D,
+    mut mount_host_path: M,
+    out: &mut W,
+    err: &mut E,
+) -> LaunchMountState
+where
+    D: FnMut(&str) -> Option<String>,
+    M: FnMut(&Path, &str) -> io::Result<MountCommandOutput>,
+    W: Write,
+    E: Write,
+{
+    let mut state = LaunchMountState {
+        dir: input.target.to_string(),
+        raw_maps: input.raw_maps.to_string(),
+    };
+    if input.os != Os::Mac
+        || !input.target.starts_with("/Volumes/")
+        || input.host.is_empty()
+        || input.raw_maps.is_empty()
+    {
+        return state;
+    }
+
+    for (client_path, host_path) in parse_maps(input.raw_maps) {
+        if !path_eq_or_child(input.target, &client_path) {
+            continue;
+        }
+        if map_mode_of(&client_path, input.raw_modes, input.host) != "mount" {
+            continue;
+        }
+
+        if let Some(mountpoint) = discover_mountpoint(&host_path) {
+            apply_mountpoint_override(
+                &mut state,
+                input.raw_modes,
+                input.target,
+                &client_path,
+                &mountpoint,
+            );
+            return state;
+        }
+
+        let Some(tool) = input.mount_tool.as_deref() else {
+            let _ = writeln!(
+                err,
+                "warning: xpair-mount not found; cannot ensure mount-method folder map before launch"
+            );
+            return state;
+        };
+
+        let expected = expected_mountpoint(&host_path);
+        match mount_host_path(tool, &host_path) {
+            Ok(MountCommandOutput {
+                success: true,
+                output,
+            }) => {
+                if !output.is_empty() {
+                    let _ = write!(out, "{output}");
+                    if !output.ends_with('\n') {
+                        let _ = writeln!(out);
+                    }
+                }
+                let mountpoint = mountpoint_from_mount_output(&output)
+                    .or_else(|| discover_mountpoint(&host_path));
+                if let Some(mountpoint) = mountpoint {
+                    apply_mountpoint_override(
+                        &mut state,
+                        input.raw_modes,
+                        input.target,
+                        &client_path,
+                        &mountpoint,
+                    );
+                }
+            }
+            Ok(MountCommandOutput { output, .. }) => {
+                let _ = writeln!(
+                    err,
+                    "warning: could not mount {host_path} at {expected} before launch; continuing"
+                );
+                if !output.is_empty() {
+                    let _ = write!(err, "{output}");
+                    if !output.ends_with('\n') {
+                        let _ = writeln!(err);
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    err,
+                    "warning: could not mount {host_path} at {expected} before launch; continuing"
+                );
+                let _ = writeln!(err, "{error}");
+            }
+        }
+        return state;
+    }
+
+    state
+}
+
+fn apply_mountpoint_override(
+    state: &mut LaunchMountState,
+    raw_modes: &str,
+    target: &str,
+    client_path: &str,
+    mountpoint: &str,
+) {
+    let (raw_maps, _raw_modes) =
+        replace_mount_mapping_client_path(&state.raw_maps, raw_modes, client_path, mountpoint);
+    state.raw_maps = raw_maps;
+    if path_eq_or_child(target, client_path) {
+        state.dir = format!("{mountpoint}{}", &target[client_path.len()..]);
+    }
+}
+
+fn replace_mount_mapping_client_path(
+    raw_maps: &str,
+    raw_modes: &str,
+    old: &str,
+    new: &str,
+) -> (String, String) {
+    if old.is_empty() || new.is_empty() || old == new {
+        return (raw_maps.to_string(), raw_modes.to_string());
+    }
+
+    let maps = parse_maps(raw_maps)
+        .into_iter()
+        .map(|(client, host)| {
+            let client = if client == old {
+                new.to_string()
+            } else {
+                client
+            };
+            format!("{client}::{host}")
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let modes = parse_maps(raw_modes)
+        .into_iter()
+        .map(|(client, mode)| {
+            let client = if client == old {
+                new.to_string()
+            } else {
+                client
+            };
+            format!("{client}::{mode}")
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    (maps, modes)
+}
+
+fn map_mode_of(client_path: &str, raw_modes: &str, host: &str) -> String {
+    parse_maps(raw_modes)
+        .into_iter()
+        .find(|(client, _)| client == client_path)
+        .map(|(_, mode)| mode)
+        .unwrap_or_else(|| infer_launch_map_method(client_path, host))
+}
+
+fn infer_launch_map_method(client_path: &str, host: &str) -> String {
+    if !client_path.starts_with("/Volumes/") || host.is_empty() {
+        return "sync".to_string();
+    }
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let Some(mount_output) = mount_output() else {
+        return "sync".to_string();
+    };
+    for line in mount_output.lines() {
+        if !line.contains(" (smbfs") {
+            continue;
+        }
+        let Some((source, rest)) = line.split_once(" on ") else {
+            continue;
+        };
+        let Some((mountpoint, _)) = rest.split_once(" (smbfs") else {
+            continue;
+        };
+        let source_matches = source.contains(&format!("@{host}/"))
+            || source
+                .strip_prefix("//")
+                .is_some_and(|source| source.starts_with(&format!("{host}/")));
+        if source_matches && path_eq_or_child(client_path, mountpoint) {
+            return "mount".to_string();
+        }
+    }
+    "sync".to_string()
+}
+
+fn resolve_xpair_mount_tool(path: &Path) -> Option<PathBuf> {
+    let local_bin = config::default_local_bin().ok();
+    let rp_bin = path.parent().map(|parent| parent.join("bin"));
+    for dir in [local_bin.as_deref(), rp_bin.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let candidate = dir.join("xpair-mount");
+        if program_present(&candidate) {
+            return Some(candidate);
+        }
+    }
+    find_on_path("xpair-mount")
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if program_present(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn run_mount_tool(tool: &Path, host_path: &str) -> io::Result<MountCommandOutput> {
+    let out = Command::new(tool)
+        .args(["--backend", "smb", "mount", host_path])
+        .stdin(Stdio::null())
+        .output()?;
+    let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+    output.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok(MountCommandOutput {
+        success: out.status.success(),
+        output,
+    })
+}
+
+fn mountpoint_from_mount_output(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("Mountpoint:"))
+        .map(str::trim)
+        .rfind(|mountpoint| !mountpoint.is_empty())
+        .map(str::to_string)
+}
+
+fn discover_mountpoint_for_hostpath(host_path: &str, host: &str) -> Option<String> {
+    let share = share_name_for_hostpath(host_path);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let mount_output = mount_output()?;
+    for line in mount_output.lines() {
+        if !line.contains(" (smbfs") {
+            continue;
+        }
+        let Some((source, rest)) = line.split_once(" on ") else {
+            continue;
+        };
+        let Some((mountpoint, _)) = rest.split_once(" (smbfs") else {
+            continue;
+        };
+        let source_matches = source.contains(&format!("@{host}/{share}"))
+            || source
+                .strip_prefix("//")
+                .is_some_and(|source| source.starts_with(&format!("{host}/{share}")));
+        if source_matches {
+            return Some(mountpoint.to_string());
+        }
+    }
+    None
+}
+
+fn expected_mountpoint(host_path: &str) -> String {
+    let root = non_empty_env("MOUNTS_ROOT").unwrap_or_else(|| "/Volumes".to_string());
+    format!("{root}/{}", share_name_for_hostpath(host_path))
+}
+
+fn share_name_for_hostpath(host_path: &str) -> String {
+    posix_basename(host_path)
+}
+
+fn mount_output() -> Option<String> {
+    Command::new("mount")
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn path_eq_or_child(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn remote_has_session_cmd(aqua_sock: &str, session: &str) -> String {
@@ -1012,8 +1370,20 @@ fn resolve_raw_maps(path: &Path) -> std::io::Result<String> {
     Ok(config::get(path, "SYNC_ROOTS")?.unwrap_or_default())
 }
 
-fn resolve_aqua_sock() -> String {
-    non_empty_env("AQUA_SOCK").unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string())
+fn resolve_raw_modes(path: &Path) -> std::io::Result<String> {
+    if let Some(raw_modes) = non_empty_env("FOLDER_MAP_MODES") {
+        return Ok(raw_modes);
+    }
+    Ok(config::get(path, "FOLDER_MAP_MODES")?.unwrap_or_default())
+}
+
+fn resolve_aqua_sock(path: &Path) -> io::Result<String> {
+    if let Some(aqua_sock) = non_empty_env("AQUA_SOCK") {
+        return Ok(aqua_sock);
+    }
+    Ok(config::get(path, "AQUA_SOCK")?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()))
 }
 
 fn resolve_tmux_aqua_bin(path: &Path) -> io::Result<String> {
@@ -1395,6 +1765,101 @@ mod tests {
             Engine::Shell
         );
         assert!(transport.calls().is_empty());
+    }
+
+    #[test]
+    fn mount_method_launch_rewrites_requested_dir_after_successful_mount() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut mount_calls = Vec::new();
+
+        let state = ensure_launch_arg_mount_best_effort_with(
+            LaunchMountEnsure {
+                os: Os::Mac,
+                target: "/Volumes/Old/sub",
+                host: "mac.local",
+                raw_maps: "/Volumes/Old::/Users/me/Project",
+                raw_modes: "/Volumes/Old::mount",
+                mount_tool: Some(PathBuf::from("/opt/xpair/xpair-mount")),
+            },
+            |_| None,
+            |tool, host_path| {
+                mount_calls.push((tool.to_string_lossy().into_owned(), host_path.to_string()));
+                Ok(MountCommandOutput {
+                    success: true,
+                    output: "Mountpoint: /Volumes/Project\n".to_string(),
+                })
+            },
+            &mut out,
+            &mut err,
+        );
+
+        assert_eq!(state.dir, "/Volumes/Project/sub");
+        assert_eq!(state.raw_maps, "/Volumes/Project::/Users/me/Project");
+        assert_eq!(
+            mount_calls,
+            [(
+                "/opt/xpair/xpair-mount".to_string(),
+                "/Users/me/Project".to_string()
+            )]
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Mountpoint: /Volumes/Project\n"
+        );
+        assert_eq!(String::from_utf8(err).unwrap(), "");
+    }
+
+    #[test]
+    fn mount_method_launch_uses_existing_discovered_mountpoint_without_tool() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let state = ensure_launch_arg_mount_best_effort_with(
+            LaunchMountEnsure {
+                os: Os::Mac,
+                target: "/Volumes/Old",
+                host: "mac.local",
+                raw_maps: "/Volumes/Old::/Users/me/Project",
+                raw_modes: "/Volumes/Old::mount",
+                mount_tool: None,
+            },
+            |_| Some("/Volumes/Project".to_string()),
+            |_, _| panic!("mount tool should not run when discovery succeeds"),
+            &mut out,
+            &mut err,
+        );
+
+        assert_eq!(state.dir, "/Volumes/Project");
+        assert_eq!(state.raw_maps, "/Volumes/Project::/Users/me/Project");
+        assert_eq!(String::from_utf8(out).unwrap(), "");
+        assert_eq!(String::from_utf8(err).unwrap(), "");
+    }
+
+    #[test]
+    fn mount_method_launch_skips_non_macos_clients() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let state = ensure_launch_arg_mount_best_effort_with(
+            LaunchMountEnsure {
+                os: Os::Windows,
+                target: "/Volumes/Old",
+                host: "mac.local",
+                raw_maps: "/Volumes/Old::/Users/me/Project",
+                raw_modes: "/Volumes/Old::mount",
+                mount_tool: Some(PathBuf::from("/opt/xpair/xpair-mount")),
+            },
+            |_| panic!("discovery should be skipped"),
+            |_, _| panic!("mount should be skipped"),
+            &mut out,
+            &mut err,
+        );
+
+        assert_eq!(state.dir, "/Volumes/Old");
+        assert_eq!(state.raw_maps, "/Volumes/Old::/Users/me/Project");
+        assert_eq!(String::from_utf8(out).unwrap(), "");
+        assert_eq!(String::from_utf8(err).unwrap(), "");
     }
 
     #[test]

@@ -19,6 +19,9 @@ const REMOTE_STATUS_CMD: &str = "cat ~/.xpair/host/logs/status.json 2>/dev/null"
 const NO_HOST_ERR: &str = "no host";
 const NO_STATUS_ERR: &str = "no status.json (host app not running?)";
 const BAD_STATUS_ERR: &str = "bad status.json";
+/// Consumed by onboarding-bridge `cliSupportsServing()` source scan until a
+/// dedicated capability verb exists (cutover bridge). Do not remove.
+pub const BRIDGE_SERVING_MARKER: &str = "d.get(\"serving\")";
 
 /// Real SSH transport for this advisory command.
 ///

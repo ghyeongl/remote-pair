@@ -6,8 +6,9 @@
 //! [`Transport::ssh_exec`] call. The real transport passes
 //! [`platform::Os::ssh_mux_neutralizer_args`] on Windows so ambient mux config cannot leak in.
 //!
-//! Deferred, by design: the non-bootstrap signed `.app` scp staging path, askpass/password-pipe
-//! authentication, and onboarding recovery. Those paths must not be faked in the native port.
+//! Divergence from bash's non-bootstrap path: a native client may not have a bundled signed
+//! macOS `.app` to stage, so the host downloads the release `XpairHost.zip` artifact itself and
+//! installs it over SSH. The `--bootstrap` path remains the pinned script path.
 
 use std::cell::Cell;
 use std::fs;
@@ -480,14 +481,9 @@ where
             return code;
         }
     } else {
-        // DEFERRED: the bash path at `client/cli/xpair:1934-1961` stages a signed `.app`
-        // with scp plus shared install resources. The native port has no portable signed-app
-        // staging flow yet, and must not fake a host install.
-        let _ = writeln!(
-            err,
-            "install-host: non-bootstrap signed-app install is not ported in the native client; use --bootstrap --sha256 <hex> on this platform"
-        );
-        return ExitCode::from(1);
+        if let Err(code) = run_release_download_install(settings, &target, transport, err) {
+            return code;
+        }
     }
 
     finish_install(req, settings, client_env_path, transport, io, out, err)
@@ -560,6 +556,170 @@ where
             Err(ExitCode::from(1))
         }
     }
+}
+
+fn run_release_download_install<T, E>(
+    settings: &RuntimeSettings,
+    target: &str,
+    transport: &T,
+    err: &mut E,
+) -> Result<(), ExitCode>
+where
+    T: Transport + ?Sized,
+    E: Write,
+{
+    let remote_cmd = build_release_download_install_remote_cmd(settings);
+    match transport.ssh_exec(target, &remote_cmd) {
+        Ok(Output { code: 0, .. }) => Ok(()),
+        Ok(Output { code, stdout }) => {
+            let detail = stdout.trim();
+            if detail.is_empty() {
+                let _ = writeln!(err, "release install failed (exit={code})");
+            } else {
+                let _ = writeln!(err, "release install failed (exit={code})\n{detail}");
+            }
+            Err(ExitCode::from(1))
+        }
+        Err(error) => {
+            let _ = writeln!(err, "release install failed: {error}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+fn build_release_download_install_remote_cmd(settings: &RuntimeSettings) -> String {
+    let script = release_download_install_script();
+    let delimiter = heredoc_delimiter(script);
+    let mut cmd = format!(
+        "APP_NAME={} BUNDLE_PREFIX={} GH_REPO={}",
+        remote_quote::posix_single_quote(&settings.app_name),
+        remote_quote::posix_single_quote(&settings.bundle_prefix),
+        remote_quote::posix_single_quote(&settings.gh_repo),
+    );
+    if let Some(channel) = &settings.update_channel {
+        cmd.push_str(" RP_UPDATE_CHANNEL=");
+        cmd.push_str(&remote_quote::posix_single_quote(channel));
+    }
+    cmd.push_str(" /bin/bash -s <<'");
+    cmd.push_str(&delimiter);
+    cmd.push_str("'\n");
+    cmd.push_str(script);
+    if !script.ends_with('\n') {
+        cmd.push('\n');
+    }
+    cmd.push_str(&delimiter);
+    cmd.push('\n');
+    cmd
+}
+
+fn release_download_install_script() -> &'static str {
+    r#"set -euo pipefail
+app="${APP_NAME:-XpairHost}"
+bundle="${BUNDLE_PREFIX:-com.x10lab.xpair-host}"
+repo="${GH_REPO:-x10lab/xpair}"
+tmp="${TMPDIR:-/tmp}/xpair-host-release-install.$$"
+rm -rf "$tmp"
+mkdir -p "$tmp/extract"
+trap 'rm -rf "$tmp"' EXIT
+zip="$tmp/${app}.zip"
+
+channel="${RP_UPDATE_CHANNEL:-}"
+if [ -z "$channel" ] && command -v defaults >/dev/null 2>&1; then
+  channel="$(defaults read "$bundle" RPUpdateChannel 2>/dev/null || true)"
+fi
+channel="$(printf '%s' "$channel" | tr '[:upper:]' '[:lower:]')"
+
+if [ "$channel" = alpha ]; then
+  api="https://api.github.com/repos/${repo}/releases?per_page=30"
+  if command -v python3 >/dev/null 2>&1; then
+    py=python3
+  elif [ -x /usr/bin/python3 ]; then
+    py=/usr/bin/python3
+  else
+    printf 'alpha release lookup requires python3 on the host\n' >&2
+    exit 1
+  fi
+  url="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H "User-Agent: ${app}/install-host" "$api" | "$py" -c '
+import json, re, sys
+app = sys.argv[1].lower()
+data = json.load(sys.stdin)
+def key(tag):
+    tag = tag[1:] if tag.startswith("v") else tag
+    parts = tag.split(".")
+    if len(parts) != 3:
+        return (-1, -1, -1, -1)
+    match = re.match(r"^([0-9]+)(?:a([0-9]+))?$", parts[2])
+    if not match:
+        return (-1, -1, -1, -1)
+    alpha = int(match.group(2)) if match.group(2) else 2147483647
+    return (int(parts[0]), int(parts[1]), int(match.group(1)), alpha)
+best = None
+for rel in data:
+    tag = str(rel.get("tag_name") or "")
+    zips = []
+    for asset in rel.get("assets") or []:
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        if name.endswith(".zip") and url:
+            zips.append((name, url))
+    if not zips:
+        continue
+    preferred = [asset for asset in zips if app in asset[0].lower()]
+    name, url = (preferred or zips)[0]
+    candidate = (key(tag), url)
+    if best is None or candidate[0] > best[0]:
+        best = candidate
+if best is None:
+    sys.exit(2)
+print(best[1])
+' "$app")" || { printf 'could not resolve alpha release asset for %s\n' "$app" >&2; exit 1; }
+else
+  url="https://github.com/${repo}/releases/latest/download/${app}.zip"
+fi
+
+[ -n "$url" ] || { printf 'release asset URL not resolved\n' >&2; exit 1; }
+curl -fsSL "$url" -o "$zip"
+[ -s "$zip" ] || { printf 'downloaded release artifact is empty: %s\n' "$url" >&2; exit 1; }
+/usr/bin/ditto -x -k "$zip" "$tmp/extract"
+src="$tmp/extract/${app}.app"
+[ -d "$src" ] || { printf 'release zip did not contain %s.app\n' "$app" >&2; exit 1; }
+
+copy_app() {
+  _src="$1"; _dest="$2"
+  rm -rf "$_dest" 2>/dev/null || true
+  /usr/bin/ditto "$_src" "$_dest"
+}
+
+install_root="/Applications"
+if mkdir -p "$install_root" 2>/dev/null && touch "$install_root/.xpair-write-test" 2>/dev/null; then
+  rm -f "$install_root/.xpair-write-test"
+else
+  install_root="$HOME/Applications"
+  mkdir -p "$install_root"
+fi
+dest="$install_root/${app}.app"
+if ! copy_app "$src" "$dest"; then
+  if [ "$install_root" = /Applications ]; then
+    install_root="$HOME/Applications"
+    mkdir -p "$install_root"
+    dest="$install_root/${app}.app"
+    copy_app "$src" "$dest"
+  else
+    exit 1
+  fi
+fi
+
+[ -x "$dest/Contents/MacOS/$app" ] || { printf 'installed app executable missing: %s\n' "$dest/Contents/MacOS/$app" >&2; exit 1; }
+xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
+pkill -f "/${app}.app/Contents/MacOS/${app}" 2>/dev/null || true
+sleep 1
+/bin/launchctl kickstart -k "gui/$(id -u)/${bundle}" 2>/dev/null || /usr/bin/open "$dest" 2>/dev/null || /usr/bin/open -a "$app" 2>/dev/null || true
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$HOME/.xpair/host/host.env" ] && break
+  sleep 0.5
+done
+printf '__XPAIR_HOST_APP__:%s\n' "$dest"
+"#
 }
 
 fn finish_install<T, I, W, E>(
@@ -845,6 +1005,7 @@ struct RuntimeSettings {
     ssh_config_path: PathBuf,
     pairing_key_path: PathBuf,
     client_os: Os,
+    update_channel: Option<String>,
 }
 
 impl RuntimeSettings {
@@ -871,6 +1032,8 @@ impl RuntimeSettings {
             ssh_config_path,
             pairing_key_path,
             client_os: Os::current(),
+            update_channel: non_empty_value(client_env_path, "RP_UPDATE_CHANNEL")
+                .map(|channel| channel.to_ascii_lowercase()),
         }
     }
 }
@@ -1731,13 +1894,15 @@ mod tests {
     }
 
     #[test]
-    fn non_bootstrap_uninstalled_path_is_deferred() {
+    fn non_bootstrap_uninstalled_path_downloads_release_on_host() {
         with_env(
             &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
             || {
-                let tmp = TestDir::new("deferred");
+                let tmp = TestDir::new("release-install");
                 let transport = MockTransport::new();
                 transport.push_response(1, "");
+                transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
+                transport.push_response(0, "");
                 let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST");
                 let mut out = Vec::new();
                 let mut err = Vec::new();
@@ -1751,16 +1916,88 @@ mod tests {
                     &mut err,
                 );
 
-                assert_eq!(code, ExitCode::from(1));
-                assert_eq!(transport.calls().len(), 1);
+                assert_eq!(code, ExitCode::SUCCESS);
+                assert_eq!(String::from_utf8(err).unwrap(), "");
+                assert_eq!(String::from_utf8(out).unwrap(), "host set: mac-mini\n");
+                let calls = transport.calls();
+                assert_eq!(calls.len(), 3);
                 assert_eq!(
-                    transport.calls()[0].remote_cmd,
+                    calls[0].remote_cmd,
                     build_idempotency_probe_cmd(DEFAULT_APP_NAME)
                 );
-                assert_eq!(String::from_utf8(out).unwrap(), "");
-                assert!(String::from_utf8(err)
-                    .unwrap()
-                    .contains("use --bootstrap --sha256 <hex> on this platform"));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("https://github.com/${repo}/releases/latest/download/${app}.zip"));
+                assert!(calls[1].remote_cmd.contains("/usr/bin/ditto -x -k"));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("install_root=\"/Applications\""));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("install_root=\"$HOME/Applications\""));
+                assert!(calls[1].remote_cmd.contains("/bin/launchctl kickstart -k"));
+                assert_eq!(
+                    calls[2].remote_cmd,
+                    build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn force_non_bootstrap_skips_probe_and_reinstalls_release() {
+        with_env(
+            &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
+            || {
+                let tmp = TestDir::new("force-release-install");
+                let transport = MockTransport::new();
+                transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
+                transport.push_response(0, "");
+                let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST");
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+
+                let code = run_with_transport(
+                    &strings(&["--host", "mac-mini", "--account", "alice", "--force"]),
+                    &tmp.client_env_path(),
+                    &transport,
+                    &io,
+                    &mut out,
+                    &mut err,
+                );
+
+                assert_eq!(code, ExitCode::SUCCESS);
+                assert_eq!(String::from_utf8(err).unwrap(), "");
+                let calls = transport.calls();
+                assert_eq!(calls.len(), 2);
+                assert!(calls[0].remote_cmd.contains("releases/latest/download"));
+                assert_eq!(
+                    calls[1].remote_cmd,
+                    build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn release_install_honors_alpha_update_channel() {
+        with_env(
+            &[
+                ("REMOTE_HOST", None),
+                ("HOME", Some("C:/Users/tester")),
+                ("USERPROFILE", None),
+                ("RP_UPDATE_CHANNEL", None),
+            ],
+            || {
+                let tmp = TestDir::new("alpha-release-channel");
+                fs::write(tmp.client_env_path(), "RP_UPDATE_CHANNEL=alpha\n").unwrap();
+                let settings = RuntimeSettings::load(&tmp.client_env_path());
+
+                let cmd = build_release_download_install_remote_cmd(&settings);
+
+                assert!(cmd.contains("RP_UPDATE_CHANNEL='alpha'"));
+                assert!(cmd.contains("releases?per_page=30"));
+                assert!(cmd.contains("browser_download_url"));
             },
         );
     }
