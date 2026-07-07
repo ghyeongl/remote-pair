@@ -148,7 +148,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(permHeader)
         for (name, granted) in [("Accessibility", Permissions.axTrusted()),
                                 ("Screen Recording", Permissions.srGranted()),
-                                ("Full Disk", Permissions.fdaGranted())] {
+                                ("Full Disk", Permissions.fdaGranted()),
+                                ("Remote Login", Permissions.loginGranted()),
+                                ("File Sharing", Permissions.sharingGranted())] {
             let row = NSMenuItem(title: "   \(name)  \(granted ? "✓" : "✗")", action: nil, keyEquivalent: "")
             row.isEnabled = false
             menu.addItem(row)

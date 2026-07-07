@@ -869,8 +869,10 @@ cmd_onboard() {
     _ax="$(_jget "$_sj_local" ax)"; _sr="$(_jget "$_sj_local" sr)"
     _fda="$(_jget "$_sj_local" fda)"; _sharing="$(_jget "$_sj_local" sharing)"; _serving="$(_jget "$_sj_local" serving)"
     # Gate on the host's own serving verdict; hosts that predate it omit the field → fall back to AX+SR.
-    if [ "$_serving" = true ] || { [ -z "$_serving" ] && [ "$_ax" = true ] && [ "$_sr" = true ]; }; then
-      ok "Onboarding complete. AX✓ SR✓ FDA✓ File Sharing✓ — ready to serve. Edit later with 'xpair config' / 'xpair map'."
+    if [ "$_serving" = true ]; then
+      ok "Onboarding complete. AX✓ SR✓ FDA✓ Remote Login✓ File Sharing✓ — ready to serve. Edit later with 'xpair config' / 'xpair map'."
+    elif [ -z "$_serving" ] && [ "$_ax" = true ] && [ "$_sr" = true ]; then
+      ok "Onboarding complete. AX✓ SR✓ — computer-use ready (older host: it does not report the File Sharing/serving gate). Edit later with 'xpair config' / 'xpair map'."
     else
       warn "Not done yet (AX=$_ax SR=$_sr FDA=$_fda Sharing=$_sharing): grant Accessibility, Screen Recording, Full Disk Access (System Settings → Privacy & Security) AND File Sharing (System Settings → General → Sharing) for $APP_NAME. Re-run 'xpair onboard' to confirm."
     fi
@@ -1066,7 +1068,7 @@ cmd_status() {
     # `serving` (host allGranted) is the real gate; hosts that predate it omit the field → fall back to AX+SR.
     _srv="$(_jget "$s" serving)"
     { [ "$_srv" = true ] || { [ -z "$_srv" ] && [ "$(_jget "$s" ax)" = true ] && [ "$(_jget "$s" sr)" = true ]; }; } || \
-      printf '%-14s %s\n' "" "⚠ not serving: AX/SR + Full Disk Access (Privacy & Security) and File Sharing (General → Sharing) must all be ✓. The app is running but a required grant is off (this is NOT 'host down')."
+      printf '%-14s %s\n' "" "⚠ not serving: Accessibility, Screen Recording, Full Disk Access (Privacy & Security) + Remote Login and File Sharing (General → Sharing) must ALL be ✓. The app is running but a required grant is off (this is NOT 'host down')."
   elif [ -n "$p" ] || host_up; then
     printf '%-14s %s\n' "permissions" "unknown (no status.json yet — update host app)"
   fi

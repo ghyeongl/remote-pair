@@ -1218,15 +1218,15 @@ const bridge = {
         : `xpair status exited ${r.code}: ${r.err || "no output"}`;
       return { ready: false, bin, err: why };
     }
+    // Runnable is not enough: a CLI too old to convey the host's `serving` verdict would drop it
+    // even from a modern host and slip a not-serving host past the guard's ax/sr fallback. Treat
+    // that as not-ready so the existing installCli path reinstalls the bundled CLI.
+    if (!cliSupportsServing()) {
+      return { ready: false, bin, err: "installed xpair CLI is out of date — reinstall the bundled client CLI" };
+    }
     return { ready: true, bin, err: "" };
   },
 
-  // Feature-detect: is the installed CLI new enough to surface the host's serving verdict? Used by the
-  // launch guard so a stale CLI (that would silently drop `serving`) routes to a reinstall, not past
-  // the ax/sr fallback that is only meant for genuinely older HOSTS.
-  cliSupportsServing() {
-    return cliSupportsServing();
-  },
 
   // CLI auto-install (component ⓪ — the "no dead end" path). cliReady===false used to be a hard wall;
   // instead the onboarding calls this to install the BUNDLED client CLI to ~/.local/bin and proceed.

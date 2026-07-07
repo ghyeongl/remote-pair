@@ -92,7 +92,6 @@ function fakeElectron() {
 function greenBridge(overrides = {}) {
   return {
     cliReady: async () => ({ ready: true, bin: "/tmp/xpair", err: "" }),
-    cliSupportsServing: () => true,
     sshReachable: async () => ({ reachable: true, err: "" }),
     hostAppStatus: async () => ({
       installed: true,
@@ -205,11 +204,6 @@ test("Q0473/Q0493/Q0494 per-launch guard parachutes to the first failing step", 
     assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
       hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
     })), null);
-    // A stale installed CLI would drop `serving` even from a modern host, so its ax/sr-only read
-    // must NOT be trusted — route to WELCOME to reinstall the bundled CLI.
-    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
-      cliSupportsServing: () => false,
-    })), "welcome");
     assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
       hostEngineStatus: async (engine) => {
         assert.equal(engine, "codex", "guard must use the host.env engine status path");

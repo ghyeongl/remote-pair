@@ -155,12 +155,9 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
 
   try {
     const cli = await probeBridge.cliReady()
+    // cliReady is false for a missing, broken, OR out-of-date CLI (one too old to convey the host's
+    // serving verdict) — all route to WELCOME, which reinstalls the bundled CLI via installCli.
     if (!cli || cli.ready !== true) return START_STEP.WELCOME
-    // A CLI too old to convey the host's `serving` verdict would drop it even from a modern host,
-    // letting a not-serving host slip past the ax/sr fallback below. Reinstall the bundled CLI first.
-    if (typeof probeBridge.cliSupportsServing === "function" && probeBridge.cliSupportsServing() === false) {
-      return START_STEP.WELCOME
-    }
   } catch {
     return START_STEP.WELCOME
   }
