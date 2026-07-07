@@ -78,4 +78,4 @@ async function checkSessionAvailableFromCli(runXpairCli, name, opts = {}) {
   return { ...list, ok: true, session };
 }
 
-module.exports = { normalizeSessionList, listSessionsFromCli, checkSessionAvailableFromCli };
+module.exports = { SESSION_NAME_RE, normalizeSessionList, listSessionsFromCli, checkSessionAvailableFromCli };

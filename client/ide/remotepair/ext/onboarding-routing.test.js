@@ -12,6 +12,7 @@ const waitPerm = fs.readFileSync(
   path.join(root, "onboarding-webview/src/components/onboarding/client/StepWaitPerm.tsx"),
   "utf8",
 );
+const i18n = fs.readFileSync(path.join(root, "onboarding-webview/src/lib/i18n.ts"), "utf8");
 const onboardingMain = fs.readFileSync(path.join(root, "onboarding-main.cjs"), "utf8");
 
 function test(name, fn) {
@@ -69,7 +70,10 @@ test("pairing wait step sends the signed request and persists host only after pr
   assert.match(waitPerm, /if \(saved && saved\.code !== 0\) \{[\s\S]*setError\(saved\.err \|\| saved\.out[\s\S]*return;/);
   assert.doesNotMatch(waitPerm, /setHost\(sshTarget\)\.catch/);
   assert.match(waitPerm, /status\.denied[\s\S]*onDeny\(\)/);
-  assert.match(waitPerm, /Host is not broadcasting pairing details/);
+  assert.match(app, /pairingMetaError: meta\.err \|\| t\("wait\.discoveryMissing"\)/);
+  assert.match(waitPerm, /host\.pairingMetaError \|\|[\s\S]*t\("wait\.discoveryMissing"\)/);
+  assert.match(i18n, /"wait\.discoveryMissing": "Host is not discoverable on your network or Tailscale yet\."/);
+  assert.match(i18n, /"wait\.discoveryMissing": "호스트가 아직 같은 네트워크나 Tailscale에서 검색되지 않습니다\."/);
 });
 
 console.log("\nall onboarding routing tests passed");

@@ -81,6 +81,7 @@ const EN: Dict = {
   "wait.descPre": "A prompt should appear on",
   "wait.descPost": ". Accept it there to continue.",
   "wait.requestingFrom": "Requesting from",
+  "wait.discoveryMissing": "Host is not discoverable on your network or Tailscale yet.",
 
   // Client Mappings
   "map.title": "Folder mappings",
@@ -192,6 +193,7 @@ const KO: Dict = {
   "wait.descPre": "다음 Mac에 프롬프트가 표시됩니다:",
   "wait.descPost": ". 거기서 수락하면 계속됩니다.",
   "wait.requestingFrom": "요청 대상",
+  "wait.discoveryMissing": "호스트가 아직 같은 네트워크나 Tailscale에서 검색되지 않습니다.",
 
   "map.title": "폴더 매핑",
   "map.desc": "호스트 폴더를 이 Mac에 마운트하거나 폴더를 양방향 동기화하세요.",

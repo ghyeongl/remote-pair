@@ -44,7 +44,7 @@ export function StepWaitPerm({
       if (host.pairingMetaStatus === "error") {
         setError(
           host.pairingMetaError ||
-            "Host is not broadcasting pairing details. Open Connect on the host, then rescan.",
+            t("wait.discoveryMissing"),
         );
       } else {
         setError("");

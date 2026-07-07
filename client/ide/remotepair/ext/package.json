@@ -20,7 +20,8 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:remotepair.sessions.listJson",
-    "onCommand:remotepair.sessions.checkAttach"
+    "onCommand:remotepair.sessions.checkAttach",
+    "onCommand:remotepair.sessions.writeOpened"
   ],
   "contributes": {
     "commands": [

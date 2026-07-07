@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const root = __dirname;
+const extension = fs.readFileSync(path.join(root, "extension.js"), "utf8");
 const patch = fs.readFileSync(
   path.join(root, "..", "patches", "zz-remotepair-ide-frontend.patch"),
   "utf8",
@@ -48,13 +49,43 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.doesNotMatch(
     sessionManager,
+    /SessionDataProvider|setSessionDataProvider|dataProvider/,
+    "the dead bottom-bar session data injection point must stay removed",
+  );
+  assert.doesNotMatch(
+    sessionManager,
     /display-only rather than wiring a reattach/,
     "persisted sessions are currently display-only, so closed/reopened terminal tabs cannot restore",
   );
   assert.match(
     sessionManager,
-    /const persisted = this\.readHistory\(\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => reattach\(name\)\)/,
-    "saved terminal/session entries must reattach to the same tmux session, not come back as inert history",
+    /const liveNames = new Set\(cachedSessionNames\(\)\);[\s\S]*const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => reattach\(name\)\)/,
+    "History must be persisted last-seen names minus every currently live tmux session, and entries must still reattach",
+  );
+  assert.match(
+    sessionManager,
+    /commandService\.executeCommand\('remotepair\.sessions\.writeOpened', localAttachedSessionNameList\(\)\)/,
+    "Attached changes must rewrite the last-opened session snapshot through the extension host",
+  );
+  assert.match(
+    terminalSidebar,
+    /id: 'remotepair\.terminalSidebar\.reattachSession'[\s\S]*view\.reattachSession\(name\.trim\(\)\)/,
+    "startup restore must have a command entry point into the same sidebar reattach flow",
+  );
+  assert.match(
+    extension,
+    /const OPENED_SESSIONS_FILE = path\.join\(RP_CLIENT_DIR, "opened-sessions\.json"\)/,
+    "opened sessions must persist to ~/.xpair/client/opened-sessions.json",
+  );
+  assert.match(
+    extension,
+    /OPENED_SESSIONS_RESTORE_ATTEMPTS = 3[\s\S]*async function waitForAvailableSessionList\(\)[\s\S]*listSessionsFromCli\(runXpairCli, \{ log, timeoutMs: 5000 \}\)/,
+    "startup restore must gate on the existing session-list helper with bounded retries",
+  );
+  assert.match(
+    extension,
+    /restoreOpenedSessionsOnActivation\(\)[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.reattachSession", name\)/,
+    "activation restore must execute the sidebar reattach command for stored live names",
   );
 });
 

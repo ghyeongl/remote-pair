@@ -53,13 +53,18 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
 
   assert.match(
     patch,
-    /function cachedDetachedSessions\(\): readonly string\[\] \{[\s\S]*attached === 0[\s\S]*\.map\(s => s\.name\)/,
-    "detached cards must come from real unattached session names",
+    /function cachedDetachedSessions\(\): readonly string\[\] \{[\s\S]*const local = localAttachedSessionNames\(\);[\s\S]*liveSessionCache\.filter\(s => !local\.has\(s\.name\)\)\.map\(s => s\.name\)/,
+    "detached cards must come from live tmux sessions that are not local attached terminal tabs",
   );
   assert.match(
     patch,
-    /function cachedHistorySessions\(\): readonly string\[\] \{[\s\S]*attached > 0[\s\S]*\.map\(s => s\.name\)/,
-    "live attached history must keep real session names separate from display titles",
+    /const liveNames = new Set\(cachedSessionNames\(\)\);[\s\S]*const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\)/,
+    "History must be persisted last-seen names minus every live tmux session",
+  );
+  assert.match(
+    patch,
+    /function cachedRemoteAttachedSessions\(\): readonly string\[\] \{[\s\S]*s\.attached > 0 && !local\.has\(s\.name\)/,
+    "sessions attached elsewhere must still appear outside the local Attached tab",
   );
   assert.match(
     patch,
@@ -78,7 +83,7 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
   );
   assert.match(
     patch,
-    /const persisted = this\.readHistory\(\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => reattach\(name\)\)/,
+    /const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => reattach\(name\)\)/,
     "persisted real session names must reattach through xpair attach",
   );
 
