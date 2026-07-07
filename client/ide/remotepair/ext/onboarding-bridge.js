@@ -1803,6 +1803,9 @@ const bridge = {
         sr: !!j.sr,
         fda: !!j.fda,
         sharing: !!j.sharing,
+        // The host's OWN serving verdict (Permissions.allGranted). undefined on hosts that
+        // predate the field — the guard falls back to ax/sr for those (their actual gate).
+        serving: typeof j.serving === "boolean" ? j.serving : undefined,
         err: "",
       };
     } catch (e) {

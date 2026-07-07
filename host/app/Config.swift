@@ -120,7 +120,7 @@ func writeStatus() {
     let ts = Int(Date().timeIntervalSince1970)
     let json = "{\"ts\":\(ts),\"pid\":\(getpid()),\"version\":\"\(APP_VERSION)\","
         + "\"bundle_id\":\"\(BUNDLE_ID)\",\"socket\":\"\(SOCKET)\","
-        + "\"ax\":\(Permissions.axTrusted()),\"sr\":\(Permissions.srGranted()),\"fda\":\(Permissions.fdaGranted()),\"sharing\":\(Permissions.sharingGranted())}\n"
+        + "\"ax\":\(Permissions.axTrusted()),\"sr\":\(Permissions.srGranted()),\"fda\":\(Permissions.fdaGranted()),\"sharing\":\(Permissions.sharingGranted()),\"serving\":\(Permissions.allGranted())}\n"
     // status.json is the agent's ground truth; a stale file makes the agent misjudge liveness/grants → warn.
     do { try json.write(toFile: STATUS_FILE, atomically: true, encoding: .utf8) }
     catch { log(.warn, "STATUS: write \(STATUS_FILE) failed: \(error)") }

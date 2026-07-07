@@ -178,10 +178,15 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   try {
     const perms = await probeBridge.hostPermissions({ host })
     if (!perms || perms.alive !== true) return START_STEP.CONNECT
-    // Match the host serving gate (Permissions.allGranted): ax/sr AND fda + File Sharing.
-    // The host tick loop writes status.json even while serving is gated, so `alive` alone
-    // does not catch a host stuck on the permission step — check every required grant.
-    if (perms.ax !== true || perms.sr !== true || perms.fda !== true || perms.sharing !== true) return START_STEP.GRANT
+    // Trust the host's OWN serving verdict (Permissions.allGranted, reported as `serving`):
+    // the host tick loop writes status.json even while serving is gated, so `alive` alone
+    // doesn't catch a host stuck on its permission step. Hosts that predate the field fall
+    // back to the ax/sr gate they actually enforced — so an upgraded client against an older
+    // host isn't wrongly blocked on fda/File Sharing the old host never gated on.
+    const hostReady = typeof perms.serving === "boolean"
+      ? perms.serving
+      : (perms.ax === true && perms.sr === true)
+    if (!hostReady) return START_STEP.GRANT
   } catch {
     return START_STEP.CONNECT
   }

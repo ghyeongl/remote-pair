@@ -253,7 +253,7 @@ need_app_guidance() {
    • App binary only: ${APP_NAME}.zip from Releases → ~/Applications → open once (daemon only;
      run the host setup above for approve rules + the approve skill).
        https://github.com/${GH_REPO:-x10lab/xpair}/releases/latest
-   Then grant Accessibility + Screen Recording once. Verify with: xpair status
+   Then grant Accessibility, Screen Recording, Full Disk Access + File Sharing once. Verify with: xpair status
    (This client/CLI maps/launches/attaches; approve & host run where the app lives.)
 EOF
 }
@@ -870,7 +870,7 @@ cmd_onboard() {
     if [ "$_ax" = true ] && [ "$_sr" = true ]; then
       ok "Onboarding complete. AX✓ SR✓ — computer-use ready. Edit later with 'xpair config' / 'xpair map'."
     else
-      warn "Not done yet: System Settings → Privacy & Security → turn $APP_NAME ON for Accessibility (AX=$_ax) and Screen Recording (SR=$_sr). Re-run 'xpair onboard' to confirm."
+      warn "Not done yet: System Settings → Privacy & Security → turn $APP_NAME ON for Accessibility (AX=$_ax), Screen Recording (SR=$_sr), Full Disk Access, and File Sharing (all required to serve). Re-run 'xpair onboard' to confirm."
     fi
   else
     ok "Onboarding complete. Edit later with 'xpair config' / 'xpair map'."
@@ -2014,7 +2014,7 @@ cmd_install_host() {
     warn "target account '$account' ≠ host GUI-session account '$guiuser' — TCC grant must be done while logged in as the GUI user on the host's screen."
   fi
   c "Next, on the HOST's physical screen: System Settings → Privacy & Security →"
-  printf '   turn %s ON for Accessibility + Screen Recording (macOS cannot grant these remotely).\n' "$APP_NAME"
+  printf '   turn %s ON for Accessibility, Screen Recording, Full Disk Access + File Sharing (macOS cannot grant these remotely).\n' "$APP_NAME"
   ok "install-host complete for $target"
 }
 
@@ -2051,7 +2051,7 @@ except Exception:
 ts = d.get("ts", 0) or 0
 # The host rewrites status.json every ~1s while alive; treat a stamp within 10s as live.
 alive = bool(d.get("pid")) and (time.time() - ts) < 10
-print(json.dumps({"alive": alive, "ax": bool(d.get("ax")), "sr": bool(d.get("sr")), "fda": bool(d.get("fda")), "sharing": bool(d.get("sharing")), "err": ""}))
+print(json.dumps({"alive": alive, "ax": bool(d.get("ax")), "sr": bool(d.get("sr")), "fda": bool(d.get("fda")), "sharing": bool(d.get("sharing")), "serving": d.get("serving"), "err": ""}))
 '
 }
 
