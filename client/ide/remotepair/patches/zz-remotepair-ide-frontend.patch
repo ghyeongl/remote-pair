@@ -2574,7 +2574,7 @@ new file mode 100644
 index 0000000..6e5d586
 --- /dev/null
 +++ b/src/vs/workbench/contrib/terminal/browser/remotePairSessionManager.ts
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,747 @@
 +/*---------------------------------------------------------------------------------------------
 + *  RemotePair: bottom-panel session tabs. Three Panel view containers — Attached / Detached /
 + *  History — each surfaced as a horizontal TAB in the bottom-panel composite bar (exactly like
@@ -2607,6 +2607,7 @@ index 0000000..6e5d586
 +import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 +import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 +import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
++import { ILifecycleService } from '../../../services/lifecycle/common/lifecycle.js';
 +import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 +import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 +import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
@@ -2684,9 +2685,24 @@ index 0000000..6e5d586
 +let sessionRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 +let sessionListUnavailable = false;
 +let sessionCardCause: string | undefined;
++let shuttingDown = false;
++let shutdownGuardRegistered = false;
 +const SESSION_REFRESH_RETRY_MS = 1000;
 +const SESSION_REFRESH_INTERVAL_MS = 10000;
 +export const SESSION_NAME_RE = /^[A-Za-z0-9_.-]+$/;
++
++function registerOpenedSessionsShutdownGuard(lifecycleService: ILifecycleService): void {
++	if (shutdownGuardRegistered) {
++		return;
++	}
++	shutdownGuardRegistered = true;
++	lifecycleService.onWillShutdown(() => {
++		// onWillShutdown fires after veto handling but before workbench contributions and
++		// terminal instances are disposed, so disposal-driven attached changes cannot drain
++		// the snapshot; extension deactivate flushes the last pre-shutdown pending set.
++		shuttingDown = true;
++	});
++}
 +
 +function isRecord(value: unknown): value is Record<string, unknown> {
 +	return typeof value === 'object' && value !== null;
@@ -2825,6 +2841,10 @@ index 0000000..6e5d586
 +}
 +
 +function writeOpenedSessions(commandService: ICommandService): void {
++	if (shuttingDown) {
++		rpLog('debug', 'opened sessions write skipped during workbench shutdown');
++		return;
++	}
 +	commandService.executeCommand('remotepair.sessions.writeOpened', localAttachedSessionNameList()).then(undefined, (error) => {
 +		rpLog('debug', `opened sessions write command failed: ${error instanceof Error ? error.message : String(error)}`);
 +	});
@@ -2969,9 +2989,11 @@ index 0000000..6e5d586
 +		@IHoverService hoverService: IHoverService,
 +		@ITerminalService private readonly terminalService: ITerminalService,
 +		@IStorageService private readonly storageService: IStorageService,
-+		@ICommandService private readonly commandService: ICommandService
++		@ICommandService private readonly commandService: ICommandService,
++		@ILifecycleService lifecycleService: ILifecycleService
 +	) {
 +		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
++		registerOpenedSessionsShutdownGuard(lifecycleService);
 +	}
 +
 +	protected override renderBody(container: HTMLElement): void {

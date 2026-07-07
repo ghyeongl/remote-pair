@@ -7,7 +7,9 @@ const openedSessionsSource = fs.readFileSync(path.join(__dirname, "opened-sessio
 
 const {
   OPENED_SESSIONS_VERSION,
+  OPENED_SESSIONS_LOCK_FILE,
   normalizeOpenedSessionNames,
+  migrateOpenedSessionsScope,
   parseOpenedSessions,
   serializeOpenedSessions,
   writeOpenedSessionsForScope,
@@ -100,6 +102,52 @@ test("scoped writes merge buckets, update only the caller scope, and prune stale
   assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-b"), ["two"]);
 });
 
+test("migrates this window's snapshot bucket to a new scope and leaves other windows untouched", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
+  const file = path.join(dir, "opened-sessions.json");
+  fs.writeFileSync(file, JSON.stringify({
+    v: OPENED_SESSIONS_VERSION,
+    host: "host-a",
+    windows: {
+      "old-scope": { sessions: ["one", "bad name", "two"], ts: 1000, pid: 11 },
+      "other-scope": { sessions: ["three"], ts: 1001, pid: 12 },
+    },
+  }) + "\n");
+
+  assert.equal(migrateOpenedSessionsScope(file, "host-a", "old-scope", "new-scope", { now: 2000, pid: 101 }), true);
+  const written = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(written.windows["old-scope"], undefined);
+  assert.deepStrictEqual(written.windows["new-scope"], { sessions: ["one", "two"], ts: 1000, pid: 11 });
+  assert.deepStrictEqual(written.windows["other-scope"], { sessions: ["three"], ts: 1001, pid: 12 });
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "new-scope"), ["one", "two"]);
+});
+
+test("scope migration respects the opened-sessions lock", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
+  const file = path.join(dir, "opened-sessions.json");
+  const before = JSON.stringify({
+    v: OPENED_SESSIONS_VERSION,
+    host: "host-a",
+    windows: {
+      "old-scope": { sessions: ["one"], ts: 1000, pid: 11 },
+      "other-scope": { sessions: ["two"], ts: 1001, pid: 12 },
+    },
+  }) + "\n";
+  fs.writeFileSync(file, before);
+  fs.writeFileSync(path.join(dir, OPENED_SESSIONS_LOCK_FILE), "999999\n");
+
+  assert.equal(
+    migrateOpenedSessionsScope(file, "host-a", "old-scope", "new-scope", {
+      now: 2000,
+      pid: 101,
+      lockWaitMs: 0,
+      isProcessAlive: (pid) => pid === 999999,
+    }),
+    false,
+  );
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+});
+
 test("opened-session lock creation writes content before the name is visible", () => {
   assert.match(openedSessionsSource, /fs\.writeFileSync\(tmp, `\$\{pid\}\\n`, \{ mode: 0o600 \}\);[\s\S]*fs\.linkSync\(tmp, lockFile\);/);
   assert.doesNotMatch(openedSessionsSource, /fs\.openSync\(lockFile, "wx"/);
@@ -117,6 +165,10 @@ test("opened-session writes are gated to the services lock owner", () => {
   );
   assert.match(extension, /setOpenedSessionsWriteOwner\(\!!clientServicesLock\);/);
   assert.match(extension, /const CLIENT_SERVICES_SCOPE_ID = \(\(\) => \{[\s\S]*return scope;[\s\S]*const CLIENT_SERVICES_LOCK_FILE = \(\(\) => \{[\s\S]*const scope = CLIENT_SERVICES_SCOPE_ID;[\s\S]*extension-services\.\$\{scope\}\.lock/);
+  assert.match(extension, /let currentSnapshotScopeId = CLIENT_SERVICES_SCOPE_ID;/);
+  assert.match(extension, /writeOpenedSessionsForScope\(OPENED_SESSIONS_FILE, host, scope, clean, \{ now: Date\.now\(\), pid: process\.pid \}\)/);
+  assert.match(extension, /function migrateOpenedSessionsSnapshotScope\(\) \{[\s\S]*const oldScope = currentSnapshotScopeId;[\s\S]*const nextScope = computeWorkspaceScopeId\(\);[\s\S]*migrateOpenedSessionsScope\(OPENED_SESSIONS_FILE, host, oldScope, nextScope, \{ now: Date\.now\(\), pid: process\.pid \}\)[\s\S]*currentSnapshotScopeId = nextScope;/);
+  assert.match(extension, /vscode\.workspace\.onDidChangeWorkspaceFolders\(\(\) => \{[\s\S]*migrateOpenedSessionsSnapshotScope\(\);[\s\S]*\}\)/);
   assert.match(extension, /readOpenedSessions\(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, \{ log \}\)/);
 });
 

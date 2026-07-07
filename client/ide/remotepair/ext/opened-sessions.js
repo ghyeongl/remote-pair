@@ -288,6 +288,29 @@ function writeOpenedSessionsForScope(filePath, host, scopeId, names, opts = {}) 
   }
 }
 
+function migrateOpenedSessionsScope(filePath, host, oldScopeId, newScopeId, opts = {}) {
+  const clean = cleanHost(host);
+  const oldScope = cleanScopeId(oldScopeId);
+  const newScope = cleanScopeId(newScopeId);
+  if (!clean || !oldScope || !newScope) return false;
+  if (oldScope === newScope) return true;
+  const dir = path.dirname(filePath);
+  const lockFile = path.join(dir, OPENED_SESSIONS_LOCK_FILE);
+  if (!claimOpenedSessionsLock(lockFile, opts)) return false;
+  try {
+    const now = nowFromOpts(opts);
+    const snapshot = readSnapshotForWrite(filePath, clean, oldScope, now);
+    if (!snapshot) return false;
+    const bucket = snapshot.windows[oldScope];
+    if (!bucket) return true;
+    snapshot.windows[newScope] = bucket;
+    delete snapshot.windows[oldScope];
+    return writeSnapshotAtomic(filePath, snapshot);
+  } finally {
+    releaseOpenedSessionsLock(lockFile, opts);
+  }
+}
+
 module.exports = {
   OPENED_SESSIONS_VERSION,
   OPENED_SESSIONS_BUCKET_TTL_MS,
@@ -298,4 +321,5 @@ module.exports = {
   parseOpenedSessions,
   readOpenedSessions,
   writeOpenedSessionsForScope,
+  migrateOpenedSessionsScope,
 };

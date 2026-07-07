@@ -74,6 +74,16 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     sessionManager,
+    /import \{ ILifecycleService \} from '\.\.\/\.\.\/\.\.\/services\/lifecycle\/common\/lifecycle\.js';[\s\S]*let shuttingDown = false;[\s\S]*function registerOpenedSessionsShutdownGuard\(lifecycleService: ILifecycleService\): void \{[\s\S]*lifecycleService\.onWillShutdown\(\(\) => \{[\s\S]*before workbench contributions and[\s\S]*terminal instances are disposed[\s\S]*shuttingDown = true;[\s\S]*function writeOpenedSessions\(commandService: ICommandService\): void \{[\s\S]*if \(shuttingDown\) \{[\s\S]*return;[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.writeOpened'/,
+    "shutdown must mark a module-level guard before terminal disposal so attached-session drains stop writing snapshots",
+  );
+  assert.match(
+    sessionManager,
+    /@ILifecycleService lifecycleService: ILifecycleService[\s\S]*registerOpenedSessionsShutdownGuard\(lifecycleService\);/,
+    "session manager view must subscribe the shutdown guard through ILifecycleService",
+  );
+  assert.match(
+    sessionManager,
     /commandService\.executeCommand\('remotepair\.sessions\.writeOpened', localAttachedSessionNameList\(\)\)/,
     "Attached changes must rewrite the last-opened session snapshot through the extension host",
   );

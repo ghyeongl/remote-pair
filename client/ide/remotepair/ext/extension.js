@@ -29,6 +29,7 @@ const heartbeat = require("./heartbeat.js");
 const { SESSION_NAME_RE, listSessionsFromCli, checkSessionAvailableFromCli } = require("./session-list.js");
 const {
   normalizeOpenedSessionNames,
+  migrateOpenedSessionsScope,
   readOpenedSessions,
   writeOpenedSessionsForScope,
 } = require("./opened-sessions.js");
@@ -123,7 +124,7 @@ const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
 // documented as per-window, so it cannot key this. Two windows on the SAME folder share
 // one owner: acceptable (same probes, one notifier) and strictly better than per-app
 // starvation. Guarded access: contract tests require this module with a vscode stub.
-const CLIENT_SERVICES_SCOPE_ID = (() => {
+function computeWorkspaceScopeId() {
   let scope = "global";
   try {
     const ws = vscode.workspace || {};
@@ -132,7 +133,15 @@ const CLIENT_SERVICES_SCOPE_ID = (() => {
     if (id) scope = crypto.createHash("sha1").update(id).digest("hex").slice(0, 12);
   } catch (_e) { /* stubbed vscode */ }
   return scope;
+}
+const CLIENT_SERVICES_SCOPE_ID = (() => {
+  let scope = "global";
+  try {
+    scope = computeWorkspaceScopeId();
+  } catch (_e) { /* stubbed vscode */ }
+  return scope;
 })();
+let currentSnapshotScopeId = CLIENT_SERVICES_SCOPE_ID;
 const CLIENT_SERVICES_LOCK_FILE = (() => {
   const scope = CLIENT_SERVICES_SCOPE_ID;
   return path.join(RP_CLIENT_DIR, `extension-services.${scope}.lock`);
@@ -1771,17 +1780,40 @@ let openedSessionsWriteOwner = false;
 
 function writeOpenedSessionsNow(host, names) {
   const clean = normalizeOpenedSessionNames(names);
+  const scope = currentSnapshotScopeId;
   try {
-    if (!writeOpenedSessionsForScope(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, clean, { now: Date.now(), pid: process.pid })) {
+    if (!writeOpenedSessionsForScope(OPENED_SESSIONS_FILE, host, scope, clean, { now: Date.now(), pid: process.pid })) {
       log("opened sessions: write skipped; lock unavailable or invalid snapshot scope", "debug");
       return false;
     }
-    log(`opened sessions: wrote ${clean.length} session(s) for window ${CLIENT_SERVICES_SCOPE_ID}`, "debug");
+    log(`opened sessions: wrote ${clean.length} session(s) for window ${scope}`, "debug");
     return true;
   } catch (e) {
     log(`opened sessions: write failed: ${e && e.message ? e.message : e}`, "warn");
     return false;
   }
+}
+
+function migrateOpenedSessionsSnapshotScope() {
+  if (!openedSessionsWriteOwner) return;
+  const oldScope = currentSnapshotScopeId;
+  const nextScope = computeWorkspaceScopeId();
+  if (oldScope === nextScope) return;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during snapshot scope migration: ${e && e.message ? e.message : e}`, "warn");
+  }
+  if (host) {
+    const migrated = migrateOpenedSessionsScope(OPENED_SESSIONS_FILE, host, oldScope, nextScope, { now: Date.now(), pid: process.pid });
+    if (migrated) {
+      log(`opened sessions: migrated snapshot window ${oldScope} -> ${nextScope}`, "debug");
+    } else {
+      log(`opened sessions: snapshot window migration skipped ${oldScope} -> ${nextScope}`, "debug");
+    }
+  }
+  currentSnapshotScopeId = nextScope;
 }
 
 function scheduleOpenedSessionsWrite(names) {
@@ -2102,6 +2134,11 @@ function activate(context) {
   const clientServiceDisposables = [];
   const clientServicesLock = claimClientServicesLock();
   setOpenedSessionsWriteOwner(!!clientServicesLock);
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      migrateOpenedSessionsSnapshotScope();
+    })
+  );
   if (clientServicesLock) {
     clientServiceDisposables.push(clientServicesLock);
     context.subscriptions.push({
