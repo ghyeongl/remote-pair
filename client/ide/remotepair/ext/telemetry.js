@@ -29,6 +29,7 @@ const RP_CLIENT_DIR = path.join(os.homedir(), ".xpair/client");
 const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
 const LEGACY_CLIENT_ENV = path.join(os.homedir(), ".xpair/host/client.env");
 const TELEMETRY_ENV = path.join(RP_CLIENT_DIR, "telemetry.env");
+const FIRST_LAUNCH_CLAIM = path.join(RP_CLIENT_DIR, "first-launch.claim"); // O_EXCL token: cross-process winner of the pending emission
 
 // telemetry.env keys (FROZEN — see spec "Telemetry Setup").
 const K_ANON_ID = "TELEMETRY_ANON_ID"; // distinct_id = install_id (UUID v4, disk-persisted)
@@ -411,6 +412,13 @@ function claimFirstLaunchOnce() {
     const marker = readEnv()[K_FIRST_LAUNCH_STAMP];
     if (marker === "pending") {
       // Fresh install whose emission is still owed (incl. abandon-and-resume onboarding).
+      // The env upsert is read-then-write: two windows (different service-lock scopes by
+      // design) can both see "pending" — an O_EXCL token file arbitrates atomically.
+      try {
+        fs.closeSync(fs.openSync(FIRST_LAUNCH_CLAIM, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600));
+      } catch (_raceLoser) {
+        return false; // another process won the claim (or FS refused — prefer under-emitting).
+      }
       upsertEnv(K_FIRST_LAUNCH_STAMP, String(Date.now()));
       return true;
     }

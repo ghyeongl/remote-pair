@@ -64,6 +64,8 @@ check("app_first_launch uses the persisted consent-aware claim and no globalStat
   // Upgrade safety: only a "pending" marker (written at genuine stamp creation) emits;
   // a marker-less upgraded install backfills WITHOUT emitting.
   assert.match(telemetryModule, /marker === "pending"/);
+  // Cross-process atomicity: the pending emission is arbitrated by an O_EXCL token file.
+  assert.match(telemetryModule, /FIRST_LAUNCH_CLAIM, fs\.constants\.O_CREAT \| fs\.constants\.O_EXCL/);
   assert.match(telemetryModule, /backfilled:\$\{Date\.now\(\)\}/);
   assert.match(telemetryModule, /if \(created\) upsertEnv\(K_FIRST_LAUNCH_STAMP, "pending"\)/);
 });
@@ -77,8 +79,10 @@ check("notification polling and host probing are protected by the client service
   assert.match(extension, /extension-services\.\$\{scope\}\.lock/);
   assert.match(extension, /\} else \{\n    \/\/ Non-owner host: ONE startup probe[\s\S]*?probeHost\(\);/);
   assert.match(extension, /function sweepStaleServiceLocks\(\)/);
-  assert.match(extension, /fs\.constants\.O_CREAT \| fs\.constants\.O_EXCL \| fs\.constants\.O_WRONLY/);
-  assert.ok(extension.includes("fs.writeFileSync(fd, `${process.pid}\\n`);"));
+  // Atomic create-with-content: link(2) of a pre-written temp file, never O_EXCL-then-write
+  // (a racing host must never read an empty lock and unlink a live owner).
+  assert.match(extension, /fs\.linkSync\(tmp, CLIENT_SERVICES_LOCK_FILE\)/);
+  assert.ok(extension.includes("fs.writeFileSync(tmp, `${process.pid}\\n`, { mode: 0o600 });"));
   assert.match(
     extension,
     /const pid = readClientServicesLockPid\(\);[\s\S]*if \(pid && isProcessAlive\(pid\)\) return null;[\s\S]*fs\.unlinkSync\(CLIENT_SERVICES_LOCK_FILE\);/,

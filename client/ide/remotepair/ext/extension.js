@@ -349,24 +349,19 @@ function isProcessAlive(pid) {
 }
 
 function writeClientServicesLock() {
-  let fd = null;
+  // Atomic create-with-content: write the pid to a private temp file, then link(2) it
+  // into place. O_EXCL-then-write leaves a window where a racing host reads an EMPTY
+  // lock (pid 0), treats it as stale, and unlinks a live owner — link never exposes a
+  // partially-written lock, and fails with EEXIST exactly like O_EXCL.
+  fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(RP_CLIENT_DIR, 0o700); } catch (_e) {}
+  const tmp = `${CLIENT_SERVICES_LOCK_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${process.pid}\n`, { mode: 0o600 });
   try {
-    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(RP_CLIENT_DIR, 0o700); } catch (_e) {}
-    fd = fs.openSync(
-      CLIENT_SERVICES_LOCK_FILE,
-      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY,
-      0o600
-    );
-    fs.writeFileSync(fd, `${process.pid}\n`);
-  } catch (e) {
-    if (fd !== null) {
-      try { fs.closeSync(fd); } catch (_e) {}
-      try { fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE); } catch (_e) {}
-    }
-    throw e;
+    fs.linkSync(tmp, CLIENT_SERVICES_LOCK_FILE);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (_e) {}
   }
-  try { fs.closeSync(fd); } catch (_e) {}
 }
 
 function releaseClientServicesLock() {
@@ -2180,8 +2175,9 @@ function activate(context) {
         vscode.window.showInformationMessage(
           `Xpair: adopted the current network as the gateway baseline${gw.current ? ` (${gw.current})` : ""}. Reconnecting…`,
         );
-        if (clientServicesLock) await probeHost();
-        else renderHostButton();
+        // Owner and non-owner both re-probe: adopting the baseline is exactly the
+        // moment stale unreachable state must refresh, and the non-owner has no interval.
+        await probeHost();
       } else {
         vscode.window.showWarningMessage(
           `Xpair: could not confirm the gateway baseline${gw && gw.err ? ` (${gw.err})` : ""}.`,
