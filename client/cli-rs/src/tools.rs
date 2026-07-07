@@ -162,7 +162,7 @@ fn current_exe_dir() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn executable_path(path: PathBuf) -> Option<PathBuf> {
+pub(crate) fn executable_path(path: PathBuf) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
     path.metadata()
@@ -172,7 +172,7 @@ fn executable_path(path: PathBuf) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn executable_path(path: PathBuf) -> Option<PathBuf> {
+pub(crate) fn executable_path(path: PathBuf) -> Option<PathBuf> {
     if windows_executable_file(&path) {
         return Some(path);
     }
@@ -220,7 +220,7 @@ fn windows_path_exts() -> Vec<String> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn executable_path(path: PathBuf) -> Option<PathBuf> {
+pub(crate) fn executable_path(path: PathBuf) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 

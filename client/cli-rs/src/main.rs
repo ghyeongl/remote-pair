@@ -859,10 +859,7 @@ fn run_config(args: &[String]) -> ExitCode {
                 }
             }
         }
-        "maps" => {
-            eprintln!("xpair: 'config maps' is not yet ported to the native client (Rust port in progress)");
-            ExitCode::from(2)
-        }
+        "maps" => cmd_map(&["list".to_string()]),
         _ => {
             eprintln!("config [list|get <key>|set <key> <value>|maps]");
             ExitCode::from(2)
@@ -1055,6 +1052,31 @@ mod tests {
             Some(String::new())
         );
         assert_eq!(resolve_raw_maps(&client_env).unwrap(), "");
+    }
+
+    #[test]
+    fn config_maps_dispatches_to_map_list() {
+        let tmp = TestDir::new("config-maps");
+        let client_env = tmp.path.join("client.env");
+        fs::write(
+            &client_env,
+            "FOLDER_MAPS='/client/project::/host/project'\nFOLDER_MAP_MODES='/client/project::sync'\n",
+        )
+        .unwrap();
+        let client_env_s = path_string(&client_env);
+
+        with_env(
+            &[
+                ("CLIENT_ENV", Some(&client_env_s)),
+                ("FOLDER_MAPS", None),
+                ("SYNC_ROOTS", None),
+                ("FOLDER_MAP_MODES", None),
+                ("RP_CLIENT_DIR", None),
+            ],
+            || {
+                assert_eq!(run_config(&strings(&["maps"])), ExitCode::SUCCESS);
+            },
+        );
     }
 
     #[test]

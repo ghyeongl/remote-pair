@@ -1741,7 +1741,12 @@ fn sanitize_readable_name(name: &str) -> String {
 
     for ch in name.chars().flat_map(char::to_lowercase) {
         let keep = ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '.' | '-');
-        if keep {
+        if ch == '-' {
+            if !last_dash {
+                out.push('-');
+                last_dash = true;
+            }
+        } else if keep {
             out.push(ch);
             last_dash = false;
         } else if !last_dash {
@@ -2108,7 +2113,7 @@ fn list_local_sessions(tmux_aqua_bin: &str, aqua_sock: &str) -> Vec<(String, boo
         Ok(out) if out.status.success() => {
             session::parse_sessions(&String::from_utf8_lossy(&out.stdout))
                 .into_iter()
-                .map(|session| (session.name, session.attached))
+                .map(|session| (session.name, session.attached != 0))
                 .collect()
         }
         _ => Vec::new(),
@@ -2576,6 +2581,10 @@ mod tests {
         );
         assert_eq!(session_name_for("/Users/me/.claude"), "_claude_0bd83");
         assert_eq!(session_name_for("/"), "session_8a5ed");
+        assert_eq!(
+            session_name_for("/tmp/A!!--B"),
+            format!("a-b_{}", sha256_hex_prefix("/tmp/A!!--B", 5))
+        );
     }
 
     #[test]
