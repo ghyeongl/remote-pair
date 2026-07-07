@@ -53,7 +53,10 @@ map_mode_infer() {
 }
 
 smb_user() {
-  ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE_HOST" whoami 2>/dev/null || id -un 2>/dev/null || printf 'user'
+  # command ssh + explicit $SSH_ID: xpair-launch has no ssh() pairing wrapper, and on
+  # pairing-key-only hosts a plain probe fails into the loose local-username fallback.
+  # shellcheck disable=SC2086
+  command ssh ${SSH_ID:-} -n -o BatchMode=yes -o ConnectTimeout=5 "$REMOTE_HOST" whoami 2>/dev/null || id -un 2>/dev/null || printf 'user'
 }
 
 share_name_for_hostpath() {

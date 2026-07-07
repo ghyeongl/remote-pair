@@ -110,4 +110,12 @@ it "map_method/discover-contract-mount"
 assert_eq "$MP_MOUNT" "$MP_XPAIR" "xpair-mount guard returns the same mountpoint"
 cleanup_sandbox
 
+# ── bootstrap valid_host copies stay in sync with maplib.sh (they run pre-self-update) ──
+extract_valid_host() { awk '/^ *valid_host\(\) \{$/{c=1} c{sub(/^[[:space:]]*/,""); print} c && /^ *\}$/{exit}' "$1"; }
+CANON="$(extract_valid_host "$_REPO_ROOT/client/cli/bin/maplib.sh")"
+for _s in xpair xpair-launch xpair-mount reset-onboarding.sh; do
+  it "map_method/fallback-valid-host-sync-$_s"
+  assert_eq "$(extract_valid_host "$_REPO_ROOT/client/cli/$_s")" "$CANON" "$_s bootstrap valid_host matches maplib.sh"
+done
+
 finish
