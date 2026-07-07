@@ -29,6 +29,7 @@ const RP_CLIENT_DIR = path.join(os.homedir(), ".xpair/client");
 const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
 const LEGACY_CLIENT_ENV = path.join(os.homedir(), ".xpair/host/client.env");
 const TELEMETRY_ENV = path.join(RP_CLIENT_DIR, "telemetry.env");
+const FIRST_LAUNCH_CLAIM = path.join(RP_CLIENT_DIR, "first-launch.claim"); // O_EXCL token: cross-process winner of the pending emission
 
 // telemetry.env keys (FROZEN — see spec "Telemetry Setup").
 const K_ANON_ID = "TELEMETRY_ANON_ID"; // distinct_id = install_id (UUID v4, disk-persisted)
@@ -44,6 +45,7 @@ const K_SENTRY_DSN = "SENTRY_DSN"; // Sentry DSN; absent => Sentry no-op
 // fires at most once for the lifetime of the install regardless of how many times either lane
 // observes reachability.
 const K_HOST_CONNECTED_STAMP = "TELEMETRY_HOST_CONNECTED_AT"; // epoch ms of first host_connected
+const K_FIRST_LAUNCH_STAMP = "TELEMETRY_FIRST_LAUNCH_AT"; // "pending" until emitted, then epoch ms; "backfilled:<ms>" for upgraded installs (never emitted)
 const TELEMETRY_KEYS = Object.freeze([
   K_ANON_ID,
   K_TELEMETRY_CONSENT,
@@ -352,16 +354,27 @@ function installId() {
  * A bare epoch-ms with no id is not PII, so this is safe to write before the consent prompt —
  * it gives time_to_wow_ms a real elapsed base (first launch → first session) instead of ~0
  * (which is what happens if the base is only set lazily at the moment the WOW event fires).
- * Idempotent: only the first call writes; later calls are a no-op. Never throws.
+ * Idempotent: only the first call writes and returns created=true; later calls are a no-op.
+ * Never throws.
  * Call this on the very first run of BOTH the extension host and the Electron onboarding.
  */
 function firstRunStamp() {
   try {
-    if (!readEnv()[K_INSTALL_TS]) upsertEnv(K_INSTALL_TS, String(Date.now()));
+    const existing = installTs();
+    if (existing) return { ts: existing, created: false };
+    const now = Date.now();
+    upsertEnv(K_INSTALL_TS, String(now));
+    const stamped = installTs();
+    const created = stamped === now;
+    // Mark the app_first_launch emission as OWED right where freshness is known:
+    // only a genuinely-fresh install gets "pending". Upgraded installs (stamp from an
+    // old build, no marker) must never emit - see claimFirstLaunchOnce().
+    if (created) upsertEnv(K_FIRST_LAUNCH_STAMP, "pending");
+    return { ts: stamped, created };
   } catch (_e) {
     /* telemetry must never break the app */
   }
-  return installTs();
+  return { ts: installTs(), created: false };
 }
 
 /** install_id creation epoch (ms). 0 if unknown (caller treats as "no wow timing"). */
@@ -383,6 +396,39 @@ function claimHostConnectedOnce() {
     if (readEnv()[K_HOST_CONNECTED_STAMP]) return false; // already counted this install.
     upsertEnv(K_HOST_CONNECTED_STAMP, String(Date.now()));
     return true;
+  } catch (_e) {
+    return false; // on any I/O failure, prefer NOT emitting (de-dup is the priority).
+  }
+}
+
+/**
+ * Once-per-install claim for app_first_launch. Claims ONLY when telemetry consent is on —
+ * a pre-consent claim would mark the event emitted while capture() drops it, losing it for
+ * the abandon-and-resume onboarding case. Same shape as claimHostConnectedOnce(); never throws.
+ */
+function claimFirstLaunchOnce() {
+  try {
+    if (!telemetryConsent()) return false; // not consented yet — leave unclaimed for a consented launch/completion.
+    const marker = readEnv()[K_FIRST_LAUNCH_STAMP];
+    if (marker === "pending") {
+      // Fresh install whose emission is still owed (incl. abandon-and-resume onboarding).
+      // The env upsert is read-then-write: two windows (different service-lock scopes by
+      // design) can both see "pending" — an O_EXCL token file arbitrates atomically.
+      try {
+        fs.closeSync(fs.openSync(FIRST_LAUNCH_CLAIM, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600));
+      } catch (_raceLoser) {
+        return false; // another process won the claim (or FS refused — prefer under-emitting).
+      }
+      upsertEnv(K_FIRST_LAUNCH_STAMP, String(Date.now()));
+      return true;
+    }
+    if (marker) return false; // already emitted, or backfilled upgrade.
+    // No marker at all: an install upgraded from a pre-claim build (its first launch
+    // happened long ago, and old builds emitted app_first_launch themselves) — or a
+    // stamp write that raced. Backfill WITHOUT emitting: is_fresh_install=true from an
+    // old install would corrupt the fresh-install funnel; prefer under-emitting.
+    upsertEnv(K_FIRST_LAUNCH_STAMP, `backfilled:${Date.now()}`);
+    return false;
   } catch (_e) {
     return false; // on any I/O failure, prefer NOT emitting (de-dup is the priority).
   }
@@ -426,6 +472,11 @@ function setConsent(telemetry, crashReport) {
   upsertEnv(K_TELEMETRY_CONSENT, telemetry ? "true" : "false");
   upsertEnv(K_CRASH_CONSENT, crashReport ? "true" : "false");
   return getConsent();
+}
+
+function setTelemetryConsent(enabled) {
+  upsertEnv(K_TELEMETRY_CONSENT, enabled ? "true" : "false");
+  return telemetryConsent();
 }
 
 // --- super properties ------------------------------------------------------
@@ -664,8 +715,10 @@ module.exports = {
   installTs,
   firstRunStamp, // stamp install creation time at first run, INDEPENDENT of consent (time_to_wow base).
   claimHostConnectedOnce, // once-per-install host_connected gate (activation-funnel cardinality).
+  claimFirstLaunchOnce, // once-per-install app_first_launch gate (consent-aware; survives abandoned onboarding).
   getConsent,
   setConsent,
+  setTelemetryConsent,
   telemetryConsent,
   crashReportConsent,
   sentryConfig,

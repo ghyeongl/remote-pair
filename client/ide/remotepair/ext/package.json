@@ -139,7 +139,7 @@
           "tags": [
             "usesOnlineServices"
           ],
-          "description": "Opt in to Xpair product analytics and crash reports for this client."
+          "description": "Opt in to Xpair product analytics for this client."
         },
         "xpair.remoteDesktop.fps": {
           "type": "number",

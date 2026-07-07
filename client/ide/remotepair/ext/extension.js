@@ -10,6 +10,7 @@
 // after the host-side input helper reports readiness.
 
 const vscode = require("vscode");
+const crypto = require("crypto");
 const cp = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -108,6 +109,21 @@ const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
 const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
+// Per-WINDOW lock scope: the window's two extension hosts share the same workspace,
+// while different windows (almost always) hold different workspaces — sessionId is NOT
+// documented as per-window, so it cannot key this. Two windows on the SAME folder share
+// one owner: acceptable (same probes, one notifier) and strictly better than per-app
+// starvation. Guarded access: contract tests require this module with a vscode stub.
+const CLIENT_SERVICES_LOCK_FILE = (() => {
+  let scope = "global";
+  try {
+    const ws = vscode.workspace || {};
+    const id = (ws.workspaceFile && ws.workspaceFile.fsPath) ||
+      (ws.workspaceFolders || []).map((f) => f.uri.fsPath).join("|");
+    if (id) scope = crypto.createHash("sha1").update(id).digest("hex").slice(0, 12);
+  } catch (_e) { /* stubbed vscode */ }
+  return path.join(RP_CLIENT_DIR, `extension-services.${scope}.lock`);
+})();
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
 // WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
 // on the host), so adding -i must still leave the ssh-agent + default identities available —
@@ -291,25 +307,105 @@ function readEnabledNotifyTypes() {
   return enabled;
 }
 
-function hasConfiguredValue(section, key) {
-  const inspected = section.inspect(key);
-  return !!(
-    inspected &&
-    (
-      inspected.globalValue !== undefined ||
-      inspected.workspaceValue !== undefined ||
-      inspected.workspaceFolderValue !== undefined
-    )
-  );
+function mirrorTelemetryConsentToSetting() {
+  const cfg = vscode.workspace.getConfiguration("xpair.telemetry");
+  const enabled = telemetry.telemetryConsent();
+  if (!!cfg.get("enabled", false) === enabled) return;
+  try {
+    cfg.update("enabled", enabled, vscode.ConfigurationTarget.Global)
+      .then(undefined, (e) => log(`telemetry setting mirror: ${e && e.message ? e.message : e}`, "warn"));
+  } catch (e) {
+    log(`telemetry setting mirror: ${e && e.message ? e.message : e}`, "warn");
+  }
 }
 
-function syncTelemetryConsentFromSettings() {
+function syncTelemetryConsentFromSettingChange() {
   const cfg = vscode.workspace.getConfiguration("xpair.telemetry");
-  if (!hasConfiguredValue(cfg, "enabled")) return;
   const enabled = !!cfg.get("enabled", false);
-  const current = telemetry.getConsent();
-  if (current.telemetry === enabled && current.crashReport === enabled) return;
-  telemetry.setConsent(enabled, enabled);
+  if (telemetry.telemetryConsent() === enabled) return;
+  telemetry.setTelemetryConsent(enabled);
+}
+
+function readClientServicesLockPid() {
+  try {
+    const raw = fs.readFileSync(CLIENT_SERVICES_LOCK_FILE, "utf8").trim();
+    const m = raw.match(/^\d+/);
+    if (!m) return 0;
+    const pid = parseInt(m[0], 10);
+    return Number.isFinite(pid) ? pid : 0;
+  } catch (_e) {
+    return 0;
+  }
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return !!(e && e.code === "EPERM");
+  }
+}
+
+function writeClientServicesLock() {
+  // Atomic create-with-content: write the pid to a private temp file, then link(2) it
+  // into place. O_EXCL-then-write leaves a window where a racing host reads an EMPTY
+  // lock (pid 0), treats it as stale, and unlinks a live owner — link never exposes a
+  // partially-written lock, and fails with EEXIST exactly like O_EXCL.
+  fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(RP_CLIENT_DIR, 0o700); } catch (_e) {}
+  const tmp = `${CLIENT_SERVICES_LOCK_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${process.pid}\n`, { mode: 0o600 });
+  try {
+    fs.linkSync(tmp, CLIENT_SERVICES_LOCK_FILE);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (_e) {}
+  }
+}
+
+function releaseClientServicesLock() {
+  if (readClientServicesLockPid() !== process.pid) return;
+  try { fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE); } catch (_e) {}
+}
+
+function sweepStaleServiceLocks() {
+  // Opportunistic: session-scoped lock names accumulate across window sessions — unlink dead ones.
+  try {
+    for (const name of fs.readdirSync(RP_CLIENT_DIR)) {
+      if (!/^extension-services\..+\.lock$/.test(name)) continue;
+      const p = path.join(RP_CLIENT_DIR, name);
+      if (p === CLIENT_SERVICES_LOCK_FILE) continue;
+      try {
+        const raw = fs.readFileSync(p, "utf8").trim();
+        const pid = parseInt((raw.match(/^\d+/) || ["0"])[0], 10);
+        if (!isProcessAlive(pid)) fs.unlinkSync(p);
+      } catch (_e) { /* another window may be racing the same sweep */ }
+    }
+  } catch (_e) { /* best-effort */ }
+}
+
+function claimClientServicesLock() {
+  sweepStaleServiceLocks();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeClientServicesLock();
+      return { dispose: releaseClientServicesLock };
+    } catch (e) {
+      if (!e || e.code !== "EEXIST") {
+        log(`client services lock: ${e && e.message ? e.message : e}`, "warn");
+        return null;
+      }
+      const pid = readClientServicesLockPid();
+      if (pid && isProcessAlive(pid)) return null;
+      try {
+        fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE);
+      } catch (unlinkErr) {
+        if (!unlinkErr || unlinkErr.code !== "ENOENT") return null;
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -1853,14 +1949,28 @@ function installSentryHooks() {
 function activate(context) {
   log("Xpair activating…");
 
-  syncTelemetryConsentFromSettings();
+  mirrorTelemetryConsentToSetting();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("xpair.telemetry.enabled")) {
-        syncTelemetryConsentFromSettings();
+        syncTelemetryConsentFromSettingChange();
       }
     })
   );
+  const clientServiceDisposables = [];
+  const clientServicesLock = claimClientServicesLock();
+  if (clientServicesLock) {
+    clientServiceDisposables.push(clientServicesLock);
+    context.subscriptions.push({
+      dispose: () => {
+        for (let i = clientServiceDisposables.length - 1; i >= 0; i -= 1) {
+          try { clientServiceDisposables[i].dispose(); } catch (_e) {}
+        }
+      },
+    });
+  } else {
+    log("client services lock held by another extension host", "debug");
+  }
 
   // Start the CLIENT→HOST liveness heartbeat (writes now + every 30s; idempotent across
   // activations). Fire-and-forget — must never block or crash activation.
@@ -1880,22 +1990,22 @@ function activate(context) {
   } catch (_e) { /* best-effort */ }
 
   // 0) Telemetry (opt-in, both consent flags default OFF → zero network calls). Two side effects:
-  //    a) app_first_launch{is_fresh_install} — fired ONCE, gated by a globalState stamp.
+  //    a) app_first_launch{is_fresh_install} — fired once from the creator of TELEMETRY_INSTALL_TS.
   //    b) Sentry init for the extension host — a no-op unless CRASH_REPORT_CONSENT + SENTRY_DSN
   //       are both present (init just registers process error hooks that re-check consent on fire).
   try {
     // Stamp the install creation time at FIRST RUN, INDEPENDENT of consent. A bare epoch-ms with
     // no id is not PII, so this is safe pre-consent and gives time_to_wow_ms a real elapsed base
     // (first launch → first session) instead of ~0. Idempotent across activations.
-    telemetry.firstRunStamp();
-    const FIRST_LAUNCH_KEY = "remotepair.installTimestamp";
-    const stampedAt = context.globalState.get(FIRST_LAUNCH_KEY);
-    const isFresh = !stampedAt;
-    if (isFresh) {
-      context.globalState.update(FIRST_LAUNCH_KEY, Date.now());
+    if (clientServicesLock) {
+      telemetry.firstRunStamp();
+      // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
+      // (window closed before Done) whose event never sent — the claim persists until
+      // a consented launch/completion actually emits it, exactly once per install.
+      if (telemetry.claimFirstLaunchOnce()) {
+        telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
+      }
     }
-    // Fire once per install (the stamp guards repeats across activations).
-    telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: isFresh });
   } catch (e) {
     log(`telemetry first-launch: ${e && e.message ? e.message : e}`, "warn");
   }
@@ -2039,9 +2149,15 @@ function activate(context) {
       });
     }
   };
-  probeHost();
-  const hostProbeTimer = setInterval(probeHost, 20000);
-  context.subscriptions.push({ dispose: () => clearInterval(hostProbeTimer) });
+  if (clientServicesLock) {
+    probeHost();
+    const hostProbeTimer = setInterval(probeHost, 20000);
+    clientServiceDisposables.push({ dispose: () => clearInterval(hostProbeTimer) });
+  } else {
+    // Non-owner host: ONE startup probe so its own status-bar item doesn't sit on
+    // hostReachable=null forever; the owner runs the interval and the poller.
+    probeHost();
+  }
 
   // 4) Commands.
   context.subscriptions.push(
@@ -2059,6 +2175,8 @@ function activate(context) {
         vscode.window.showInformationMessage(
           `Xpair: adopted the current network as the gateway baseline${gw.current ? ` (${gw.current})` : ""}. Reconnecting…`,
         );
+        // Owner and non-owner both re-probe: adopting the baseline is exactly the
+        // moment stale unreachable state must refresh, and the non-owner has no interval.
         await probeHost();
       } else {
         vscode.window.showWarningMessage(
@@ -2118,9 +2236,11 @@ function activate(context) {
   }
 
   // 4) Host notifications poller.
-  const notifier = new NotificationPoller();
-  notifier.start();
-  context.subscriptions.push({ dispose: () => notifier.stop() });
+  if (clientServicesLock) {
+    const notifier = new NotificationPoller();
+    notifier.start();
+    clientServiceDisposables.push({ dispose: () => notifier.stop() });
+  }
 
   // 5a) Warm the Sessions sidebar, THEN default the visible sidebar to the Browser. Constructing the
   //     Sessions view runs its constructor side effects — wiring the session reattacher and the

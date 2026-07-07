@@ -232,6 +232,9 @@ function wireIpc(ipcMain, onComplete) {
     _completed = true
     try {
       if (telemetry && telemetry.EVENTS) {
+        if (telemetry.claimFirstLaunchOnce && telemetry.claimFirstLaunchOnce()) {
+          telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true })
+        }
         const wowBase = telemetry.installTs && telemetry.installTs()
         telemetry.capture(telemetry.EVENTS.FIRST_SESSION_STARTED, {
           ...(wowBase ? { time_to_wow_ms: Date.now() - wowBase } : {}),
