@@ -43,6 +43,7 @@ const ACCOUNT_RE = /^(?!-)[A-Za-z0-9._-]+$/;
 const SSH_TARGET_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
 const TAILNET_PAIRING_METADATA_PORT = 8891;
 const HOST_SETUP_URL = "https://github.com/x10lab/xpair#host-setup";
+const CLI_DOWNLOAD_URL = "https://github.com/x10lab/xpair/releases/latest";
 const EFFECTIVE_KNOWN_HOSTS_FILES = new Map();
 let sshEphemeralKnownHostsDir;
 
@@ -70,10 +71,49 @@ function invalidAccount(account) {
   return `invalid account: ${String(account || "").trim()}`;
 }
 
-/** Resolve the xpair binary (installed to ~/.local/bin, else on PATH). */
+function isExecutableFile(file) {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function fileExists(file) {
+  try {
+    return fs.existsSync(file);
+  } catch {
+    return false;
+  }
+}
+
+function win32XpairBin(env = process.env) {
+  const programFiles = env.ProgramFiles || env.PROGRAMFILES || "C:\\Program Files";
+  return path.win32.join(programFiles, "Xpair", "xpair.exe");
+}
+
+function resolveXpairCliBin({
+  platform = process.platform,
+  env = process.env,
+  home = HOME,
+  absOnly = false,
+  exists = fileExists,
+  executable = isExecutableFile,
+} = {}) {
+  if (platform === "win32") {
+    const installed = win32XpairBin(env);
+    if (exists(installed)) return installed;
+    return absOnly ? null : "xpair.exe";
+  }
+  const local = path.join(home, ".local", "bin", "xpair");
+  if (executable(local)) return local;
+  return absOnly ? null : "xpair";
+}
+
+/** Resolve the xpair binary (installed platform path, else on PATH). */
 function rpBin() {
-  const local = path.join(HOME, ".local", "bin", "xpair");
-  return fs.existsSync(local) ? local : "xpair";
+  return resolveXpairCliBin();
 }
 
 /** The xpair binary ONLY when it resolves to a real absolute path on disk; null when it would
@@ -81,9 +121,7 @@ function rpBin() {
  *  inherited PATH omits ~/.local/bin). Used by the hard CLI guard so we never claim "ready" off a
  *  PATH guess. */
 function rpBinAbs() {
-  const local = path.join(HOME, ".local", "bin", "xpair");
-  try { if (fs.existsSync(local)) return local; } catch { /* ignore */ }
-  return null;
+  return resolveXpairCliBin({ absOnly: true });
 }
 
 function clientEnvPath() {
@@ -145,7 +183,16 @@ function compareVersions(a, b) {
 }
 
 /** The standard user-tool PATH a GUI Electron app is missing (its inherited PATH is minimal). */
-const RICH_PATH = `${HOME}/.local/bin:${HOME}/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`;
+function richPath() {
+  if (process.platform === "win32") {
+    const programFiles = process.env.ProgramFiles || process.env.PROGRAMFILES || "C:\\Program Files";
+    return [
+      path.win32.join(programFiles, "Xpair"),
+      process.env.PATH || "",
+    ].filter(Boolean).join(";");
+  }
+  return `${HOME}/.local/bin:${HOME}/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`;
+}
 
 /** Resolve the running ssh-agent's auth socket. A GUI Electron app launched from Finder/Dock does
  *  NOT inherit SSH_AUTH_SOCK, so ssh can't reach the agent and silently falls back to a password
@@ -191,7 +238,7 @@ function sshAuthSock() {
  *  shells out to ssh (directly or via the xpair CLI), this restores both the user PATH and the
  *  SSH_AUTH_SOCK the desktop launch dropped, so ssh uses key auth instead of falling to password. */
 function spawnEnv(extra = {}) {
-  const env = { ...process.env, PATH: RICH_PATH, ...extra };
+  const env = { ...process.env, PATH: richPath(), ...extra };
   const sock = sshAuthSock();
   if (sock) env.SSH_AUTH_SOCK = sock;
   return env;
@@ -199,6 +246,15 @@ function spawnEnv(extra = {}) {
 
 function sshControlPath() {
   return "/tmp/rp-cm-" + (process.env.RP_SSH_CM_TAG || "x") + "-%C";
+}
+
+function sshControlMasterArgs() {
+  if (process.platform === "win32") return [];
+  return [
+    "-o", "ControlMaster=auto",
+    "-o", `ControlPath=${sshControlPath()}`,
+    "-o", "ControlPersist=300",
+  ];
 }
 
 function sshEphemeralKnownHostsPath() {
@@ -495,9 +551,7 @@ function sshProbeOpts(host, connectTimeout = 5) {
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${connectTimeout}`,
     "-o", "ConnectionAttempts=1",
-    "-o", "ControlMaster=auto",
-    "-o", `ControlPath=${sshControlPath()}`,
-    "-o", "ControlPersist=300",
+    ...sshControlMasterArgs(),
     "-o", "PreferredAuthentications=publickey",
     "-o", "PubkeyAuthentication=yes",
     "-o", "PasswordAuthentication=no",
@@ -1054,8 +1108,67 @@ function currentGatewayMac() {
   return mm ? mm[1].toLowerCase() : "";
 }
 
+function normalizeMac(mac) {
+  const parts = String(mac || "").trim().split(/[:-]/).filter(Boolean);
+  if (parts.length !== 6) return "";
+  if (!parts.every((p) => /^[0-9a-f]{1,2}$/i.test(p))) return "";
+  return parts.map((p) => p.toLowerCase().padStart(2, "0")).join(":");
+}
+
+function win32DefaultGateway() {
+  const route = commandOutput("route", ["print", "0.0.0.0"]);
+  let match = route.match(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d{1,3}(?:\.\d{1,3}){3})\s+/m);
+  if (match) return match[1];
+
+  const ps = commandOutput("powershell", [
+    "-NoProfile",
+    "-Command",
+    "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric,InterfaceMetric | Select-Object -First 1 -ExpandProperty NextHop",
+  ]);
+  match = ps.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/);
+  return match ? match[1] : "";
+}
+
+function currentGatewayMacWin32() {
+  const gateway = win32DefaultGateway();
+  if (!gateway) return { mac: "", err: "default gateway not found" };
+  const arp = commandOutput("arp", ["-a", gateway]);
+  const escapedGateway = gateway.replace(/\./g, "\\.");
+  const re = new RegExp(`^\\s*${escapedGateway}\\s+([0-9a-f]{1,2}(?:[:-][0-9a-f]{1,2}){5})\\s+`, "im");
+  const match = arp.match(re) || arp.match(/\b([0-9a-f]{1,2}(?:[:-][0-9a-f]{1,2}){5})\b/i);
+  const mac = match ? normalizeMac(match[1]) : "";
+  return mac ? { mac, err: "" } : { mac: "", err: `gateway MAC not found for ${gateway}` };
+}
+
+function logWin32GatewayFailOpen(err) {
+  try {
+    console.error(`xpair: win32 gateway MAC guard fail-open (${err || "unknown parse failure"})`);
+  } catch {
+    /* ignore */
+  }
+}
+
+function gatewayMacVerdict(current, stored, updateBaseline) {
+  if (updateBaseline || !stored) {
+    upsertEnv("GATEWAY_MAC", current);
+    return { allowed: true, state: "baseline", current, stored: current, err: "" };
+  }
+  if (stored !== current) {
+    return { allowed: false, state: "changed", current, stored, err: "default gateway MAC changed" };
+  }
+  return { allowed: true, state: "same", current, stored, err: "" };
+}
+
 function gatewayMacStatus({ updateBaseline = false } = {}) {
   const stored = parseEnv(clientEnvPath()).GATEWAY_MAC || "";
+  if (process.platform === "win32") {
+    const current = currentGatewayMacWin32();
+    if (!current.mac) {
+      logWin32GatewayFailOpen(current.err);
+      return { allowed: true, state: "unsupported-platform", current: "", stored, err: current.err };
+    }
+    return gatewayMacVerdict(current.mac, stored, updateBaseline);
+  }
   if (process.platform !== "darwin") {
     return { allowed: true, state: "unsupported-platform", current: "", stored, err: "" };
   }
@@ -1068,14 +1181,7 @@ function gatewayMacStatus({ updateBaseline = false } = {}) {
   if (!current) {
     return { allowed: false, state: "unknown", current: "", stored, err: "default gateway MAC unknown" };
   }
-  if (updateBaseline || !stored) {
-    upsertEnv("GATEWAY_MAC", current);
-    return { allowed: true, state: "baseline", current, stored: current, err: "" };
-  }
-  if (stored !== current) {
-    return { allowed: false, state: "changed", current, stored, err: "default gateway MAC changed" };
-  }
-  return { allowed: true, state: "same", current, stored, err: "" };
+  return gatewayMacVerdict(current, stored, updateBaseline);
 }
 
 /** True only when the FULL password-bootstrap toolchain is present: the installed CLI understands
@@ -1102,6 +1208,7 @@ function cliSupportsPasswordStdin() {
  * Feature-detect the installed CLI's source (same conservative pattern as cliSupportsPasswordStdin):
  * unreadable/old ⇒ false ⇒ the guard routes to WELCOME to reinstall the bundled CLI. */
 function cliSupportsServing() {
+  if (process.platform === "win32") return true;
   const bin = rpBinAbs();
   if (!bin) return false;
   try {
@@ -1209,7 +1316,8 @@ const bridge = {
   async cliReady() {
     const bin = rpBinAbs();
     if (!bin) {
-      return { ready: false, bin: "", err: "xpair CLI not found at ~/.local/bin/xpair" };
+      const expected = process.platform === "win32" ? "%ProgramFiles%\\Xpair\\xpair.exe" : "~/.local/bin/xpair";
+      return { ready: false, bin: "", err: `xpair CLI not found at ${expected}` };
     }
     const r = await run(bin, ["status"]);
     if (r.code !== 0) {
@@ -1236,6 +1344,15 @@ const bridge = {
   // needed; REMOTE_HOST is only prompted on a tty (none here) so client install is non-interactive.
   // Returns {ok, err}; only a FALSE here should make App.tsx show the blocking banner (+ Retry).
   async installCli() {
+    if (process.platform === "win32") {
+      if (rpBinAbs()) return { ok: true, err: "" };
+      return {
+        ok: false,
+        err: "Install the Xpair CLI (.msi) first",
+        action: "OPEN_DOWNLOAD",
+        url: CLI_DOWNLOAD_URL,
+      };
+    }
     // Prefer the bundled copy (production .app); fall back to the in-repo SoT (dev checkout, where the
     // bridge runs from client/ide/remotepair/ext → ../../../../shared/install.sh).
     const candidates = [
@@ -1266,6 +1383,14 @@ const bridge = {
   },
 
   async openHostOnboarding() {
+    if (process.platform === "win32") {
+      const docs = await run("cmd", ["/c", "start", "", HOST_SETUP_URL]);
+      if (docs.code === 0) return { ok: true, err: "" };
+      return {
+        ok: false,
+        err: docs.err || `Host onboarding runs on the Mac host. Open ${HOST_SETUP_URL}`,
+      };
+    }
     const app = await run("open", ["-a", "XpairHost"]);
     if (app.code === 0) return { ok: true, err: "" };
     const docs = await run("open", [HOST_SETUP_URL]);
@@ -2112,6 +2237,9 @@ const bridge = {
 
   // Shared by the Remote Desktop tunnel path so every ssh child gets the same
   // GUI-app PATH enrichment, SSH_AUTH_SOCK recovery, and failure taxonomy.
+  rpBin,
+  rpBinAbs,
+  resolveXpairCliBin,
   spawnEnv,
   sshFailureKind,
   sshFailureMessage,
@@ -2125,6 +2253,8 @@ const bridge = {
 	    clientIDForKeyBlob,
 	    parseOpenSSHEd25519PrivateKey,
 	    gatewayMacStatus,
+	    sshControlMasterArgs,
+	    currentGatewayMacWin32,
 	  },
 };
 

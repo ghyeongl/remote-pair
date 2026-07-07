@@ -30,23 +30,28 @@ function test(name, fn) {
 test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a native pre-workbench hard gate", () => {
   assert.match(
     bridge,
-    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*if \(!bin\)[\s\S]*xpair CLI not found at ~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)/,
+    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*%ProgramFiles%\\\\Xpair\\\\xpair\.exe[\s\S]*~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)/,
     "cliReady must resolve a real xpair binary and prove it with xpair status",
   );
   assert.match(
     bridge,
-    /async installCli\(\)[\s\S]*shared", "install\.sh"[\s\S]*run\("bash", \[installer, "--role", "client"\][\s\S]*if \(!rpBinAbs\(\)\)/,
-    "installCli must use the bundled installer and re-check that xpair actually landed",
+    /async installCli\(\)[\s\S]*process\.platform === "win32"[\s\S]*Install the Xpair CLI \(\.msi\) first[\s\S]*OPEN_DOWNLOAD[\s\S]*CLI_DOWNLOAD_URL[\s\S]*shared", "install\.sh"[\s\S]*run\("bash", \[installer, "--role", "client"\][\s\S]*if \(!rpBinAbs\(\)\)/,
+    "installCli must return MSI guidance on Windows and use the bundled installer elsewhere",
   );
 
   assert.match(
     onboardingMain,
-    /const cli = await probeBridge\.cliReady\(\)[\s\S]*if \(!cli \|\| cli\.ready !== true\) return START_STEP\.WELCOME/,
+    /if \(process\.platform !== 'darwin'\)[\s\S]*cliProbeReady\(probeBridge\)[\s\S]*START_STEP\.WELCOME/,
+    "non-Darwin pre-workbench gating must only depend on the CLI probe",
+  );
+  assert.match(
+    onboardingMain,
+    /if \(!\(await cliProbeReady\(probeBridge\)\)\) return START_STEP\.WELCOME/,
     "firstFailingGuard must stop at Welcome when the CLI is missing",
   );
   assert.match(
     onboardingMain,
-    /catch \{\s*return START_STEP\.WELCOME\s*\}[\s\S]*probeBridge\.sshReachable\(host\)/,
+    /if \(!\(await cliProbeReady\(probeBridge\)\)\) return START_STEP\.WELCOME[\s\S]*probeBridge\.sshReachable\(host\)/,
     "CLI probe failures must happen before any remote host probe",
   );
   assert.match(

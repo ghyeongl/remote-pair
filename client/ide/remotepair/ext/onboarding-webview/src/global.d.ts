@@ -27,7 +27,7 @@ declare global {
       cliReady: () => Promise<{ ready: boolean; bin: string; err: string }>
       // No dead end: install the bundled client CLI to ~/.local/bin (install.sh --role client). The
       // onboarding calls this when cliReady is false; only ok===false blocks (with Retry).
-      installCli: () => Promise<{ ok: boolean; err: string }>
+      installCli: () => Promise<{ ok: boolean; err: string; action?: "OPEN_DOWNLOAD"; url?: string }>
       openHostOnboarding: () => Promise<{ ok: boolean; err: string }>
       // Hard host-app guard (Connect/Reconnect): reachable is not enough — the host must have the
       // Xpair host app installed AND be version-compatible. installed/compatible false → block the step.

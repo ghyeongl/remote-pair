@@ -158,6 +158,18 @@ function sshControlPath() {
   return "/tmp/rp-cm-" + (process.env.RP_SSH_CM_TAG || "x") + "-%C";
 }
 
+function sshControlMasterArgs() {
+  if (process.platform === "win32") return [];
+  return [
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    `ControlPath=${sshControlPath()}`,
+    "-o",
+    "ControlPersist=300",
+  ];
+}
+
 // Local-tz ISO-8601 with offset, second precision (e.g. 2026-06-15T10:45:16+0900).
 function logTimestamp() {
   const d = new Date();
@@ -433,12 +445,7 @@ function sshRun(host, remoteCmd, opts = {}) {
     // and a single SSH-agent (1Password) authorization instead of one per probe. The path lives
     // under this GUI session's temp dir and %C keys it by host/port/user, so the electron-main
     // onboarding guard and extension-host workbench share it without a pid split.
-    "-o",
-    "ControlMaster=auto",
-    "-o",
-    `ControlPath=${sshControlPath()}`,
-    "-o",
-    "ControlPersist=300",
+    ...sshControlMasterArgs(),
     host, // validated against HOST_RE; passed as its own argv element
     remoteCmd,
   ];
@@ -627,9 +634,7 @@ function spawnTunnel(host, localPort, remotePort) {
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "ControlMaster=auto",
-    "-o", `ControlPath=${sshControlPath()}`,
-    "-o", "ControlPersist=300",
+    ...sshControlMasterArgs(),
     "-o", "ExitOnForwardFailure=yes",
     "-N",
     "-L", `${localPort}:127.0.0.1:${rport}`,
@@ -1709,20 +1714,19 @@ function reconcileBrowserRoots() {
 
 /**
  * C1.D3 — Run the client `xpair` CLI and capture its stdout/stderr. Spawned through
- * the user's login shell so PATH resolution finds `xpair` wherever it was installed
- * (~/.local/bin, /opt/homebrew/bin, /usr/local/bin, …) — the extension host does not inherit
- * an interactive PATH. argv is passed as a single POSIX-quoted command string to `sh -lc`.
+ * argv directly so local arguments are never shell-joined. The bridge resolver picks the
+ * platform install path first, then falls back to PATH through spawnEnv()'s enrichment.
  *
  * Returns { code, stdout, stderr }. Never throws (spawn errors resolve as code -1).
  */
 function runXpairCli(args, opts = {}) {
   const timeoutMs = opts.timeoutMs || 120000;
-  const quoted = ["xpair", ...args].map(shSingleQuote).join(" ");
-  const shell = process.env.SHELL || "/bin/sh";
+  const bin = onboardingBridge.rpBin();
+  const argv = (Array.isArray(args) ? args : []).map((arg) => String(arg));
   return new Promise((resolve) => {
     let child;
     try {
-      child = cp.spawn(shell, ["-lc", quoted], { windowsHide: true });
+      child = cp.spawn(bin, argv, { windowsHide: true, env: spawnEnv() });
     } catch (e) {
       resolve({ code: -1, stdout: "", stderr: String(e) });
       return;
