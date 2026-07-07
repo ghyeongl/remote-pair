@@ -188,6 +188,7 @@ pub fn build_ssh_config_block_for_os(
     } else {
         ""
     };
+    let identity = quote_ssh_config_path(identity);
     format!(
         concat!(
             "# >>> xpair: {host} >>>\n",
@@ -206,6 +207,19 @@ pub fn build_ssh_config_block_for_os(
         identity = identity,
         keychain = keychain
     )
+}
+
+fn quote_ssh_config_path(path: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in path.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn verify_sha256(expected: &str, actual: &str) -> bool {
@@ -718,6 +732,7 @@ fn contains_auth_denied(output: &str) -> bool {
 
 struct AskpassTemp {
     path: PathBuf,
+    data_path: Option<PathBuf>,
 }
 
 impl AskpassTemp {
@@ -734,16 +749,36 @@ impl AskpassTemp {
         let path = dir.join("askpass.sh");
 
         #[cfg(windows)]
-        let body = format!("@echo off\r\necho {}\r\n", escape_cmd_echo(password));
+        let data_path = {
+            let data_path = dir.join(WINDOWS_ASKPASS_DATA_FILE);
+            if let Err(error) = fs::write(&data_path, windows_askpass_data(password)) {
+                let _ = fs::remove_dir_all(&dir);
+                return Err(error);
+            }
+            chmod_best_effort(&data_path, 0o600);
+            Some(data_path)
+        };
+        #[cfg(not(windows))]
+        let data_path = None;
+
+        #[cfg(windows)]
+        let body = windows_askpass_cmd_body().to_string();
         #[cfg(not(windows))]
         let body = format!(
             "#!/bin/sh\nprintf '%s\\n' {}\n",
             remote_quote::posix_single_quote(password)
         );
 
-        fs::write(&path, body)?;
+        if let Err(error) = fs::write(&path, body) {
+            #[cfg(windows)]
+            if let Some(data_path) = &data_path {
+                let _ = fs::remove_file(data_path);
+            }
+            let _ = fs::remove_dir_all(&dir);
+            return Err(error);
+        }
         chmod_best_effort(&path, 0o700);
-        Ok(AskpassTemp { path })
+        Ok(AskpassTemp { path, data_path })
     }
 
     fn path(&self) -> &Path {
@@ -754,6 +789,10 @@ impl AskpassTemp {
 impl Drop for AskpassTemp {
     fn drop(&mut self) {
         chmod_best_effort(&self.path, 0o600);
+        if let Some(data_path) = &self.data_path {
+            chmod_best_effort(data_path, 0o600);
+            let _ = fs::remove_file(data_path);
+        }
         let _ = fs::remove_file(&self.path);
         if let Some(parent) = self.path.parent() {
             let _ = fs::remove_dir(parent);
@@ -761,15 +800,17 @@ impl Drop for AskpassTemp {
     }
 }
 
-#[cfg(windows)]
-fn escape_cmd_echo(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|ch| match ch {
-            '^' | '&' | '|' | '<' | '>' | '%' => vec!['^', ch],
-            _ => vec![ch],
-        })
-        .collect()
+#[cfg(any(windows, test))]
+const WINDOWS_ASKPASS_DATA_FILE: &str = "pw.dat";
+
+#[cfg(any(windows, test))]
+fn windows_askpass_cmd_body() -> &'static str {
+    "@echo off\r\ntype \"%~dp0pw.dat\"\r\n"
+}
+
+#[cfg(any(windows, test))]
+fn windows_askpass_data(password: &str) -> &[u8] {
+    password.as_bytes()
 }
 
 fn chmod_best_effort(path: &Path, mode: u32) {
@@ -1373,7 +1414,7 @@ mod tests {
                 "alice",
                 "/Users/me/.ssh/id_ed25519"
             ),
-            "# >>> xpair: mac-mini >>>\nHost mac-mini\n  HostName 192.0.2.10\n  User alice\n  IdentityFile /Users/me/.ssh/id_ed25519\n  AddKeysToAgent yes\n  IgnoreUnknown UseKeychain\n  UseKeychain yes\n  HostKeyAlgorithms ssh-ed25519\n# <<< xpair: mac-mini <<<\n"
+            "# >>> xpair: mac-mini >>>\nHost mac-mini\n  HostName 192.0.2.10\n  User alice\n  IdentityFile \"/Users/me/.ssh/id_ed25519\"\n  AddKeysToAgent yes\n  IgnoreUnknown UseKeychain\n  UseKeychain yes\n  HostKeyAlgorithms ssh-ed25519\n# <<< xpair: mac-mini <<<\n"
         );
         assert_eq!(
             build_ssh_config_block_for_os(
@@ -1383,8 +1424,61 @@ mod tests {
                 "alice",
                 "/Users/me/.ssh/id_ed25519"
             ),
-            "# >>> xpair: mac-mini >>>\nHost mac-mini\n  HostName 192.0.2.10\n  User alice\n  IdentityFile /Users/me/.ssh/id_ed25519\n  AddKeysToAgent yes\n  HostKeyAlgorithms ssh-ed25519\n# <<< xpair: mac-mini <<<\n"
+            "# >>> xpair: mac-mini >>>\nHost mac-mini\n  HostName 192.0.2.10\n  User alice\n  IdentityFile \"/Users/me/.ssh/id_ed25519\"\n  AddKeysToAgent yes\n  HostKeyAlgorithms ssh-ed25519\n# <<< xpair: mac-mini <<<\n"
         );
+    }
+
+    #[test]
+    fn ssh_config_quotes_identity_paths_with_spaces() {
+        let block = build_ssh_config_block_for_os(
+            Os::Linux,
+            "mac-mini",
+            "192.0.2.10",
+            "alice",
+            r#"C:\Users\Alice Smith\.ssh\id "work"_ed25519"#,
+        );
+
+        assert!(
+            block.contains(r#"  IdentityFile "C:\\Users\\Alice Smith\\.ssh\\id \"work\"_ed25519""#)
+        );
+    }
+
+    #[test]
+    fn windows_askpass_reads_literal_data_file() {
+        assert_eq!(WINDOWS_ASKPASS_DATA_FILE, "pw.dat");
+        for password in [
+            "on",
+            "off",
+            "",
+            "has spaces",
+            "a&b",
+            r#"quote""#,
+            "100%done",
+        ] {
+            assert_eq!(
+                windows_askpass_cmd_body(),
+                "@echo off\r\ntype \"%~dp0pw.dat\"\r\n"
+            );
+            assert_eq!(windows_askpass_data(password), password.as_bytes());
+        }
+    }
+
+    #[test]
+    fn askpass_drop_removes_script_and_data_files() {
+        let tmp = TestDir::new("askpass-cleanup");
+        let script = tmp.path.join("askpass.cmd");
+        let data = tmp.path.join("pw.dat");
+        fs::write(&script, "script").unwrap();
+        fs::write(&data, "secret").unwrap();
+
+        let helper = AskpassTemp {
+            path: script.clone(),
+            data_path: Some(data.clone()),
+        };
+        drop(helper);
+
+        assert!(!script.exists());
+        assert!(!data.exists());
     }
 
     #[test]

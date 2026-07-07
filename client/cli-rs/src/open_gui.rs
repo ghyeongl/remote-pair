@@ -175,15 +175,33 @@ fn build_windows_spawn(self_exe: &str, dir: &str, wt_available: bool) -> Vec<Str
         argv.extend(launch);
         argv
     } else {
-        let mut argv = vec![
+        vec![
             "cmd".to_string(),
             "/c".to_string(),
-            "start".to_string(),
-            String::new(),
-        ];
-        argv.extend(launch);
-        argv
+            cmd_start_command(&launch),
+        ]
     }
+}
+
+fn cmd_start_command(argv: &[String]) -> String {
+    let mut command = String::from("start \"\"");
+    for arg in argv {
+        command.push(' ');
+        command.push_str(&cmd_start_quote(arg));
+    }
+    command
+}
+
+fn cmd_start_quote(arg: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in arg.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn build_linux_spawn(terminal_pref: &str, self_exe: &str, dir: &str) -> Vec<String> {
@@ -559,18 +577,14 @@ end tell
             build_terminal_spawn(
                 Os::Windows,
                 "terminal",
-                "C:\\bin\\xpair.exe",
-                "C:\\work",
+                "C:\\Program Files\\Xpair (Preview)\\xpair.exe",
+                "C:\\Users\\Alice\\Work Projects\\repo (main)",
                 false,
             ),
             TerminalSpawn::Argv(vec![
                 "cmd".to_string(),
                 "/c".to_string(),
-                "start".to_string(),
-                String::new(),
-                "C:\\bin\\xpair.exe".to_string(),
-                "launch".to_string(),
-                "C:\\work".to_string(),
+                "start \"\" \"C:\\Program Files\\Xpair (Preview)\\xpair.exe\" \"launch\" \"C:\\Users\\Alice\\Work Projects\\repo (main)\"".to_string(),
             ])
         );
     }

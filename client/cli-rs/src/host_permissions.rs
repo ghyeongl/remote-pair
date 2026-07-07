@@ -11,6 +11,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use crate::config;
 use crate::platform::{self, Os};
+use crate::session;
 use crate::status;
 use crate::transport::{Output, Transport};
 
@@ -184,15 +185,16 @@ fn parse_host_arg(args: &[String]) -> Option<String> {
 }
 
 fn build_ssh_argv(os: platform::Os, host: &str, remote_cmd: &str) -> Vec<String> {
-    let mut argv = vec![
-        "ssh".to_string(),
+    let mut argv = vec!["ssh".to_string()];
+    argv.extend(session::pairing_identity_args());
+    argv.extend([
         "-o".to_string(),
         "BatchMode=yes".to_string(),
         "-o".to_string(),
         "ConnectTimeout=6".to_string(),
         "-o".to_string(),
         "ConnectionAttempts=1".to_string(),
-    ];
+    ]);
     argv.extend(
         os.ssh_mux_neutralizer_args()
             .iter()
@@ -531,6 +533,20 @@ mod tests {
     }
 
     impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let saved = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard { saved }
+        }
+
         fn remove(keys: &[&'static str]) -> EnvGuard {
             let saved = keys
                 .iter()
@@ -557,6 +573,12 @@ mod tests {
     fn without_env<T>(keys: &[&'static str], f: impl FnOnce() -> T) -> T {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::remove(keys);
+        f()
+    }
+
+    fn with_env<T>(vars: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set(vars);
         f()
     }
 
@@ -707,31 +729,68 @@ mod tests {
 
     #[test]
     fn windows_ssh_argv_includes_mux_neutralizer() {
-        assert_eq!(
-            build_ssh_argv(Os::Windows, "mac-mini", build_status_remote_cmd()),
-            vec![
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=6",
-                "-o",
-                "ConnectionAttempts=1",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPath=none",
-                "-o",
-                "PreferredAuthentications=publickey",
-                "-o",
-                "NumberOfPasswordPrompts=0",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-T",
-                "-n",
-                "mac-mini",
-                "cat ~/.xpair/host/logs/status.json 2>/dev/null",
-            ]
+        let rp_host_dir = std::env::temp_dir().join(format!(
+            "xpair-host-permissions-test-{}-no-key",
+            std::process::id()
+        ));
+        let rp_host_dir_s = rp_host_dir.to_string_lossy().into_owned();
+
+        with_env(
+            &[("RP_HOST_DIR", Some(&rp_host_dir_s)), ("RP_DIR", None)],
+            || {
+                assert_eq!(
+                    build_ssh_argv(Os::Windows, "mac-mini", build_status_remote_cmd()),
+                    vec![
+                        "ssh",
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "ConnectTimeout=6",
+                        "-o",
+                        "ConnectionAttempts=1",
+                        "-o",
+                        "ControlMaster=no",
+                        "-o",
+                        "ControlPath=none",
+                        "-o",
+                        "PreferredAuthentications=publickey",
+                        "-o",
+                        "NumberOfPasswordPrompts=0",
+                        "-o",
+                        "StrictHostKeyChecking=yes",
+                        "-T",
+                        "-n",
+                        "mac-mini",
+                        "cat ~/.xpair/host/logs/status.json 2>/dev/null",
+                    ]
+                );
+            },
         );
+    }
+
+    #[test]
+    fn ssh_argv_offers_shared_pairing_identity_when_present() {
+        let rp_host_dir = std::env::temp_dir().join(format!(
+            "xpair-host-permissions-test-{}-pairing-key",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&rp_host_dir);
+        fs::create_dir_all(&rp_host_dir).unwrap();
+        let pairing_key = rp_host_dir.join("pairing_ed25519");
+        fs::write(&pairing_key, "pairing-private").unwrap();
+        let rp_host_dir_s = rp_host_dir.to_string_lossy().into_owned();
+        let pairing_key_s = pairing_key.to_string_lossy().into_owned();
+
+        with_env(
+            &[("RP_HOST_DIR", Some(&rp_host_dir_s)), ("RP_DIR", None)],
+            || {
+                let argv = build_ssh_argv(Os::Linux, "mac-mini", build_status_remote_cmd());
+                assert_eq!(argv[0], "ssh");
+                assert_eq!(argv[1], "-i");
+                assert_eq!(argv[2], pairing_key_s);
+            },
+        );
+
+        let _ = fs::remove_dir_all(rp_host_dir);
     }
 }

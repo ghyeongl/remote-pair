@@ -263,7 +263,14 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 eprintln!("map rm <clientDir>");
                 return ExitCode::from(2);
             }
-            let client_dir = &args[1];
+            let client_dir = match canonical_client_dir(&args[1]) {
+                Ok(dir) => dir,
+                Err(()) => {
+                    eprintln!("client path not found: {}", args[1]);
+                    return ExitCode::from(1);
+                }
+            };
+            let os = Os::current();
             let raw_maps = match resolve_raw_maps(&path) {
                 Ok(raw_maps) => raw_maps,
                 Err(err) => {
@@ -271,17 +278,12 @@ fn cmd_map(args: &[String]) -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let kept = parse_maps(&raw_maps)
-                .into_iter()
-                .filter(|(client, _)| client != client_dir)
-                .map(|(client, host)| format!("{client}::{host}"))
-                .collect::<Vec<_>>()
-                .join(";");
+            let kept = remove_client_from_raw_maps(&raw_maps, &client_dir, os);
             if let Err(err) = config::set(&path, "FOLDER_MAPS", &kept) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
             }
-            if let Err(err) = remove_map_mode(&path, client_dir) {
+            if let Err(err) = remove_map_mode_for_os(&path, &client_dir, os) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
             }
@@ -499,14 +501,38 @@ fn set_map_mode(path: &Path, client_dir: &str, method: &str) -> std::io::Result<
     config::set(path, "FOLDER_MAP_MODES", &entries.join(";"))
 }
 
-fn remove_map_mode(path: &Path, client_dir: &str) -> std::io::Result<()> {
+fn remove_map_mode_for_os(path: &Path, client_dir: &str, os: Os) -> std::io::Result<()> {
     let raw = resolve_raw_modes(path)?;
-    let entries = parse_maps(&raw)
+    let entries = remove_client_from_raw_maps(&raw, client_dir, os);
+    config::set(path, "FOLDER_MAP_MODES", &entries)
+}
+
+fn remove_client_from_raw_maps(raw: &str, client_dir: &str, os: Os) -> String {
+    parse_maps(raw)
         .into_iter()
-        .filter(|(client, _)| client != client_dir)
+        .filter(|(client, _)| !map_client_eq_for_os(client, client_dir, os))
         .map(|(client, mode)| format!("{client}::{mode}"))
-        .collect::<Vec<_>>();
-    config::set(path, "FOLDER_MAP_MODES", &entries.join(";"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn map_client_eq_for_os(left: &str, right: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        normalize_windows_path_for_cmp(left) == normalize_windows_path_for_cmp(right)
+    } else {
+        left == right
+    }
+}
+
+fn normalize_windows_path_for_cmp(path: &str) -> String {
+    let mut normalized = path.replace('/', "\\");
+    if let Some(stripped) = normalized.strip_prefix(r"\\?\") {
+        normalized = stripped.to_string();
+    }
+    while normalized.len() > 3 && normalized.ends_with('\\') {
+        normalized.pop();
+    }
+    normalized.to_ascii_lowercase()
 }
 
 fn render_map_json(pairs: &[FolderMap], modes: &[FolderMap]) -> String {
@@ -721,5 +747,31 @@ mod tests {
             r"c:\users\alice\project",
             Os::Windows
         ));
+    }
+
+    #[test]
+    fn windows_map_rm_comparison_normalizes_case_slashes_and_drive_letter() {
+        assert!(map_client_eq_for_os(
+            r"\\?\C:\Users\Alice\Project",
+            "c:/users/alice/project/",
+            Os::Windows
+        ));
+        assert!(!map_client_eq_for_os(
+            r"C:\Users\Alice\ProjectX",
+            r"c:\users\alice\project",
+            Os::Windows
+        ));
+    }
+
+    #[test]
+    fn remove_client_from_raw_maps_uses_windows_normalized_key() {
+        assert_eq!(
+            remove_client_from_raw_maps(
+                r"C:\Users\Alice\Project::/host/project;D:\Other::/host/other",
+                "c:/users/alice/project/",
+                Os::Windows,
+            ),
+            r"D:\Other::/host/other"
+        );
     }
 }

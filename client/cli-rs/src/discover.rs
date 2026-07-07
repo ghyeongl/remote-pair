@@ -23,6 +23,8 @@ use std::io::{self, Write};
 use std::net::UdpSocket;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::{mpsc, Arc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config;
@@ -34,6 +36,7 @@ const XPAIR_ROLES: &[&str] = &["host", "both", "client"];
 const DEFAULT_LAN_BEACON_PORT: u16 = 8892;
 const PAIRING_METADATA_PORT: u16 = 8891;
 const PAIRING_METADATA_TIMEOUT: &str = "0.8";
+const TAILSCALE_METADATA_OVERALL_TIMEOUT_MS: u64 = 2_500;
 
 /// macOS install layouts for the Tailscale CLI (App Store sandbox, brew arm64, brew x86_64).
 /// Ported from `rp_tailscale_bin()` (`client/cli/xpair:1457-1467`); harmless on non-macOS (the
@@ -538,8 +541,13 @@ pub fn run(args: &[String]) -> ExitCode {
     let mut records = listen_lan_beacons(parsed.timeout);
     if let Some(bin) = find_tailscale(&tailscale_candidates(), |p| Path::new(p).is_file()) {
         if let Some(json) = run_tailscale_status(&bin) {
+            let metadata = fetch_tailscale_metadata_concurrent(
+                tailscale_metadata_addrs(&json),
+                Duration::from_millis(TAILSCALE_METADATA_OVERALL_TIMEOUT_MS),
+                fetch_pairing_metadata,
+            );
             records.extend(parse_tailscale_peers_with_metadata(&json, |addr| {
-                fetch_pairing_metadata(addr)
+                metadata.get(addr).cloned()
             }));
         }
     }
@@ -771,6 +779,61 @@ pub fn fetch_pairing_metadata_with_exec(
     ];
     let body = exec("curl", &args)?;
     parse_pairing_metadata(&body)
+}
+
+fn tailscale_metadata_addrs(json: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut addrs = Vec::new();
+    for record in parse_tailscale_peers_with_metadata(json, |_| None) {
+        if !record.addr.is_empty() && seen.insert(record.addr.clone()) {
+            addrs.push(record.addr);
+        }
+    }
+    addrs
+}
+
+fn fetch_tailscale_metadata_concurrent<F>(
+    addrs: Vec<String>,
+    timeout: Duration,
+    fetch: F,
+) -> HashMap<String, PairingMetadata>
+where
+    F: Fn(&str) -> Option<PairingMetadata> + Send + Sync + 'static,
+{
+    if addrs.is_empty() || timeout.is_zero() {
+        return HashMap::new();
+    }
+
+    let fetch = Arc::new(fetch);
+    let (tx, rx) = mpsc::channel();
+    let expected = addrs.len();
+
+    for addr in addrs {
+        let tx = tx.clone();
+        let fetch = Arc::clone(&fetch);
+        thread::spawn(move || {
+            let meta = fetch(&addr);
+            let _ = tx.send((addr, meta));
+        });
+    }
+    drop(tx);
+
+    let deadline = Instant::now() + timeout;
+    let mut out = HashMap::new();
+    for _ in 0..expected {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+            Ok((addr, Some(meta))) => {
+                out.insert(addr, meta);
+            }
+            Ok((_addr, None)) => {}
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    out
 }
 
 /// `host_app_present` SSH probe shim (uncovered — network). Returns `Some(true)` when
@@ -1306,6 +1369,7 @@ impl<'a> JsonReader<'a> {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1539,6 +1603,68 @@ mod tests {
         .unwrap();
         assert_eq!(meta.fp.as_deref(), Some("SHA256:k"));
         assert_eq!(meta.host_user.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn tailscale_metadata_addrs_include_only_eligible_unique_peers() {
+        let json = r#"{
+          "Peer": {
+            "k1": {"OS":"macOS","DNSName":"one.tailnet.ts.net.","TailscaleIPs":["100.64.0.1"],"Online":true},
+            "k2": {"OS":"macOS","DNSName":"dup.tailnet.ts.net.","TailscaleIPs":["100.64.0.1"],"Online":true},
+            "k3": {"OS":"linux","DNSName":"linux.tailnet.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true},
+            "k4": {"OS":"macOS","DNSName":"off.tailnet.ts.net.","TailscaleIPs":["100.64.0.3"],"Online":false}
+          }
+        }"#;
+
+        assert_eq!(tailscale_metadata_addrs(json), vec!["100.64.0.1"]);
+    }
+
+    #[test]
+    fn tailscale_metadata_fetch_runs_peers_concurrently() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_fetch = Arc::clone(&calls);
+        let started = Instant::now();
+
+        let metadata = fetch_tailscale_metadata_concurrent(
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            Duration::from_secs(1),
+            move |addr| {
+                calls_for_fetch.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(200));
+                Some(PairingMetadata {
+                    hostname: Some(addr.to_string()),
+                    ..PairingMetadata::default()
+                })
+            },
+        );
+
+        let elapsed = started.elapsed();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(metadata.len(), 3);
+        assert!(
+            elapsed < Duration::from_millis(450),
+            "metadata lookup should not scale serially with peer count; elapsed={elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn tailscale_metadata_fetch_respects_overall_deadline() {
+        let started = Instant::now();
+
+        let metadata = fetch_tailscale_metadata_concurrent(
+            vec!["a".to_string(), "b".to_string()],
+            Duration::from_millis(50),
+            |_addr| {
+                std::thread::sleep(Duration::from_millis(200));
+                Some(PairingMetadata::default())
+            },
+        );
+
+        assert!(metadata.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "metadata lookup should return at the overall deadline"
+        );
     }
 
     #[test]
