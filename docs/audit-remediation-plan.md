@@ -252,11 +252,9 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 
 ## WS13 — `fix/win32-gates` — **UNPARKED** (superseded: see docs/win32-client-roadmap.md, phase P3)
 
-**Findings**: F19, F20. **Decision D2 (superseded by docs/win32-client-roadmap.md)**: Windows support arrives via the Rust CLI (PR #37), which the roadmap now actively drives to merge; this WS starts once #37 lands (roadmap phase P3, whose design refines the sketch below against as-built line refs):
-- F19 — `extension.js:1625` `runXpairCli`: branch on `process.platform` — win32 spawns the executable argv-style (no login-shell wrapper, no `shSingleQuote`); gate `sshControlPath`/`sshRun`/`spawnTunnel` ControlMaster usage behind `!== 'win32'`.
-- F20 — skip the pre-workbench onboarding gate on `process.platform !== 'darwin'` (open the workbench normally, show a "host setup requires the CLI — coming to Windows" notice) until a win32 CLI exists. Long-term: platform-branch `rpBin`/`installCli`/`openHostOnboarding`.
+**Findings**: F19, F20. **Decision D2 (superseded by docs/win32-client-roadmap.md)**: Windows support arrives via the Rust CLI (PR #37), which the roadmap now actively drives to merge. **This section is a pointer only** — the binding design for F19/F20 is the roadmap's **phase P3** (argv-safe spawn on all platforms, ControlMaster gated off win32, MSI-aware `rpBin`/`installCli`, pre-workbench gate proceeds on Windows when the MSI-installed CLI probes OK). The earlier sketch here is deleted to avoid a second, contradicting spec: it predates the MSI channel and would have shipped a dead-end "coming to Windows" notice.
 
-**Acceptance**: mac behavior byte-identical (t_15/t_23 green); code inspection shows no POSIX-shell spawn reachable on win32.
+**Acceptance**: per roadmap P3.
 
 ## WS14 — `feat/onboarding-host-browse` (D5) — after WS8 + WS10
 

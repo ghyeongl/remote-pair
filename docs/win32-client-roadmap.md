@@ -24,7 +24,7 @@ Rebase `feat/rust-cli` onto `develop` (textually clean — cli-rs is additive). 
 
 ## Phase P1 — `feat/rust-cli`: remaining verbs (PR #37 completes)
 
-- **doctor host rows** — fits `Transport::ssh_exec` directly: host tmux-aqua, host app dir, host server has-session, approve skill file, approve hook grep, notify hook grep, and the permission grants from `status.json` — **all five** of the current TCC model (login item, AX, SR, FDA, File Sharing; #81), not the audit-era AX+SR pair (bash `cmd_doctor` refs in the P0-refreshed comments).
+- **doctor host rows** — fits `Transport::ssh_exec` directly: host tmux-aqua, host app dir, host server has-session, approve skill file, approve hook grep, notify hook grep, and the permission grants — covering **all five** of the current permission model (#81), sourced correctly: `status.json` (written by `host/app/Config.swift`) carries only `ax`/`sr`/`fda`/`sharing` (+`serving`), so those four grants read from it, while **Remote Login is proven by the ssh probe itself** (a successful `ssh_exec` IS the Remote Login gate — it is not in status.json and is not a "login item"). Bash `cmd_doctor` refs in the P0-refreshed comments.
 - **`host`** — port the probe (`tmux-aqua has-session` locally); the `open -a`/`launchctl` app-start half is darwin-gated (rule 3). On win32: probe still works when co-located host is impossible → always the "host is remote" path; app-start arm exits 2 with guidance.
 - **`approve`** — NOT the ssh seam: local FS trigger (`/tmp/xpair.approve-request` + `.label`/`.type`) + poll `~/.xpair/host/logs/xpair.log` for `router:` lines. Port as darwin-gated machine-local verb (it only means something on a machine running the privileged host app).
 - **`onboard`** stays deferred (D8 — the IDE bridge drives individual verbs).
@@ -37,7 +37,7 @@ The release infrastructure has no manifest scheme — the convention is GitHub R
 
 - `release.yml`: add a windows job (self-hosted `[self-hosted, Windows, X64, Win11]` runner probed by win-probe.yml, or windows-latest) building `xpair-<version>-x64.msi` and uploading it to the same GitHub Release with a **stable-named alias** (`xpair-cli.msi`) alongside the versioned asset — mirroring the `Xpair.zip` convention.
 - cli-rs `self-update` (win32): query `api.github.com/repos/<GH_REPO>/releases/latest` (alpha: `releases?per_page=30`), compare `tag_name` vs built-in version, download the `.msi`, verify size/hash from the release body if present, run `msiexec /i <msi> /passive` and exit. This mirrors Updater.swift's flow. On darwin, `self-update` keeps the existing raw-file fetch behavior (ported later at cutover; until then bash handles mac).
-- Version stamping: reuse Cargo.toml → CI injection already in package-windows.yml; add the CLI version to `shared/identity/versions.json` (`cli: "x.y.z"`) + a `check-identity.sh` assertion vs Cargo.toml — same drift-guard pattern as ide/host/screen-engine.
+- Version stamping: `package-windows.yml` exists only on `feat/rust-cli` today (it lands with PR #37) and reads the version from Cargo.toml at build time; P2 makes `release.yml`'s windows job perform that stamping explicitly (single source: Cargo.toml → `-d Version=` → MSI + release asset name). Add the CLI version to `shared/identity/versions.json` (`cli: "x.y.z"`) + a `check-identity.sh` assertion vs Cargo.toml — same drift-guard pattern as ide/host/screen-engine — so the MSI, the tag, and versions.json cannot drift apart.
 
 **Acceptance**: a tagged release carries the `.msi`; `xpair self-update` on a Windows box with an older MSI updates itself; check-identity fails on Cargo/versions.json drift.
 
@@ -96,6 +96,7 @@ Sweep the client onboarding Electron surface with the P3 bridge in place: hardco
 | W3 | SMB on Windows: mount or UNC? | **UNC paths, no mount verb** — native consumption, no /Volumes analog. Optional `net use` for credential bootstrap. |
 | W4 | Sync-method mappings on win32? | **Deferred** — UNC-only first; robocopy/unison design later. |
 | W5 | Where does `self-update` get Windows bits? | **GitHub Releases** (existing convention: stable-named asset + tag compare), NOT a new latest.json. |
+| W6 | `onboard` verb in the Rust CLI? | **Deferred indefinitely** (adopts PR #37's out-of-repo decision "D8"): the IDE onboarding bridge drives the individual verbs directly, so a CLI onboard wizard is redundant; the verb stays wired to exit 2 with guidance. All "D8" references in this document mean W6. |
 
 ## Sequencing & ownership
 
