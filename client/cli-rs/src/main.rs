@@ -214,6 +214,11 @@ fn cmd_map(args: &[String]) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            let os = Os::current();
+            if let Err(message) = validate_map_add_args_for_os(&add, os) {
+                eprintln!("{message}");
+                return ExitCode::from(2);
+            }
             let client_dir = match canonical_client_dir(&add.client) {
                 Ok(dir) => dir,
                 Err(()) => {
@@ -229,7 +234,7 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 }
             };
             let pairs = parse_maps(&raw_maps);
-            if is_mapped(&client_dir, &pairs, Os::current()) {
+            if is_mapped(&client_dir, &pairs, os) {
                 println!("already mapped (or under a mapped root): {client_dir}");
                 return ExitCode::SUCCESS;
             }
@@ -263,14 +268,9 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 eprintln!("map rm <clientDir>");
                 return ExitCode::from(2);
             }
-            let client_dir = match canonical_client_dir(&args[1]) {
-                Ok(dir) => dir,
-                Err(()) => {
-                    eprintln!("client path not found: {}", args[1]);
-                    return ExitCode::from(1);
-                }
-            };
             let os = Os::current();
+            let client_dir = canonical_client_dir(&args[1])
+                .unwrap_or_else(|_| normalize_client_dir_literal_for_os(&args[1], os));
             let raw_maps = match resolve_raw_maps(&path) {
                 Ok(raw_maps) => raw_maps,
                 Err(err) => {
@@ -454,6 +454,17 @@ fn parse_map_add_args(args: &[String]) -> Result<MapAddArgs, String> {
     })
 }
 
+fn validate_map_add_args_for_os(add: &MapAddArgs, os: Os) -> Result<(), String> {
+    if os == Os::Windows && add.host.is_none() {
+        Err(
+            "map add on Windows requires an explicit mac host path: xpair map add <clientDir> <hostDir>"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 fn canonical_client_dir(path: &str) -> Result<String, ()> {
     let path = fs::canonicalize(path).map_err(|_| ())?;
     if path.is_dir() {
@@ -520,7 +531,54 @@ fn map_client_eq_for_os(left: &str, right: &str, os: Os) -> bool {
     if os == Os::Windows {
         normalize_windows_path_for_cmp(left) == normalize_windows_path_for_cmp(right)
     } else {
-        left == right
+        normalize_posix_path_for_cmp(left) == normalize_posix_path_for_cmp(right)
+    }
+}
+
+fn normalize_client_dir_literal_for_os(path: &str, os: Os) -> String {
+    if os == Os::Windows {
+        return path.to_string();
+    }
+
+    let literal = Path::new(path);
+    let absolute = if literal.is_absolute() {
+        literal.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| Path::new(".").to_path_buf())
+            .join(literal)
+    };
+    normalize_posix_path_for_cmp(&absolute.to_string_lossy())
+}
+
+fn normalize_posix_path_for_cmp(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if !parts.is_empty() => {
+                parts.pop();
+            }
+            ".." if !absolute => parts.push(part),
+            ".." => {}
+            _ => parts.push(part),
+        }
+    }
+
+    let mut normalized = String::new();
+    if absolute {
+        normalized.push('/');
+    }
+    normalized.push_str(&parts.join("/"));
+    if normalized.is_empty() {
+        if absolute {
+            "/".to_string()
+        } else {
+            ".".to_string()
+        }
+    } else {
+        normalized
     }
 }
 
@@ -726,6 +784,10 @@ fn run_config(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
 
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
     #[test]
     fn windows_child_containment_accepts_forward_and_backslash_boundaries() {
         assert!(path_eq_or_child_for_os(
@@ -773,5 +835,44 @@ mod tests {
             ),
             r"D:\Other::/host/other"
         );
+    }
+
+    #[test]
+    fn map_rm_posix_comparison_normalizes_deleted_literal_paths() {
+        assert_eq!(
+            remove_client_from_raw_maps(
+                "/tmp/deleted::/host/deleted;/tmp/keep::/host/keep",
+                "/tmp/deleted/",
+                Os::Mac,
+            ),
+            "/tmp/keep::/host/keep"
+        );
+        assert_eq!(
+            remove_client_from_raw_maps(
+                "/tmp/deleted::/host/deleted;/tmp/keep::/host/keep",
+                "/tmp/parent/../deleted",
+                Os::Linux,
+            ),
+            "/tmp/keep::/host/keep"
+        );
+    }
+
+    #[test]
+    fn windows_map_add_requires_explicit_host_path_for_single_arg_form() {
+        let add = parse_map_add_args(&strings(&[r"C:\Users\Alice\Project"])).unwrap();
+        assert_eq!(
+            validate_map_add_args_for_os(&add, Os::Windows),
+            Err(
+                "map add on Windows requires an explicit mac host path: xpair map add <clientDir> <hostDir>"
+                    .to_string()
+            )
+        );
+
+        let add = parse_map_add_args(&strings(&[
+            r"C:\Users\Alice\Project",
+            "/Users/alice/project",
+        ]))
+        .unwrap();
+        assert_eq!(validate_map_add_args_for_os(&add, Os::Windows), Ok(()));
     }
 }

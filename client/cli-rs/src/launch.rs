@@ -7,7 +7,7 @@
 //! session-selection core stays pure and tested.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +24,10 @@ use crate::transport::Transport;
 const ENGINE_USAGE: &str = "claude|claudecode|shell|codex|opencode";
 const REMOTE_BIN: &str = "$HOME/.local/bin";
 const TMUX_AQUA: &str = "tmux-aqua";
+const REMOTE_AGENT_PATH_EXPORT: &str =
+    "export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"";
+const DEFAULT_APP_NAME: &str = "XpairHost";
+const DEFAULT_BUNDLE_PREFIX: &str = "com.x10lab.xpair-host";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchReq {
@@ -188,17 +192,19 @@ pub fn build_ensure_session_remote_cmd_for_engine(
     fresh: bool,
     cl_continue: bool,
 ) -> String {
-    let Some((base, n)) = split_numbered_session(session) else {
-        return build_single_named_session_remote_cmd(
+    let body = if let Some((base, n)) = split_numbered_session(session) {
+        build_numbered_session_remote_cmd(engine, aqua_sock, &base, n, host_dir, fresh, cl_continue)
+    } else {
+        build_single_named_session_remote_cmd(
             engine,
             aqua_sock,
             session,
             host_dir,
             fresh,
             cl_continue,
-        );
+        )
     };
-    build_numbered_session_remote_cmd(engine, aqua_sock, &base, n, host_dir, fresh, cl_continue)
+    wrap_remote_setup_cmd(aqua_sock, &body)
 }
 
 /// Build the local argv for the remote SSH attach handoff.
@@ -277,8 +283,14 @@ pub fn ensure_remote_session(
 
     if out.code == 0 {
         Ok(extract_session_marker(&out.stdout).unwrap_or_else(|| session.to_string()))
-    } else {
+    } else if setup_output_without_markers(&out.stdout).is_empty() {
         Err(format!("remote launch setup failed (exit={})", out.code))
+    } else {
+        Err(format!(
+            "remote launch setup failed (exit={})\n{}",
+            out.code,
+            setup_output_without_markers(&out.stdout)
+        ))
     }
 }
 
@@ -443,6 +455,11 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
             return ExitCode::from(2);
         }
     };
+    if let Err((message, code)) = ensure_remote_host_dir_ready(&transport, host, &host_dir, req.yes)
+    {
+        eprintln!("{message}");
+        return ExitCode::from(code);
+    }
     let session = match ensure_remote_session(
         &transport, host, &aqua_sock, &session, &host_dir, req.fresh, engine,
     ) {
@@ -482,7 +499,7 @@ fn remote_new_session_cmd(
     let sock = remote_quote::posix_single_quote(aqua_sock);
     let session_q = remote_quote::posix_single_quote(session);
     let host_dir = remote_quote::posix_single_quote(host_dir);
-    let script = respawn::build_respawn_script(engine, session, cl_continue);
+    let script = build_remote_respawn_script(engine, session, cl_continue);
     let script = remote_quote::posix_single_quote(&script);
     format!(
         "T=$(mktemp -t claude-respawn.XXXXXX) && printf %s {script} > \"$T\" && {REMOTE_BIN}/{TMUX_AQUA} -S {sock} new-session -d -s {session_q} -c {host_dir} \"bash $T\""
@@ -537,7 +554,7 @@ fn build_numbered_session_remote_cmd(
             "if [ \"$NEED_CREATE\" = 1 ]; then ",
             "while :; do ",
             "T=$(mktemp -t claude-respawn.XXXXXX) && ",
-            "{{ printf 'export CLAUDE_WARP_RC=%s\\n' \"$SESSION\"; printf 'export CL_CONTINUE=%s\\n' \"$CONT\"; printf %s {body}; }} > \"$T\" && ",
+            "{{ printf '%s\\n' '{path_export}'; printf 'export CLAUDE_WARP_RC=%s\\n' \"$SESSION\"; printf 'export CL_CONTINUE=%s\\n' \"$CONT\"; printf %s {body}; }} > \"$T\" && ",
             "if {tmux} new-session -d -s \"$SESSION\" -c {host_dir_q} \"bash $T\"; then break; fi; ",
             "if [ \"$FRESH\" = 1 ] && {tmux} has-session -t \"=$SESSION\" 2>/dev/null; then N=$((N+1)); SESSION=\"${{BASE}}_${{N}}\"; continue; fi; ",
             "exit 13; ",
@@ -551,7 +568,140 @@ fn build_numbered_session_remote_cmd(
         cl_continue = cl_continue,
         tmux = tmux,
         body = body,
-        host_dir_q = host_dir_q
+        host_dir_q = host_dir_q,
+        path_export = REMOTE_AGENT_PATH_EXPORT,
+    )
+}
+
+fn build_remote_respawn_script(engine: Engine, session: &str, cl_continue: bool) -> String {
+    format!(
+        "{REMOTE_AGENT_PATH_EXPORT}\n{}",
+        respawn::build_respawn_script(engine, session, cl_continue)
+    )
+}
+
+fn wrap_remote_setup_cmd(aqua_sock: &str, body: &str) -> String {
+    let sock = remote_quote::posix_single_quote(aqua_sock);
+    format!("{}{}", remote_setup_preamble(&sock), body)
+}
+
+fn remote_setup_preamble(sock_q: &str) -> String {
+    format!(
+        concat!(
+            "set -e; exec 2>&1; {path_export}; ",
+            "SOCK={sock_q}; TMUXB=\"{remote_bin}/{tmux_aqua}\"; ",
+            "tm() {{ \"$TMUXB\" -S \"$SOCK\" \"$@\"; }}; ",
+            "host_setup_recovery() {{ ",
+            "why=\"${{1:-XpairHost tmux-aqua is not ready}}\"; ",
+            "printf '__XPAIR_HOST_RECOVERY__\\n'; ",
+            "printf '\\nXpairHost setup is required before this remote session can start.\\n' >&2; ",
+            "printf 'Reason: %s\\n' \"$why\" >&2; ",
+            "printf 'Recovery on %s:\\n' \"$(hostname -s)\" >&2; ",
+            "printf '  1. Open {app}.app on the host Mac.\\n' >&2; ",
+            "printf '  2. From the menu bar, choose Set up... or Permissions...\\n' >&2; ",
+            "printf '  3. Grant Accessibility and Screen Recording, then retry xpair launch.\\n' >&2; ",
+            "printf 'Diagnostics: tmux-aqua=%s socket=%s\\n' \"$TMUXB\" \"$SOCK\" >&2; ",
+            "exit 13; ",
+            "}}; ",
+            "[ -x \"$TMUXB\" ] || host_setup_recovery \"tmux-aqua helper is missing or not executable: $TMUXB\"; ",
+            "if ! tm has-session 2>/dev/null; then ",
+            "open -a \"{app}\" 2>/dev/null || /bin/launchctl kickstart \"gui/$(id -u)/{bundle}\" 2>/dev/null || true; ",
+            "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do tm has-session 2>/dev/null && break; sleep 0.5; done; ",
+            "fi; ",
+            "if ! tm has-session 2>/dev/null; then host_setup_recovery \"{app} host server is not running on $SOCK\"; fi; "
+        ),
+        path_export = REMOTE_AGENT_PATH_EXPORT,
+        sock_q = sock_q,
+        remote_bin = REMOTE_BIN,
+        tmux_aqua = TMUX_AQUA,
+        app = DEFAULT_APP_NAME,
+        bundle = DEFAULT_BUNDLE_PREFIX,
+    )
+}
+
+pub fn build_remote_host_dir_check_cmd(host_dir: &str) -> String {
+    let host_dir = remote_quote::posix_single_quote(host_dir);
+    format!("[ -d {host_dir} ] && echo __YES__ || echo __NO__")
+}
+
+fn build_remote_mkdir_cmd(host_dir: &str) -> String {
+    let host_dir = remote_quote::posix_single_quote(host_dir);
+    format!("mkdir -p {host_dir}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteHostDirStatus {
+    Present,
+    Missing,
+    Unknown,
+}
+
+fn check_remote_host_dir(
+    transport: &dyn Transport,
+    host: &str,
+    host_dir: &str,
+) -> RemoteHostDirStatus {
+    let cmd = build_remote_host_dir_check_cmd(host_dir);
+    for _ in 0..3 {
+        let Ok(out) = transport.ssh_exec(host, &cmd) else {
+            continue;
+        };
+        if out.stdout.contains("__YES__") {
+            return RemoteHostDirStatus::Present;
+        }
+        if out.stdout.contains("__NO__") {
+            return RemoteHostDirStatus::Missing;
+        }
+    }
+    RemoteHostDirStatus::Unknown
+}
+
+fn ensure_remote_host_dir_ready(
+    transport: &dyn Transport,
+    host: &str,
+    host_dir: &str,
+    yes: bool,
+) -> Result<(), (String, u8)> {
+    match check_remote_host_dir(transport, host, host_dir) {
+        RemoteHostDirStatus::Present => Ok(()),
+        RemoteHostDirStatus::Missing => {
+            eprintln!("{host_dir} does not exist on {host} (mapped host path).");
+            let create = yes || ask_create_host_dir();
+            if !create {
+                return Err((
+                    format!("cancelled: directory missing on host ({host_dir})"),
+                    5,
+                ));
+            }
+            match transport.ssh_exec(host, &build_remote_mkdir_cmd(host_dir)) {
+                Ok(out) if out.code == 0 => Ok(()),
+                _ => Err((format!("mkdir failed ({host})"), 4)),
+            }
+        }
+        RemoteHostDirStatus::Unknown => Err((remote_disconnect_message(host), 21)),
+    }
+}
+
+fn ask_create_host_dir() -> bool {
+    eprint!("create the directory on host? [y/N]: ");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).is_ok()
+        && answer
+            .chars()
+            .next()
+            .is_some_and(|ch| matches!(ch, 'y' | 'Y'))
+}
+
+fn remote_disconnect_message(host: &str) -> String {
+    format!(
+        concat!(
+            "remote launch stopped: {host} dir-check ssh failed 3 times\n",
+            "please connect/reconnect to {host} (LAN, VPN, or Tailscale), then rerun xpair launch.\n",
+            "  (tailscale exit-node is not auto-configured by Xpair — bring the link up yourself)\n",
+            "Xpair will not change Tailscale exit-node settings or fall back to local automatically."
+        ),
+        host = host,
     )
 }
 
@@ -562,6 +712,18 @@ fn extract_session_marker(stdout: &str) -> Option<String> {
         .next_back()
         .map(str::to_string)
         .filter(|session| !session.is_empty())
+}
+
+fn setup_output_without_markers(stdout: &str) -> String {
+    stdout
+        .lines()
+        .filter(|line| {
+            !line.starts_with("__SESSION__:")
+                && !line.starts_with("__HOME__:")
+                && *line != "__XPAIR_HOST_RECOVERY__"
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn split_numbered_session(session: &str) -> Option<(String, usize)> {
@@ -1373,10 +1535,17 @@ mod tests {
             "/Users/me/project",
             false,
         );
+        assert!(cmd.contains(REMOTE_AGENT_PATH_EXPORT));
+        assert!(cmd.contains("open -a \"XpairHost\""));
+        assert!(cmd.contains("/bin/launchctl kickstart \"gui/$(id -u)/com.x10lab.xpair-host\""));
+        assert!(cmd.contains("XpairHost setup is required before this remote session can start."));
         assert!(cmd.contains("BASE='mac_project_8779b'; N=1; FRESH=0; CONT=1;"));
         assert!(cmd.contains("list-clients -t \"=${BASE}_${N}\" -F x"));
         assert!(cmd.contains("do N=$((N+1)); CONT=0; done"));
         assert!(cmd.contains("if $HOME/.local/bin/tmux-aqua -S '/tmp/aqua sock'\\''s.sock' has-session -t \"=$SESSION\" 2>/dev/null; then NEED_CREATE=0; fi"));
+        assert!(cmd.contains(
+            "printf '%s\\n' 'export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"'"
+        ));
         assert!(cmd.contains("printf '__SESSION__:%s\\n' \"$SESSION\""));
     }
 
@@ -1406,6 +1575,46 @@ mod tests {
         );
         assert!(cmd.contains("opencode"));
         assert!(cmd.contains("OPENCODE_CONFIG_CONTENT"));
+    }
+
+    #[test]
+    fn remote_host_dir_check_command_uses_markers() {
+        assert_eq!(
+            build_remote_host_dir_check_cmd("/Users/me/project"),
+            "[ -d '/Users/me/project' ] && echo __YES__ || echo __NO__"
+        );
+    }
+
+    #[test]
+    fn remote_host_dir_missing_with_yes_creates_before_setup() {
+        let transport = MockTransport::new();
+        transport.push_response(0, "__NO__\n");
+        transport.push_response(0, "");
+
+        assert_eq!(
+            ensure_remote_host_dir_ready(&transport, "mac.local", "/Users/me/new", true),
+            Ok(())
+        );
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].remote_cmd,
+            "[ -d '/Users/me/new' ] && echo __YES__ || echo __NO__"
+        );
+        assert_eq!(calls[1].remote_cmd, "mkdir -p '/Users/me/new'");
+    }
+
+    #[test]
+    fn remote_host_dir_unknown_reports_disconnect_guidance() {
+        let transport = MockTransport::new();
+
+        assert_eq!(
+            ensure_remote_host_dir_ready(&transport, "mac.local", "/Users/me/new", true),
+            Err((remote_disconnect_message("mac.local"), 21))
+        );
+
+        assert_eq!(transport.calls().len(), 3);
     }
 
     #[test]
@@ -1461,14 +1670,15 @@ mod tests {
 
     #[test]
     fn builds_windows_remote_launch_attach_argv_with_mux_neutralizer() {
+        let argv = build_remote_launch_attach_argv(
+            Os::Windows,
+            "mac.local",
+            "/tmp/aqua sock's.sock",
+            "mac_project_8779b_1",
+        );
         assert_eq!(
-            build_remote_launch_attach_argv(
-                Os::Windows,
-                "mac.local",
-                "/tmp/aqua sock's.sock",
-                "mac_project_8779b_1",
-            ),
-            vec![
+            &argv[..7],
+            strings(&[
                 "ssh",
                 "-tt",
                 "-o",
@@ -1476,33 +1686,30 @@ mod tests {
                 "-o",
                 "ControlPath=none",
                 "mac.local",
-                "$HOME/.local/bin/tmux-aqua -S '/tmp/aqua sock'\\''s.sock' attach -d -t '=mac_project_8779b_1'",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
+            ])
+            .as_slice()
         );
+        let cmd = argv.last().unwrap();
+        assert!(cmd.contains(r#"SOCK='/tmp/aqua sock'\''s.sock'"#));
+        assert!(cmd.contains("TARGET='=mac_project_8779b_1'"));
+        assert!(cmd.contains("detach-client -s \"$TARGET\""));
+        assert!(cmd.contains("attach -d -t \"$TARGET\""));
     }
 
     #[test]
     fn builds_non_windows_remote_launch_attach_argv_without_mux_neutralizer() {
-        assert_eq!(
-            build_remote_launch_attach_argv(
-                Os::Linux,
-                "mac.local",
-                "/tmp/aqua-tmux.sock",
-                "mac_project_8779b_1",
-            ),
-            vec![
-                "ssh",
-                "-tt",
-                "mac.local",
-                "$HOME/.local/bin/tmux-aqua -S '/tmp/aqua-tmux.sock' attach -d -t '=mac_project_8779b_1'",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
+        let argv = build_remote_launch_attach_argv(
+            Os::Linux,
+            "mac.local",
+            "/tmp/aqua-tmux.sock",
+            "mac_project_8779b_1",
         );
+        assert_eq!(&argv[..3], strings(&["ssh", "-tt", "mac.local"]).as_slice());
+        let cmd = argv.last().unwrap();
+        assert!(cmd.contains("SOCK='/tmp/aqua-tmux.sock'"));
+        assert!(cmd.contains("TARGET='=mac_project_8779b_1'"));
+        assert!(cmd.contains("detach-client -s \"$TARGET\""));
+        assert!(cmd.contains("attach -d -t \"$TARGET\""));
     }
 
     #[test]
@@ -1533,7 +1740,7 @@ mod tests {
                 false,
                 Engine::Codex,
             ),
-            Err("remote launch setup failed (exit=12)".to_string())
+            Err("remote launch setup failed (exit=12)\nnope".to_string())
         );
 
         let calls = transport.calls();

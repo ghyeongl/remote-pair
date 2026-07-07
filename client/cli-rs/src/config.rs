@@ -171,9 +171,10 @@ pub fn set_cli(path: impl AsRef<Path>, key: &str, value: &str) -> io::Result<Str
 pub fn list_cli(path: impl AsRef<Path>) -> io::Result<Vec<(String, String)>> {
     let path = path.as_ref();
     let host = valid_remote_host(path)?.unwrap_or_else(|| "(no host configured)".to_string());
-    let maps = get(path, "FOLDER_MAPS")?
-        .map(|m| m.split(';').filter(|entry| !entry.is_empty()).count())
-        .unwrap_or(0);
+    let maps = resolve_raw_maps(path)?
+        .split(';')
+        .filter(|entry| !entry.is_empty())
+        .count();
 
     Ok(vec![
         ("host".to_string(), host),
@@ -187,6 +188,19 @@ pub fn list_cli(path: impl AsRef<Path>) -> io::Result<Vec<(String, String)>> {
         ),
         ("mappings".to_string(), maps.to_string()),
     ])
+}
+
+fn resolve_raw_maps(path: &Path) -> io::Result<String> {
+    if let Some(raw_maps) = non_empty_env_string("FOLDER_MAPS") {
+        return Ok(raw_maps);
+    }
+    if let Some(raw_maps) = non_empty_env_string("SYNC_ROOTS") {
+        return Ok(raw_maps);
+    }
+    if let Some(raw_maps) = get(path, "FOLDER_MAPS")?.filter(|maps| !maps.is_empty()) {
+        return Ok(raw_maps);
+    }
+    Ok(get(path, "SYNC_ROOTS")?.unwrap_or_default())
 }
 
 fn read_lines(path: &Path) -> io::Result<Vec<Line>> {
@@ -544,6 +558,10 @@ fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
+fn non_empty_env_string(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
@@ -739,6 +757,38 @@ mod tests {
         assert_eq!(
             set_err.to_string(),
             "config set <host|terminal|engine> <value>"
+        );
+    }
+
+    #[test]
+    fn list_cli_counts_legacy_sync_roots_when_folder_maps_absent() {
+        let tmp = TestPath::new("sync-roots");
+        tmp.write("REMOTE_HOST=mac-mini\nSYNC_ROOTS='/client/a::/host/a;/client/b::/host/b'\n");
+
+        let rows = list_cli(&tmp.path).unwrap();
+
+        assert_eq!(
+            rows.iter()
+                .find(|(key, _)| key == "mappings")
+                .map(|(_, value)| value.as_str()),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn list_cli_prefers_folder_maps_over_legacy_sync_roots() {
+        let tmp = TestPath::new("maps-over-sync-roots");
+        tmp.write(
+            "REMOTE_HOST=mac-mini\nFOLDER_MAPS='/client/a::/host/a'\nSYNC_ROOTS='/client/a::/host/a;/client/b::/host/b'\n",
+        );
+
+        let rows = list_cli(&tmp.path).unwrap();
+
+        assert_eq!(
+            rows.iter()
+                .find(|(key, _)| key == "mappings")
+                .map(|(_, value)| value.as_str()),
+            Some("1")
         );
     }
 

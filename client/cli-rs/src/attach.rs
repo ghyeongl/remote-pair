@@ -183,7 +183,19 @@ fn valid_session_name(session: &str) -> bool {
 fn remote_attach_cmd(aqua_sock: &str, session: &str) -> String {
     let sock = remote_quote::posix_single_quote(aqua_sock);
     let target = remote_quote::posix_single_quote(&format!("={session}"));
-    format!("{REMOTE_BIN}/{TMUX_AQUA} -S {sock} attach -d -t {target}")
+    format!(
+        concat!(
+            "TMUXB=\"{remote_bin}/{tmux_aqua}\"; SOCK={sock}; TARGET={target}; ",
+            "cleanup() {{ \"$TMUXB\" -S \"$SOCK\" detach-client -s \"$TARGET\" >/dev/null 2>&1 || true; }}; ",
+            "trap 'cleanup; exit 129' HUP TERM; ",
+            "\"$TMUXB\" -S \"$SOCK\" attach -d -t \"$TARGET\"; ",
+            "rc=$?; trap - HUP TERM; if [ \"$rc\" -ne 0 ]; then cleanup; fi; exit \"$rc\""
+        ),
+        remote_bin = REMOTE_BIN,
+        tmux_aqua = TMUX_AQUA,
+        sock = sock,
+        target = target,
+    )
 }
 
 fn remote_has_session_cmd(aqua_sock: &str, session: &str) -> String {
@@ -468,9 +480,11 @@ mod tests {
 
     #[test]
     fn builds_windows_remote_attach_argv_with_mux_neutralizer_and_forced_pty() {
+        let argv =
+            build_remote_attach_argv(Os::Windows, "mac.local", "alpha.1", "/tmp/aqua sock's.sock");
         assert_eq!(
-            build_remote_attach_argv(Os::Windows, "mac.local", "alpha.1", "/tmp/aqua sock's.sock"),
-            vec![
+            &argv[..7],
+            strings(&[
                 "ssh",
                 "-tt",
                 "-o",
@@ -478,28 +492,25 @@ mod tests {
                 "-o",
                 "ControlPath=none",
                 "mac.local",
-                r"$HOME/.local/bin/tmux-aqua -S '/tmp/aqua sock'\''s.sock' attach -d -t '=alpha.1'",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
+            ])
+            .as_slice()
         );
+        let cmd = argv.last().unwrap();
+        assert!(cmd.contains(r#"SOCK='/tmp/aqua sock'\''s.sock'"#));
+        assert!(cmd.contains("TARGET='=alpha.1'"));
+        assert!(cmd.contains("detach-client -s \"$TARGET\""));
+        assert!(cmd.contains("attach -d -t \"$TARGET\""));
     }
 
     #[test]
     fn builds_non_windows_remote_attach_argv_without_mux_neutralizer() {
-        assert_eq!(
-            build_remote_attach_argv(Os::Mac, "mac.local", "alpha-1", "/tmp/aqua-tmux.sock"),
-            vec![
-                "ssh",
-                "-tt",
-                "mac.local",
-                "$HOME/.local/bin/tmux-aqua -S '/tmp/aqua-tmux.sock' attach -d -t '=alpha-1'",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-        );
+        let argv = build_remote_attach_argv(Os::Mac, "mac.local", "alpha-1", "/tmp/aqua-tmux.sock");
+        assert_eq!(&argv[..3], strings(&["ssh", "-tt", "mac.local"]).as_slice());
+        let cmd = argv.last().unwrap();
+        assert!(cmd.contains("SOCK='/tmp/aqua-tmux.sock'"));
+        assert!(cmd.contains("TARGET='=alpha-1'"));
+        assert!(cmd.contains("detach-client -s \"$TARGET\""));
+        assert!(cmd.contains("attach -d -t \"$TARGET\""));
     }
 
     #[test]

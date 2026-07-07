@@ -386,10 +386,13 @@ fn load_host_common(rp_host_dir: &Path, home: &Path) -> HostCommon {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or(default_local_bin),
-        aqua_sock: config::get(&common_env, "AQUA_SOCK")
-            .ok()
-            .flatten()
-            .filter(|value| !value.is_empty())
+        aqua_sock: non_empty_env("AQUA_SOCK")
+            .or_else(|| {
+                config::get(&common_env, "AQUA_SOCK")
+                    .ok()
+                    .flatten()
+                    .filter(|value| !value.is_empty())
+            })
             .unwrap_or_else(|| DEFAULT_AQUA_SOCK.to_string()),
     }
 }
@@ -601,6 +604,29 @@ mod tests {
         args.iter().map(|arg| (*arg).to_string()).collect()
     }
 
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> EnvGuard {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            EnvGuard { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn probe_up_short_circuits() {
         let tmp = TestDir::new("up");
@@ -778,5 +804,22 @@ mod tests {
             runtime.calls[0],
             CommandSpec::new("launchctl", strings(&["list"]))
         );
+    }
+
+    #[test]
+    fn host_common_prefers_aqua_sock_env_over_common_env() {
+        let _guard = EnvGuard::set("AQUA_SOCK", "/tmp/env-aqua.sock");
+        let tmp = TestDir::new("aqua-env");
+        let rp_host_dir = tmp.path.join("host");
+        fs::create_dir_all(&rp_host_dir).unwrap();
+        fs::write(
+            rp_host_dir.join("common.env"),
+            "AQUA_SOCK=/tmp/file-aqua.sock\n",
+        )
+        .unwrap();
+
+        let common = load_host_common(&rp_host_dir, &tmp.path.join("home"));
+
+        assert_eq!(common.aqua_sock, "/tmp/env-aqua.sock");
     }
 }
