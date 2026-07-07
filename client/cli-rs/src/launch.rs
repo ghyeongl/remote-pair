@@ -2873,7 +2873,9 @@ mod tests {
     fn unmapped_prompt_registers_existing_host_path_by_default() {
         let tmp = TestPath::new("unmapped-existing");
         let client = TestDir::new("unmapped-existing-client");
-        let client_dir = path_string(&client.path);
+        // This test exercises the darwin/linux interactive flow (Os::Mac below); feed it a
+        // POSIX-separator path even when the test itself runs on windows.
+        let client_dir = path_string(&client.path).replace('\\', "/");
         let transport = MockTransport::new();
         transport.push_response(0, "");
         transport.push_response(0, "__YES__\n");
@@ -2898,15 +2900,12 @@ mod tests {
         )
         .unwrap();
 
-        // Persistence canonicalizes separators (windows backslashes become '/');
-        // compare against the canonical form so the test holds on every OS.
-        let canon = client_dir.replace('\\', "/");
-        assert_eq!(result, Some(canon.clone()));
-        assert_eq!(raw_maps, format!("{canon}::{canon}"));
-        assert_eq!(raw_modes, format!("{canon}::sync"));
+        assert_eq!(result, Some(client_dir.clone()));
+        assert_eq!(raw_maps, format!("{client_dir}::{client_dir}"));
+        assert_eq!(raw_modes, format!("{client_dir}::sync"));
         assert_eq!(
             config::get(&tmp.path, "FOLDER_MAPS").unwrap(),
-            Some(format!("{canon}::{canon}"))
+            Some(format!("{client_dir}::{client_dir}"))
         );
         assert!(String::from_utf8(out)
             .unwrap()
