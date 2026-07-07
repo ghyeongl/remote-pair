@@ -1672,18 +1672,21 @@ mod tests {
     fn tailscale_metadata_fetch_respects_overall_deadline() {
         let started = Instant::now();
 
+        // Generous margins for loaded CI runners: the property under test is only
+        // "returns at the deadline instead of waiting for the workers" — workers
+        // sleep 2s, so anything under 1s proves the deadline fired.
         let metadata = fetch_tailscale_metadata_concurrent(
             vec!["a".to_string(), "b".to_string()],
-            Duration::from_millis(50),
+            Duration::from_millis(100),
             |_addr| {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(2000));
                 Some(PairingMetadata::default())
             },
         );
 
         assert!(metadata.is_empty());
         assert!(
-            started.elapsed() < Duration::from_millis(150),
+            started.elapsed() < Duration::from_millis(1000),
             "metadata lookup should return at the overall deadline"
         );
     }

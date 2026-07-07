@@ -849,8 +849,10 @@ mod tests {
     fn run_honors_empty_notify_conf_as_all_off() {
         without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
             let tmp = TestDir::new("all-off");
+            // Single-quote the path: on Windows it contains backslashes, which the
+            // shell-style env parser would otherwise treat as escapes.
             tmp.write_client_env(&format!(
-                "REMOTE_HOST=mac-mini\nRP_HOST_DIR={}\n",
+                "REMOTE_HOST=mac-mini\nRP_HOST_DIR='{}'\n",
                 tmp.host_dir().to_string_lossy()
             ));
             tmp.write_notify_conf("ENABLED_TYPES=\n");
@@ -885,8 +887,10 @@ mod tests {
     fn run_reads_notify_conf_from_host_dir_not_client_dir() {
         without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
             let tmp = TestDir::new("host-conf");
+            // Single-quote the path: on Windows it contains backslashes, which the
+            // shell-style env parser would otherwise treat as escapes.
             tmp.write_client_env(&format!(
-                "REMOTE_HOST=mac-mini\nRP_HOST_DIR={}\n",
+                "REMOTE_HOST=mac-mini\nRP_HOST_DIR='{}'\n",
                 tmp.host_dir().to_string_lossy()
             ));
             fs::write(tmp.path.join("notify.conf"), "ENABLED_TYPES=\n").unwrap();
