@@ -1348,7 +1348,7 @@ const bridge = {
       if (rpBinAbs()) return { ok: true, err: "" };
       return {
         ok: false,
-        err: "Install the Xpair CLI (.msi) first",
+        err: "Install the Xpair CLI (.msi) first: https://github.com/x10lab/xpair/releases/latest",
         action: "OPEN_DOWNLOAD",
         url: CLI_DOWNLOAD_URL,
       };

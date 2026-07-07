@@ -241,7 +241,7 @@ test("P3 installCli on win32 returns MSI guidance without bash", async () => {
         const result = await bridge.installCli();
         assert.deepEqual(result, {
           ok: false,
-          err: "Install the Xpair CLI (.msi) first",
+          err: "Install the Xpair CLI (.msi) first: https://github.com/x10lab/xpair/releases/latest",
           action: "OPEN_DOWNLOAD",
           url: "https://github.com/x10lab/xpair/releases/latest",
         });
