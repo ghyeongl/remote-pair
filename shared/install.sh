@@ -180,9 +180,12 @@ use_shared_manifest
 say "xpair CLI → $LOCAL_BIN"
 install_unrecorded_file "$CLIENT_DIR/xpair" "$LOCAL_BIN/xpair" 755
 # maplib.sh rides with the CLI, not with a role: host-only installs run xpair too.
+# UNRECORDED like the CLI itself: on a both-role install, a client-role uninstall
+# preserves $LOCAL_BIN/xpair (host remains) — a client-manifest entry would revert
+# maplib out from under the surviving CLI. It dies with ~/.xpair/client instead.
 if [ -f "$CLIENT_DIR/bin/maplib.sh" ]; then
   say "map helpers → $RP_CLIENT_DIR/bin/maplib.sh"
-  install_file "$CLIENT_DIR/bin/maplib.sh" "$RP_CLIENT_DIR/bin/maplib.sh" 644
+  install_unrecorded_file "$CLIENT_DIR/bin/maplib.sh" "$RP_CLIENT_DIR/bin/maplib.sh" 644
 else
   warn "client/cli/bin/maplib.sh not found — mapping commands will require self-update"
 fi
