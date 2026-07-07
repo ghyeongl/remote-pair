@@ -93,18 +93,18 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
   );
   assert.match(
     patch,
-    /const names = cachedDetachedSessions\(\);[\s\S]*this\.recordHistory\(names\);[\s\S]*for \(const name of names\)/,
-    "Detached must record displayed live detached names into last-seen History",
+    /function refreshSessionData\(commandService: ICommandService\): void \{[\s\S]*const next = normalizeSessionCommandResult\(value\);[\s\S]*if \(!nextUnavailable\) \{[\s\S]*recordHistoryNames\(next\.map\(s => s\.name\)\);[\s\S]*\}/,
+    "successful live-list refreshes must record every valid live session name into last-seen History",
   );
   assert.match(
     patch,
-    /this\.recordHistory\(sessions\.map\(s => normalizedSessionName\(s\.sessionName\)\)\.filter\(\(n\): n is string => !!n\)\)/,
-    "Attached history must record only stable sessionName values",
+    /function recordHistoryNames\(names: readonly string\[\]\): void \{[\s\S]*const meaningful = names\.filter\(n => SESSION_NAME_RE\.test\(n\)\);[\s\S]*storageService\.store\(HISTORY_STORAGE_KEY, JSON\.stringify\(merged\), StorageScope\.WORKSPACE, StorageTarget\.MACHINE\);/,
+    "History recording must stay at the data layer and validate names before persisting",
   );
   assert.doesNotMatch(
     patch,
-    /recordHistory\(sessions\.map\(s => s\.sessionName \?\? s\.title\)\)|recordHistory\(instances\.map\(instance => instance\.title\)\)/,
-    "Attached history must not fall back to mutable terminal display titles",
+    /this\.recordHistory\(/,
+    "render-time History writes must stay removed",
   );
   assert.match(
     patch,

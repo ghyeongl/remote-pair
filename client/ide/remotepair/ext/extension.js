@@ -30,8 +30,7 @@ const { SESSION_NAME_RE, listSessionsFromCli, checkSessionAvailableFromCli } = r
 const {
   normalizeOpenedSessionNames,
   readOpenedSessions,
-  serializeOpenedSessions,
-  writeOpenedSessionsAtomic,
+  writeOpenedSessionsForScope,
 } = require("./opened-sessions.js");
 
 // --- constants -------------------------------------------------------------
@@ -124,7 +123,7 @@ const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
 // documented as per-window, so it cannot key this. Two windows on the SAME folder share
 // one owner: acceptable (same probes, one notifier) and strictly better than per-app
 // starvation. Guarded access: contract tests require this module with a vscode stub.
-const CLIENT_SERVICES_LOCK_FILE = (() => {
+const CLIENT_SERVICES_SCOPE_ID = (() => {
   let scope = "global";
   try {
     const ws = vscode.workspace || {};
@@ -132,6 +131,10 @@ const CLIENT_SERVICES_LOCK_FILE = (() => {
       (ws.workspaceFolders || []).map((f) => f.uri.fsPath).join("|");
     if (id) scope = crypto.createHash("sha1").update(id).digest("hex").slice(0, 12);
   } catch (_e) { /* stubbed vscode */ }
+  return scope;
+})();
+const CLIENT_SERVICES_LOCK_FILE = (() => {
+  const scope = CLIENT_SERVICES_SCOPE_ID;
   return path.join(RP_CLIENT_DIR, `extension-services.${scope}.lock`);
 })();
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
@@ -1767,11 +1770,13 @@ let openedSessionsWritesEnabled = false;
 let openedSessionsWriteOwner = false;
 
 function writeOpenedSessionsNow(host, names) {
-  const snapshot = serializeOpenedSessions(host, names);
-  if (!snapshot) return false;
+  const clean = normalizeOpenedSessionNames(names);
   try {
-    writeOpenedSessionsAtomic(OPENED_SESSIONS_FILE, snapshot);
-    log(`opened sessions: wrote ${snapshot.sessions.length} session(s)`, "debug");
+    if (!writeOpenedSessionsForScope(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, clean, { now: Date.now(), pid: process.pid })) {
+      log("opened sessions: write skipped; lock unavailable or invalid snapshot scope", "debug");
+      return false;
+    }
+    log(`opened sessions: wrote ${clean.length} session(s) for window ${CLIENT_SERVICES_SCOPE_ID}`, "debug");
     return true;
   } catch (e) {
     log(`opened sessions: write failed: ${e && e.message ? e.message : e}`, "warn");
@@ -1842,6 +1847,7 @@ async function restoreOpenedSessionsOnActivation() {
   const host = getValidHost();
   const openedNames = host ? readOpenedSessions(OPENED_SESSIONS_FILE, host, { log }) : [];
   let restored = 0;
+  let sessionListWasAvailable = false;
 
   try {
     if (!host || openedNames.length === 0) {
@@ -1853,6 +1859,7 @@ async function restoreOpenedSessionsOnActivation() {
       log("opened sessions: session list unavailable during restore; keeping snapshot", "debug");
       return 0;
     }
+    sessionListWasAvailable = true;
 
     const live = new Map(list.sessions.map((entry) => [entry.name, entry.attached]));
     for (const name of openedNames) {
@@ -1872,10 +1879,12 @@ async function restoreOpenedSessionsOnActivation() {
     return restored;
   } finally {
     enableOpenedSessionWrites();
-    try {
-      await vscode.commands.executeCommand("remotepair.terminalSidebar.syncOpenedSessions");
-    } catch (e) {
-      log(`opened sessions: post-restore sync failed: ${e && e.message ? e.message : e}`, "debug");
+    if (sessionListWasAvailable) {
+      try {
+        await vscode.commands.executeCommand("remotepair.terminalSidebar.syncOpenedSessions");
+      } catch (e) {
+        log(`opened sessions: post-restore sync failed: ${e && e.message ? e.message : e}`, "debug");
+      }
     }
   }
 }

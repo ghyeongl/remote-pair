@@ -83,6 +83,26 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
     "startup restore must have a command entry point into the same sidebar reattach flow",
   );
   assert.match(
+    terminalSidebar,
+    /private sessionNameFromTitle\(title: string \| undefined\): string \| undefined \{[\s\S]*SESSION_NAME_RE\.test\(name\) \? name : undefined/,
+    "newly launched terminal sessions must be able to derive a stable tmux sessionName from the first valid title",
+  );
+  assert.match(
+    terminalSidebar,
+    /private freezeSessionNameFromTitle\(key: string, instance: ITerminalInstance\): boolean \{[\s\S]*if \(!entry \|\| entry\.sessionName\) \{[\s\S]*entry\.sessionName = name;[\s\S]*return true;/,
+    "sessionName freezing must be one-shot and must not overwrite a previously frozen name",
+  );
+  assert.match(
+    terminalSidebar,
+    /instance\.onTitleChanged\(\(\) => \{[\s\S]*this\.freezeSessionNameFromTitle\(key, instance\);[\s\S]*notifyAttachedSessionsChanged\(\);/,
+    "title changes must only fill a missing frozen sessionName and then refresh the Attached row",
+  );
+  assert.match(
+    terminalSidebar,
+    /let frozenSessionName = sessionName \?\? this\.sessionNameFromTitle\(instance\.title\);[\s\S]*if \(!frozenSessionName\) \{[\s\S]*frozenSessionName = this\.sessionNameFromTitle\(instance\.title\);[\s\S]*this\.attached\.set\(key, \{ instance, input, group, sessionName: frozenSessionName \}\);/,
+    "new sessions must freeze the first valid title while reattach keeps the known tmux name",
+  );
+  assert.match(
     extension,
     /const OPENED_SESSIONS_FILE = path\.join\(RP_CLIENT_DIR, "opened-sessions\.json"\)/,
     "opened sessions must persist to ~/.xpair/client/opened-sessions.json",
@@ -114,8 +134,8 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     extension,
-    /restoreOpenedSessionsOnActivation\(\)[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
-    "restore must enable writes before requesting the frontend to sync the current opened-session set",
+    /restoreOpenedSessionsOnActivation\(\)[\s\S]*let sessionListWasAvailable = false;[\s\S]*const list = await waitForAvailableSessionList\(\);[\s\S]*if \(!list\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*sessionListWasAvailable = true;[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*if \(sessionListWasAvailable\) \{[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
+    "restore must enable writes either way but only sync opened sessions after the live list was fetched",
   );
   assert.doesNotMatch(
     extension,

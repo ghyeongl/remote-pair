@@ -2798,6 +2798,9 @@ index 0000000..6e5d586
 +		const unavailableChanged = sessionListUnavailable !== nextUnavailable;
 +		sessionListUnavailable = nextUnavailable;
 +		const next = normalizeSessionCommandResult(value);
++		if (!nextUnavailable) {
++			recordHistoryNames(next.map(s => s.name));
++		}
 +		if (unavailableChanged || !sameSessionCache(liveSessionCache, next)) {
 +			liveSessionCache = next;
 +			sessionDataChangeEmitter.fire();
@@ -2894,6 +2897,38 @@ index 0000000..6e5d586
 +// --- view -------------------------------------------------------------------
 +
 +const HISTORY_STORAGE_KEY = 'remotepair.sessionManager.history.v2';
++let historyStorageService: IStorageService | undefined;
++
++function readHistoryFromStore(storageService: IStorageService): string[] {
++	const raw = storageService.get(HISTORY_STORAGE_KEY, StorageScope.WORKSPACE);
++	if (!raw) {
++		return [];
++	}
++	try {
++		const parsed = JSON.parse(raw);
++		return Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string' && SESSION_NAME_RE.test(n)) : [];
++	} catch (e) {
++		rpLog('warn', `history storage parse failed; resetting to empty: ${e instanceof Error ? e.message : String(e)}`);
++		return [];
++	}
++}
++
++function recordHistoryNames(names: readonly string[]): void {
++	const storageService = historyStorageService;
++	if (!storageService) {
++		return;
++	}
++	const meaningful = names.filter(n => SESSION_NAME_RE.test(n));
++	if (meaningful.length === 0) {
++		return;
++	}
++	const existing = readHistoryFromStore(storageService);
++	const merged = Array.from(new Set([...existing, ...meaningful]));
++	if (merged.length === existing.length) {
++		return;
++	}
++	storageService.store(HISTORY_STORAGE_KEY, JSON.stringify(merged), StorageScope.WORKSPACE, StorageTarget.MACHINE);
++}
 +
 +/**
 + * Shared Panel ViewPane rendering ONE session category (attached / detached / history) as a
@@ -2934,6 +2969,7 @@ index 0000000..6e5d586
 +
 +		container.classList.add('remotepair-session-manager');
 +		this.row = append(container, $('.remotepair-session-row'));
++		historyStorageService = this.storageService;
 +
 +		if (this.category === 'attached') {
 +			// Primary: refresh when the Sessions sidebar's attached-sessions set changes.
@@ -3026,7 +3062,6 @@ index 0000000..6e5d586
 +			// those instances never appear in ITerminalService.instances).
 +			const provider = attachedProvider;
 +			const sessions = provider.getAttached();
-+			this.recordHistory(sessions.map(s => normalizedSessionName(s.sessionName)).filter((n): n is string => !!n));
 +			if (sessions.length === 0) {
 +				this.addEmpty(cause ?? localize('remotepairNoAttached', "No attached sessions"));
 +				return;
@@ -3084,7 +3119,6 @@ index 0000000..6e5d586
 +			this.addEmpty(sessionCardCause ?? (remoteAttached.length > 0 ? localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device.") : localize('remotepairNoDetached', "No detached sessions")));
 +			return;
 +		}
-+		this.recordHistory(names);
 +		if (sessionCardCause) {
 +			this.addEmpty(sessionCardCause);
 +		}
@@ -3093,7 +3127,6 @@ index 0000000..6e5d586
 +		}
 +		for (const name of names) {
 +			this.addCard(name, () => {
-+				this.recordHistory([name]);
 +				validateAndReattach(name, this.commandService);
 +			});
 +		}
@@ -3138,35 +3171,7 @@ index 0000000..6e5d586
 +	// --- history persistence (workspace scope) -----------------------------
 +
 +	private readHistory(): string[] {
-+		const raw = this.storageService.get(HISTORY_STORAGE_KEY, StorageScope.WORKSPACE);
-+		if (!raw) {
-+			return [];
-+		}
-+		try {
-+			const parsed = JSON.parse(raw);
-+			return Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string' && SESSION_NAME_RE.test(n)) : [];
-+		} catch (e) {
-+			rpLog('warn', `history storage parse failed; resetting to empty: ${e instanceof Error ? e.message : String(e)}`);
-+			return [];
-+		}
-+	}
-+
-+	/** Merge newly-seen real tmux session names into the persisted last-seen set. */
-+	private recordHistory(names: readonly string[]): void {
-+		const meaningful = names.filter(n => SESSION_NAME_RE.test(n));
-+		if (meaningful.length === 0) {
-+			return;
-+		}
-+		const existing = this.readHistory();
-+		const merged = Array.from(new Set([...existing, ...meaningful]));
-+		if (merged.length === existing.length) {
-+			return; // nothing new
-+		}
-+		this.storageService.store(HISTORY_STORAGE_KEY, JSON.stringify(merged), StorageScope.WORKSPACE, StorageTarget.MACHINE);
-+		// Only the History view owns the History row; re-render it if that's us.
-+		if (this.category === 'history') {
-+			this.renderHistory();
-+		}
++		return readHistoryFromStore(this.storageService);
 +	}
 +
 +}
@@ -3684,6 +3689,24 @@ index 00000000..820a8de4
 +		}, () => { /* part disposed */ });
 +	}
 +
++	private sessionNameFromTitle(title: string | undefined): string | undefined {
++		const name = (title ?? '').trim();
++		return SESSION_NAME_RE.test(name) ? name : undefined;
++	}
++
++	private freezeSessionNameFromTitle(key: string, instance: ITerminalInstance): boolean {
++		const entry = this.attached.get(key);
++		if (!entry || entry.sessionName) {
++			return false;
++		}
++		const name = this.sessionNameFromTitle(instance.title);
++		if (!name) {
++			return false;
++		}
++		entry.sessionName = name;
++		return true;
++	}
++
 +	/**
 +	 * Shared terminal-open path: create a terminal editor in `group`, record it in the
 +	 * `attached` map, and notify the Session Manager's Attached row. Both launchSession and
@@ -3693,6 +3716,7 @@ index 00000000..820a8de4
 +		const instance = this.terminalInstanceService.createInstance(cwd ? { cwd } : {}, TerminalLocation.Editor);
 +		const input = this.instantiationService.createInstance(TerminalEditorInput, instance.resource, instance);
 +		const key = instance.resource.toString();
++		let frozenSessionName = sessionName ?? this.sessionNameFromTitle(instance.title);
 +
 +		// Per-instance lifecycle store so these listeners live only as long as the terminal,
 +		// not the whole Sessions view (otherwise opening/closing N sessions leaks 2*N listeners
@@ -3705,11 +3729,17 @@ index 00000000..820a8de4
 +			notifyAttachedSessionsChanged();
 +			this.partDisposables.delete(store); // removes from set + disposes this store's listeners
 +		}));
-+		store.add(instance.onTitleChanged(() => notifyAttachedSessionsChanged()));
++		store.add(instance.onTitleChanged(() => {
++			if (!frozenSessionName) {
++				frozenSessionName = this.sessionNameFromTitle(instance.title);
++			}
++			this.freezeSessionNameFromTitle(key, instance);
++			notifyAttachedSessionsChanged();
++		}));
 +
 +		const opened = group.openEditor(input, { pinned: true }).then(() => {
 +			// Record only after the editor is open so `group` is live.
-+			this.attached.set(key, { instance, input, group, sessionName });
++			this.attached.set(key, { instance, input, group, sessionName: frozenSessionName });
 +			notifyAttachedSessionsChanged();
 +		}, (e) => {
 +			// Open failed: tear down the orphaned instance + its listeners (don't strand it).
