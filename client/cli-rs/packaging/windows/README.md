@@ -12,8 +12,8 @@ keeps the client on the same toolchain.
 ## Not yet (deferred)
 - **Code signing** — v1 ships unsigned per the plan; SmartScreen will warn until signed.
 - Start-menu shortcuts, a UI sequence, per-user scope, file associations.
-- Version is hard-wired by CI from `Cargo.toml`; no auto-update wiring yet (that pairs with a
-  release pipeline + the redesigned `self-update`).
+- Version is stamped by CI from `Cargo.toml`; `xpair self-update` installs the MSI published on
+  GitHub Releases (`xpair-<version>-x64.msi`, falling back to `xpair-cli.msi`).
 
 ## Build locally
 ```sh
@@ -24,5 +24,6 @@ wix build packaging/windows/xpair.wxs -b target/release -arch x64 \
   -d Version=0.1.0 -o xpair-0.1.0-x64.msi
 ```
 
-CI builds this on `windows-latest` (`.github/workflows/package-windows.yml`) and uploads the
-`.msi` as a build artifact on every change to `client/cli-rs/**`.
+CI builds this on `windows-latest` (`.github/workflows/package-windows.yml`) as a build artifact;
+the release workflow builds on the self-hosted Win11 runner and uploads both MSI asset names to the
+GitHub Release.

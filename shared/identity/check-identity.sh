@@ -51,6 +51,11 @@ CARGO="$ROOT/host/rd/screen/Cargo.toml"
 [[ -f "$CARGO" ]] && check "rs screen-engine version" "$(jq -r '."screen-engine"' "$VER")" \
   "$(awk -F'"' '/^\[package\]/{p=1} p&&/^version[[:space:]]*=/{print $2; exit}' "$CARGO")"
 
+# --- client/cli-rs Cargo.toml version ---
+CLI_CARGO="$ROOT/client/cli-rs/Cargo.toml"
+[[ -f "$CLI_CARGO" ]] && check "cli-rs Cargo.toml version" "$(jq -r .cli "$VER")" \
+  "$(awk -F'"' '/^\[package\]/{p=1} p&&/^version[[:space:]]*=/{print $2; exit}' "$CLI_CARGO")"
+
 # --- host bundle id present in Config.swift ---
 CFG="$ROOT/host/app/Config.swift"
 EXP_BID="$(jq -r .components.host.bundleId "$ID")"
