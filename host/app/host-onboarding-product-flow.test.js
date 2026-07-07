@@ -62,7 +62,8 @@ test("Q0441 Q0442 Q0443 Host onboarding exists in the Host app/menu bar and cann
   assert.match(hostApp, /const PERM_START = 3/);
   assert.match(hostApp, /const ENGINE_IDX = PERM_END \+ 1/);
   assert.match(hostApp, /const BROADCAST_IDX = ENGINE_IDX \+ 1/);
-  assert.match(stepSinglePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr"\]/);
+  // File Sharing is mount-mandatory for /Volumes mappings, so React must require it.
+  assert.match(stepSinglePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr", "fda", "sharing"\]/);
   assert.match(hostApp, /inPerms && isRequiredPerm\(currentPermKey\) && !currentPermGranted/);
   assert.match(hostApp, /await window\.xpair\.requestPermission\(key\)/);
   assert.match(hostApp, /await window\.xpair\.openPermissionPane\(key\)/);

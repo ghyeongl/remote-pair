@@ -56,10 +56,10 @@ enum Permissions {
     }
 
     /// The required gates. AX + SR are computer-use's input/capture gates; Remote Login (sshd) is the
-    /// transport every client session rides on, so a host with sshd off is not actually usable even
-    /// with AX/SR granted and a key still on file — include it so completion/launch reflect reality.
+    /// transport every client session rides on, and File Sharing (SMB) is required for /Volumes mount
+    /// mappings, so completion/launch must reflect all four.
     /// (FDA is recommended, not a gate.)
-    static func allGranted() -> Bool { axTrusted() && srGranted() && loginGranted() }
+    static func allGranted() -> Bool { axTrusted() && srGranted() && loginGranted() && fdaGranted() && sharingGranted() }
 
     /// Onboarding-triggered single-permission request (the onboarding owns the surrounding UI, so no alert/panes here).
     /// AX → AXIsProcessTrustedWithOptions(prompt) shows the system prompt AND registers the app in the Accessibility list.
