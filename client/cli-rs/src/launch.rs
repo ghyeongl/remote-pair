@@ -2898,12 +2898,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result, Some(client_dir.clone()));
-        assert_eq!(raw_maps, format!("{client_dir}::{client_dir}"));
-        assert_eq!(raw_modes, format!("{client_dir}::sync"));
+        // Persistence canonicalizes separators (windows backslashes become '/');
+        // compare against the canonical form so the test holds on every OS.
+        let canon = client_dir.replace('\\', "/");
+        assert_eq!(result, Some(canon.clone()));
+        assert_eq!(raw_maps, format!("{canon}::{canon}"));
+        assert_eq!(raw_modes, format!("{canon}::sync"));
         assert_eq!(
             config::get(&tmp.path, "FOLDER_MAPS").unwrap(),
-            Some(format!("{client_dir}::{client_dir}"))
+            Some(format!("{canon}::{canon}"))
         );
         assert!(String::from_utf8(out)
             .unwrap()
