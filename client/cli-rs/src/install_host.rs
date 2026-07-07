@@ -1,6 +1,6 @@
 //! `xpair install-host` command construction and bootstrap orchestration.
 //!
-//! C1 divergence from `client/cli/xpair:1527-1537`: bash multiplexes the whole install over
+//! C1 divergence from `client/cli/xpair:1824-1831`: bash multiplexes the whole install over
 //! one SSH master (`ControlMaster`/`ControlPath`/`ControlPersist`). Win32-OpenSSH cannot use
 //! that model, so this Rust port intentionally runs every host step as an independent
 //! [`Transport::ssh_exec`] call. The real transport passes
@@ -125,6 +125,7 @@ fn parse_install_args_with_default_host(
             2,
         ));
     }
+    normalize_user_qualified_host(&mut host, &mut account);
     if bootstrap && sha256.as_deref().unwrap_or_default().is_empty() {
         return Err((
             "--bootstrap requires --sha256 <hex> (no unverified curl|bash)".to_string(),
@@ -147,7 +148,7 @@ pub fn build_idempotency_probe_cmd(app: &str) -> String {
 }
 
 pub fn build_reregister_cmd(bundle: &str, app: &str) -> String {
-    format!("launchctl kickstart -k gui/$(id -u)/{bundle} 2>/dev/null || open -a {app} 2>/dev/null || true")
+    format!("pkill -f /{app}.app/Contents/MacOS/{app} 2>/dev/null; sleep 1; launchctl kickstart -k gui/$(id -u)/{bundle} 2>/dev/null || open -a {app} 2>/dev/null || true")
 }
 
 pub fn build_bootstrap_remote_invocation(git_ref: &str) -> String {
@@ -343,7 +344,7 @@ where
             return code;
         }
     } else {
-        // DEFERRED: the bash path at `client/cli/xpair:1571-1597` stages a signed `.app`
+        // DEFERRED: the bash path at `client/cli/xpair:1934-1961` stages a signed `.app`
         // with scp plus shared install resources. The native port has no portable signed-app
         // staging flow yet, and must not fake a host install.
         let _ = writeln!(
@@ -549,6 +550,16 @@ fn shell_assignment_safe(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+}
+
+fn normalize_user_qualified_host(host: &mut String, account: &mut Option<String>) {
+    let Some((user, bare_host)) = host.split_once('@') else {
+        return;
+    };
+    if account.as_deref().unwrap_or_default().is_empty() {
+        *account = Some(user.to_string());
+    }
+    *host = bare_host.to_string();
 }
 
 fn resolve_host(client_env_path: &Path) -> io::Result<String> {
@@ -953,6 +964,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_splits_user_qualified_host_into_account() {
+        with_env(&[("REMOTE_HOST", None)], || {
+            let req = parse_install_args(&strings(&[
+                "--host",
+                "alice@mac-mini",
+                "--bootstrap",
+                "--sha256",
+                "abc",
+            ]))
+            .unwrap();
+
+            assert_eq!(req.host, "mac-mini");
+            assert_eq!(req.account.as_deref(), Some("alice"));
+            assert_eq!(req.target(), "alice@mac-mini");
+        });
+    }
+
+    #[test]
+    fn explicit_account_wins_over_user_qualified_host() {
+        with_env(&[("REMOTE_HOST", None)], || {
+            let req = parse_install_args(&strings(&[
+                "--host",
+                "alice@mac-mini",
+                "--account",
+                "bob",
+                "--bootstrap",
+                "--sha256",
+                "abc",
+            ]))
+            .unwrap();
+
+            assert_eq!(req.host, "mac-mini");
+            assert_eq!(req.account.as_deref(), Some("bob"));
+            assert_eq!(req.target(), "bob@mac-mini");
+        });
+    }
+
+    #[test]
     fn builds_commands_and_config_block_exactly() {
         assert_eq!(
             build_idempotency_probe_cmd("XpairHost"),
@@ -960,7 +1009,7 @@ mod tests {
         );
         assert_eq!(
             build_reregister_cmd("com.x10lab.xpair-host", "XpairHost"),
-            "launchctl kickstart -k gui/$(id -u)/com.x10lab.xpair-host 2>/dev/null || open -a XpairHost 2>/dev/null || true"
+            "pkill -f /XpairHost.app/Contents/MacOS/XpairHost 2>/dev/null; sleep 1; launchctl kickstart -k gui/$(id -u)/com.x10lab.xpair-host 2>/dev/null || open -a XpairHost 2>/dev/null || true"
         );
         assert_eq!(
             build_bootstrap_remote_invocation("main"),

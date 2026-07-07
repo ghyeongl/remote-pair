@@ -1,6 +1,6 @@
 //! Attach an existing tmux-aqua session.
 //!
-//! Ports the testable core of `cmd_attach()` from `client/cli/xpair:826-889`.
+//! Ports the testable core of `cmd_attach()` from `client/cli/xpair:963-1033`.
 //! The interactive terminal handoff remains a small process-spawn shim; argument parsing,
 //! target selection, SSH argv construction, and remote session probing stay pure/testable.
 
@@ -13,7 +13,7 @@ use crate::remote_quote;
 use crate::session::{self, SshTransport};
 use crate::transport::Transport;
 
-const USAGE: &str = "attach [--local|--remote] <session-name>";
+const USAGE: &str = "attach <session-name>";
 const REMOTE_BIN: &str = "$HOME/.local/bin";
 const TMUX_AQUA: &str = "tmux-aqua";
 
@@ -31,13 +31,11 @@ pub struct AttachReq {
 
 /// Parse `xpair attach` args with the bash exit-code contract.
 pub fn parse_attach_args(args: &[String]) -> Result<AttachReq, (String, u8)> {
-    let mut target_pref = None;
+    let target_pref = None;
     let mut session = None;
 
     for arg in args {
         match arg.as_str() {
-            "--local" => target_pref = Some(Target::Local),
-            "--remote" => target_pref = Some(Target::Remote),
             "-h" | "--help" => return Err((USAGE.to_string(), 0)),
             opt if opt.starts_with("--") => {
                 return Err((format!("unknown attach option: {opt}"), 2));
@@ -64,13 +62,14 @@ pub fn parse_attach_args(args: &[String]) -> Result<AttachReq, (String, u8)> {
     })
 }
 
-/// Resolve the attach target using the same precedence as bash.
+/// Resolve the attach target. Current bash attach is a single configured-host path.
 pub fn resolve_target(pref: Option<Target>, local_mode: bool, host: &str) -> Target {
     match pref {
         Some(target) => target,
-        None if local_mode => Target::Local,
-        None if !host.is_empty() => Target::Remote,
-        None => Target::Local,
+        None => {
+            let _ = (local_mode, host);
+            Target::Remote
+        }
     }
 }
 
@@ -211,7 +210,7 @@ fn run_remote_attach(
     session: &str,
 ) -> ExitCode {
     if host.is_empty() {
-        eprintln!("no REMOTE_HOST configured — use --local or 'xpair config set host <ssh-host>'");
+        eprintln!("no host configured — set one in Xpair.app or: xpair config set host <ssh-host>");
         return ExitCode::from(1);
     }
 
@@ -273,10 +272,8 @@ fn resolve_host(path: &Path) -> std::io::Result<String> {
 }
 
 fn resolve_local_mode(path: &Path) -> std::io::Result<bool> {
-    if let Ok(value) = std::env::var("LOCAL_MODE") {
-        return Ok(session::local_mode_on_value(&value));
-    }
-    Ok(config::get_cli(path, "local_mode")? == "1")
+    let _ = path;
+    Ok(false)
 }
 
 fn resolve_aqua_sock(path: &Path) -> std::io::Result<String> {
@@ -391,26 +388,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_local_and_remote_flags_with_last_flag_winning() {
+    fn parse_rejects_removed_local_remote_flags() {
         assert_eq!(
-            parse(&["--local", "alpha"]).unwrap(),
-            AttachReq {
-                target_pref: Some(Target::Local),
-                session: "alpha".to_string(),
-            }
+            parse(&["--local", "alpha"]),
+            Err(("unknown attach option: --local".to_string(), 2))
         );
         assert_eq!(
-            parse(&["--remote", "alpha"]).unwrap(),
-            AttachReq {
-                target_pref: Some(Target::Remote),
-                session: "alpha".to_string(),
-            }
-        );
-        assert_eq!(
-            parse(&["--local", "--remote", "alpha"])
-                .unwrap()
-                .target_pref,
-            Some(Target::Remote)
+            parse(&["--remote", "alpha"]),
+            Err(("unknown attach option: --remote".to_string(), 2))
         );
     }
 
@@ -464,9 +449,9 @@ mod tests {
             resolve_target(Some(Target::Remote), true, ""),
             Target::Remote
         );
-        assert_eq!(resolve_target(None, true, "mac"), Target::Local);
+        assert_eq!(resolve_target(None, true, "mac"), Target::Remote);
         assert_eq!(resolve_target(None, false, "mac"), Target::Remote);
-        assert_eq!(resolve_target(None, false, ""), Target::Local);
+        assert_eq!(resolve_target(None, false, ""), Target::Remote);
     }
 
     #[test]

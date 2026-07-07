@@ -1,6 +1,6 @@
 //! `xpair open-gui` terminal launch construction.
 //!
-//! Ports `cmd_open_gui()` from `client/cli/xpair:545-585`: resolve the target folder,
+//! Ports `cmd_open_gui()` from `client/cli/xpair:679-719`: resolve the target folder,
 //! construct `exec <self> launch <dir>` for macOS terminal apps, and open a new terminal
 //! window/tab. The platform-specific command construction stays pure; process spawning is
 //! kept in the small runtime shim below.

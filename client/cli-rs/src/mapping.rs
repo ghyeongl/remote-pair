@@ -1,7 +1,7 @@
 //! Folder mapping from a client path to the POSIX host path.
 //!
-//! Ports `map_to_host()` from `client/cli/xpair-launch:188-197` and `resolve_host()`
-//! from `client/cli/xpair:263-270`: `FOLDER_MAPS` is a `;`-separated list of
+//! Ports `map_to_host()`/`resolve_host()` from `client/cli/bin/maplib.sh:7-16`:
+//! `FOLDER_MAPS` is a `;`-separated list of
 //! `client::host` entries, empty entries are ignored, entries without `::` are identity
 //! mappings, and the longest matching client prefix wins.
 

@@ -1,6 +1,6 @@
 //! OS detection + per-OS capability flags.
 //!
-//! Ports `_xpair_os()` (`client/cli/xpair:42`, `client/cli/xpair-launch:25`). Unlike the
+//! Ports `_xpair_os()` (`client/cli/xpair:40-46`, `client/cli/xpair-launch:24-30`). Unlike the
 //! bash version that parses `uname`, each compiled binary already knows its target OS via
 //! `cfg!(target_os=…)`, which is more reliable. An `RP_OS` env override is honored for
 //! parity with the bash override and to exercise per-OS branches in tests.

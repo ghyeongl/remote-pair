@@ -1,8 +1,8 @@
 //! Session listing for `xpair ls`.
 //!
-//! Ports `cmd_ls_json()` and `cmd_ls()` from `client/cli/xpair:344-395`: remote
-//! mode asks the host for tmux-aqua sessions over SSH, local mode asks local tmux,
-//! `_keeper` sessions are hidden, and JSON is compact with stable key order.
+//! Ports `cmd_ls_json()` and `cmd_ls()` from `client/cli/xpair:494-549`: a configured
+//! host is queried for tmux-aqua sessions over SSH, `_keeper` sessions are hidden, and
+//! JSON is compact with stable key order.
 
 use std::io;
 use std::process::{Command, Stdio};
@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use crate::remote_quote;
 use crate::transport::{Output, Transport};
 
-/// Bash default from `shared/config.sh:70` and `client/cli/xpair:69`.
+/// Bash default from `shared/config.sh:138` and `client/cli/xpair:78`.
 pub const DEFAULT_AQUA_SOCK: &str = "/tmp/aqua-tmux.sock";
 
 /// One tmux session parsed from `list-sessions -F '#S\t#{session_attached}'`.
@@ -91,7 +91,7 @@ pub fn render_json(target: &str, host: &str, sessions: &[Session]) -> String {
 
 /// Render the human `xpair ls` report from an already-rendered map list and raw tmux stdout.
 pub fn render_text(target: &str, host: &str, raw_session_stdout: &str, map_list: &str) -> String {
-    let remote = target == "remote";
+    let remote = target == "host" || target == "remote";
     let fallback = if remote {
         "  (none or unreachable)"
     } else {
@@ -101,10 +101,14 @@ pub fn render_text(target: &str, host: &str, raw_session_stdout: &str, map_list:
     let mut out = String::new();
     out.push_str(map_list.trim_end_matches(['\r', '\n']));
     out.push_str("\n\n");
-    if remote {
+    if remote && !host.is_empty() {
         out.push('[');
         out.push_str(host);
         out.push_str("] tmux-aqua sessions:\n");
+    } else if remote {
+        out.push_str("[no host configured] tmux-aqua sessions:\n");
+        out.push_str("  (set one in Xpair.app or: xpair config set host <ssh-host>)\n");
+        return out;
     } else {
         out.push_str("[local] tmux-aqua sessions:\n");
     }
@@ -131,7 +135,7 @@ pub fn render_text(target: &str, host: &str, raw_session_stdout: &str, map_list:
 /// Render remote JSON by asking the host through the transport seam.
 pub fn render_remote_json<T: Transport>(transport: &T, host: &str, aqua_sock: &str) -> String {
     let raw = remote_stdout(transport, host, &remote_list_sessions_cmd(aqua_sock, true));
-    render_json("remote", host, &parse_sessions(&raw))
+    render_json("host", host, &parse_sessions(&raw))
 }
 
 /// Render remote human output by asking the host through the transport seam.
@@ -142,7 +146,7 @@ pub fn render_remote_text<T: Transport>(
     map_list: &str,
 ) -> String {
     let raw = remote_stdout(transport, host, &remote_list_sessions_cmd(aqua_sock, false));
-    render_text("remote", host, &raw, map_list)
+    render_text("host", host, &raw, map_list)
 }
 
 /// Render local JSON using a tiny `tmux` spawn shim.
@@ -286,8 +290,8 @@ mod tests {
         ];
 
         assert_eq!(
-            render_json("remote", "host", &sessions),
-            "{\"target\":\"remote\",\"host\":\"host\",\"sessions\":[{\"name\":\"a\\\"b\\\\c\\n\\t\\u0001\",\"attached\":1},{\"name\":\"plain\",\"attached\":0}]}"
+            render_json("host", "host", &sessions),
+            "{\"target\":\"host\",\"host\":\"host\",\"sessions\":[{\"name\":\"a\\\"b\\\\c\\n\\t\\u0001\",\"attached\":1},{\"name\":\"plain\",\"attached\":0}]}"
         );
     }
 
@@ -295,7 +299,7 @@ mod tests {
     fn renders_remote_text_with_map_list_and_filtered_sessions() {
         assert_eq!(
             render_text(
-                "remote",
+                "host",
                 "mac.local",
                 "alpha: 1 windows\n_keeper: hidden\nbeta: 2 windows\n",
                 "C:/work::/Users/me/work\nD:/repo::/Users/me/repo",
@@ -315,12 +319,16 @@ mod tests {
     #[test]
     fn renders_remote_and_local_empty_fallbacks() {
         assert_eq!(
-            render_text("remote", "mac.local", "_keeper: hidden\n", "(none)"),
+            render_text("host", "mac.local", "_keeper: hidden\n", "(none)"),
             "(none)\n\n[mac.local] tmux-aqua sessions:\n  (none or unreachable)\n"
         );
         assert_eq!(
             render_text("local", "", "", "(none)"),
             "(none)\n\n[local] tmux-aqua sessions:\n  (none)\n"
+        );
+        assert_eq!(
+            render_text("host", "", "", "(none)"),
+            "(none)\n\n[no host configured] tmux-aqua sessions:\n  (set one in Xpair.app or: xpair config set host <ssh-host>)\n"
         );
     }
 

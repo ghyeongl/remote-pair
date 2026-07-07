@@ -1,4 +1,4 @@
-//! Client env-file config (`~/.xpair/host/client.env`).
+//! Client env-file config (`~/.xpair/client/client.env`).
 //!
 //! Ports the bash `rp_set`/`cmd_config` storage model: one `KEY=VALUE` assignment per line
 //! in `client.env`, with shell-style quoting for values. The core file functions take an
@@ -22,18 +22,25 @@ enum Line {
 
 /// Return the configured client env path.
 ///
-/// The bash SSOT is `RP_DIR="${RP_DIR:-$HOME/.xpair/host}"` plus
-/// `CLIENT_ENV="$RP_DIR/client.env"`.
+/// The bash SSOT is `RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"` plus
+/// `CLIENT_ENV="$RP_CLIENT_DIR/client.env"`. `CLIENT_ENV` is honored for tests and
+/// role-aware installer callers that source `shared/config.sh`.
 pub fn default_client_env_path() -> io::Result<PathBuf> {
-    if let Some(rp_dir) = non_empty_env("RP_DIR") {
-        return Ok(PathBuf::from(rp_dir).join("client.env"));
+    if let Some(client_env) = non_empty_env("CLIENT_ENV") {
+        return Ok(PathBuf::from(client_env));
+    }
+    if let Some(rp_client_dir) = non_empty_env("RP_CLIENT_DIR") {
+        return Ok(PathBuf::from(rp_client_dir).join("client.env"));
     }
 
-    Ok(home_dir()?.join(".xpair").join("host").join("client.env"))
+    Ok(default_client_dir()?.join("client.env"))
 }
 
-/// The bash SSOT `RP_DIR="${RP_DIR:-$HOME/.xpair/host}"` (the client/host state dir).
+/// The bash SSOT `RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"`.
 pub fn default_rp_dir() -> io::Result<PathBuf> {
+    if let Some(rp_host_dir) = non_empty_env("RP_HOST_DIR") {
+        return Ok(PathBuf::from(rp_host_dir));
+    }
     if let Some(rp_dir) = non_empty_env("RP_DIR") {
         return Ok(PathBuf::from(rp_dir));
     }
@@ -116,22 +123,18 @@ pub fn list(path: impl AsRef<Path>) -> io::Result<Vec<(String, String)>> {
         .collect())
 }
 
-/// Get a bash-facing config key (`host`, `mode`, `local_mode`, `terminal`, or `engine`).
+/// Get a bash-facing config key (`host`, `terminal`, or `engine`).
 pub fn get_cli(path: impl AsRef<Path>, key: &str) -> io::Result<String> {
     let path = path.as_ref();
     match key {
         "host" => Ok(valid_remote_host(path)?.unwrap_or_default()),
-        "mode" => Ok(mode_label(path)?),
-        "local_mode" => Ok(if local_mode_on(path)? { "1" } else { "0" }.to_string()),
         "terminal" => Ok(get(path, "TERMINAL_APP")?.unwrap_or_else(default_terminal_app)),
         "engine" => Ok(get(path, "ENGINE")?.unwrap_or_else(|| "claude".to_string())),
-        _ => Err(invalid_input(
-            "config get <host|mode|local_mode|terminal|engine>",
-        )),
+        _ => Err(invalid_input("config get <host|terminal|engine>")),
     }
 }
 
-/// Set a bash-facing config key (`host`, `mode`, `local_mode`, `terminal`, or `engine`).
+/// Set a bash-facing config key (`host`, `terminal`, or `engine`).
 pub fn set_cli(path: impl AsRef<Path>, key: &str, value: &str) -> io::Result<String> {
     let path = path.as_ref();
     match key {
@@ -141,7 +144,7 @@ pub fn set_cli(path: impl AsRef<Path>, key: &str, value: &str) -> io::Result<Str
             }
             set(path, "REMOTE_HOST", value)?;
             Ok(if value.is_empty() {
-                "host cleared (local-only mode)".to_string()
+                "host cleared (no host configured)".to_string()
             } else {
                 format!("host set: {value}")
             })
@@ -160,33 +163,20 @@ pub fn set_cli(path: impl AsRef<Path>, key: &str, value: &str) -> io::Result<Str
             set(path, "ENGINE", canon)?;
             Ok(format!("engine set: {canon}"))
         }
-        "mode" | "local_mode" => {
-            let mode = canonical_local_mode(value)
-                .ok_or_else(|| invalid_input("mode must be local or auto"))?;
-            set(path, "LOCAL_MODE", mode)?;
-            Ok(if mode == "1" {
-                "local mode enabled".to_string()
-            } else {
-                "local mode cleared".to_string()
-            })
-        }
-        _ => Err(invalid_input(
-            "config set <host|mode|local_mode|terminal|engine> <value>",
-        )),
+        _ => Err(invalid_input("config set <host|terminal|engine> <value>")),
     }
 }
 
 /// Format the bash-style `config list` summary rows.
 pub fn list_cli(path: impl AsRef<Path>) -> io::Result<Vec<(String, String)>> {
     let path = path.as_ref();
-    let host = valid_remote_host(path)?.unwrap_or_else(|| "(local-only)".to_string());
+    let host = valid_remote_host(path)?.unwrap_or_else(|| "(no host configured)".to_string());
     let maps = get(path, "FOLDER_MAPS")?
         .map(|m| m.split(';').filter(|entry| !entry.is_empty()).count())
         .unwrap_or(0);
 
     Ok(vec![
         ("host".to_string(), host),
-        ("mode".to_string(), mode_label(path)?),
         (
             "terminal".to_string(),
             get(path, "TERMINAL_APP")?.unwrap_or_else(default_terminal_app),
@@ -202,7 +192,17 @@ pub fn list_cli(path: impl AsRef<Path>) -> io::Result<Vec<(String, String)>> {
 fn read_lines(path: &Path) -> io::Result<Vec<Line>> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            if let Some(legacy_path) = legacy_client_env_for(path)? {
+                match fs::read_to_string(&legacy_path) {
+                    Ok(text) => text,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+                    Err(err) => return Err(err),
+                }
+            } else {
+                return Ok(Vec::new());
+            }
+        }
         Err(err) => return Err(err),
     };
 
@@ -446,14 +446,34 @@ fn validate_env_key(key: &str) -> io::Result<()> {
     }
 }
 
-fn valid_host(host: &str) -> bool {
-    let mut chars = host.chars();
-    match chars.next() {
-        Some('-') | None => return false,
-        Some(c) if c.is_ascii_alphanumeric() || matches!(c, '.' | '_') => {}
-        Some(_) => return false,
+/// Bash `valid_host()` from `client/cli/bin/maplib.sh`: accepts either `host` or
+/// `user@host`, rejects ssh-option-looking values, and restricts both parts to
+/// `[A-Za-z0-9._-]`.
+pub fn valid_host(target: &str) -> bool {
+    if target.is_empty() || target.starts_with('-') {
+        return false;
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+
+    let (user, host) = match target.split_once('@') {
+        Some((user, host)) if !target[user.len() + 1..].contains('@') => (Some(user), host),
+        Some(_) => return false,
+        None => (None, target),
+    };
+
+    if let Some(user) = user {
+        if !valid_host_part(user) {
+            return false;
+        }
+    }
+    valid_host_part(host)
+}
+
+fn valid_host_part(part: &str) -> bool {
+    !part.is_empty()
+        && !part.starts_with('-')
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn valid_remote_host(path: &Path) -> io::Result<Option<String>> {
@@ -467,32 +487,6 @@ fn canonical_engine(engine: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "opencode" => Some("opencode"),
         _ => None,
-    }
-}
-
-fn canonical_local_mode(mode: &str) -> Option<&'static str> {
-    match mode {
-        "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON" | "local" => Some("1"),
-        "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF" | "auto" | "remote" | "" => Some("0"),
-        _ => None,
-    }
-}
-
-fn local_mode_on(path: &Path) -> io::Result<bool> {
-    Ok(get(path, "LOCAL_MODE")?
-        .as_deref()
-        .and_then(canonical_local_mode)
-        .unwrap_or("0")
-        == "1")
-}
-
-fn mode_label(path: &Path) -> io::Result<String> {
-    if local_mode_on(path)? {
-        Ok("local (transient)".to_string())
-    } else if valid_remote_host(path)?.is_some_and(|host| !host.is_empty()) {
-        Ok("auto (remote)".to_string())
-    } else {
-        Ok("auto (local)".to_string())
     }
 }
 
@@ -519,9 +513,31 @@ fn home_dir() -> io::Result<PathBuf> {
         }
         _ => Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "HOME is not set; cannot resolve ~/.xpair/host/client.env",
+            "HOME is not set; cannot resolve ~/.xpair/client/client.env",
         )),
     }
+}
+
+fn default_client_dir() -> io::Result<PathBuf> {
+    Ok(home_dir()?.join(".xpair").join("client"))
+}
+
+fn legacy_client_env_for(path: &Path) -> io::Result<Option<PathBuf>> {
+    if non_empty_env("CLIENT_ENV").is_some() {
+        return Ok(None);
+    }
+
+    let default_client_env = if let Some(rp_client_dir) = non_empty_env("RP_CLIENT_DIR") {
+        PathBuf::from(rp_client_dir).join("client.env")
+    } else {
+        default_client_dir()?.join("client.env")
+    };
+
+    if path != default_client_env {
+        return Ok(None);
+    }
+
+    Ok(Some(default_rp_dir()?.join("client.env")))
 }
 
 fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
@@ -711,16 +727,19 @@ mod tests {
     }
 
     #[test]
-    fn cli_mode_matches_bash_labels() {
+    fn cli_rejects_removed_mode_keys_like_bash() {
         let tmp = TestPath::new("mode");
-        set(&tmp.path, "REMOTE_HOST", "test-host").unwrap();
 
-        assert_eq!(get_cli(&tmp.path, "mode").unwrap(), "auto (remote)");
-        set_cli(&tmp.path, "mode", "local").unwrap();
-        assert_eq!(get_cli(&tmp.path, "local_mode").unwrap(), "1");
-        assert_eq!(get_cli(&tmp.path, "mode").unwrap(), "local (transient)");
-        set_cli(&tmp.path, "mode", "auto").unwrap();
-        assert_eq!(get_cli(&tmp.path, "mode").unwrap(), "auto (remote)");
+        let get_err = get_cli(&tmp.path, "mode").unwrap_err();
+        let set_err = set_cli(&tmp.path, "local_mode", "local").unwrap_err();
+
+        assert_eq!(get_err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(get_err.to_string(), "config get <host|terminal|engine>");
+        assert_eq!(set_err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            set_err.to_string(),
+            "config set <host|terminal|engine> <value>"
+        );
     }
 
     #[test]
@@ -732,5 +751,22 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(err.to_string(), "invalid host: -oProxyCommand=touch-pwn");
         assert_eq!(get(&tmp.path, "REMOTE_HOST").unwrap(), None);
+    }
+
+    #[test]
+    fn valid_host_matches_maplib_user_qualified_contract() {
+        assert!(valid_host("mac-mini"));
+        assert!(valid_host("alice@mac-mini.local"));
+        assert!(valid_host("a_b.c-d@host_1.local"));
+
+        assert!(!valid_host(""));
+        assert!(!valid_host("-oProxyCommand=touch-pwn"));
+        assert!(!valid_host("@host"));
+        assert!(!valid_host("alice@"));
+        assert!(!valid_host("alice@bob@host"));
+        assert!(!valid_host("bad/user@host"));
+        assert!(!valid_host("alice@bad/host"));
+        assert!(!valid_host("-alice@host"));
+        assert!(!valid_host("alice@-host"));
     }
 }

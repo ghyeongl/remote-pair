@@ -12,11 +12,13 @@ use crate::config;
 use crate::mapping::parse_maps;
 use crate::platform::Os;
 use crate::remote_quote;
+use crate::status;
 use crate::transport::{Output, Transport};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_AQUA_SOCK: &str = "/tmp/aqua-tmux.sock";
 const HOST_TMUX_AQUA: &str = "$HOME/.local/bin/tmux-aqua";
+const REMOTE_STATUS_CMD: &str = "cat ~/.xpair/host/logs/status.json 2>/dev/null";
 
 /// One aligned doctor report row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,11 +108,15 @@ pub fn probe_host(t: &dyn Transport, host: &str, aqua_sock: &str) -> Vec<Row> {
     let server = t
         .ssh_exec(host, &host_server_command(aqua_sock))
         .unwrap_or_else(failed_output);
+    let status_json = t
+        .ssh_exec(host, REMOTE_STATUS_CMD)
+        .unwrap_or_else(failed_output);
 
     vec![
         ssh_auth_row(host, ssh.code),
         host_tmux_aqua_row(tmux_aqua.code),
         host_server_row(server.code),
+        host_serving_grant_row(&status_json.stdout),
     ]
 }
 
@@ -139,6 +145,42 @@ pub fn host_server_row(code: i32) -> Row {
         Row::new("host server", "up", false)
     } else {
         Row::new("host server", "down (check app launch/permissions)", false)
+    }
+}
+
+pub fn host_serving_grant_row(status_json: &str) -> Row {
+    if status_json.trim().is_empty() {
+        return Row::new(
+            "host serving grant",
+            "unknown (status.json absent — update the host app)",
+            false,
+        );
+    }
+
+    let parsed = status::parse_status_json(status_json);
+    let serving = parsed.serving.unwrap_or(parsed.ax && parsed.sr);
+    if serving {
+        if parsed.serving.is_some() {
+            Row::new("host serving grant", "OK (AX✓ SR✓ FDA✓ Sharing✓)", false)
+        } else {
+            Row::new(
+                "host serving grant",
+                "OK (AX✓ SR✓; older host did not report serving/FDA/Sharing)",
+                false,
+            )
+        }
+    } else {
+        Row::new(
+            "host serving grant",
+            format!(
+                "NOT serving (AX {} SR {} FDA {} Sharing {}) — turn these ON in System Settings; Remote Login and File Sharing are required",
+                status::mark(parsed.ax),
+                status::mark(parsed.sr),
+                status::mark(parsed.fda),
+                status::mark(parsed.sharing)
+            ),
+            true,
+        )
     }
 }
 
@@ -182,7 +224,7 @@ pub fn run(args: &[String]) -> ExitCode {
         &settings.folder_maps,
     );
 
-    let local_only = settings.remote_host.is_none();
+    let no_host_configured = settings.remote_host.is_none();
     if let Some(host) = settings.remote_host.as_deref() {
         let transport = SshTransport { os };
         rows.extend(probe_host(&transport, host, &settings.aqua_sock));
@@ -197,8 +239,8 @@ pub fn run(args: &[String]) -> ExitCode {
             os.ssh_mux_neutralizer_args().join(" ")
         );
     }
-    if local_only {
-        println!("local-only mode (skipping remote checks)");
+    if no_host_configured {
+        println!("no host configured — set one in Xpair.app or: xpair config set host <ssh-host> (skipping host checks)");
     }
     print!("{}", render_report(&rows));
 
@@ -225,7 +267,7 @@ impl RuntimeSettings {
             .or_else(|| non_empty_value(config_path, "SYNC_ROOTS"))
             .unwrap_or_default();
         let remote_host =
-            non_empty_value(config_path, "REMOTE_HOST").filter(|host| valid_host(host));
+            non_empty_value(config_path, "REMOTE_HOST").filter(|host| config::valid_host(host));
         let aqua_sock =
             non_empty_value(config_path, "AQUA_SOCK").unwrap_or_else(|| DEFAULT_AQUA_SOCK.into());
         let launcher_path = non_empty_value(config_path, "LAUNCHER")
@@ -254,18 +296,18 @@ fn value(config_path: Option<&Path>, key: &str) -> Option<String> {
 }
 
 fn default_launcher_path() -> PathBuf {
-    rp_dir().join("bin").join("xpair-launch")
+    client_dir().join("bin").join("xpair-launch")
 }
 
-fn rp_dir() -> PathBuf {
-    if let Some(value) = std::env::var_os("RP_DIR").filter(|value| !value.is_empty()) {
+fn client_dir() -> PathBuf {
+    if let Some(value) = std::env::var_os("RP_CLIENT_DIR").filter(|value| !value.is_empty()) {
         return PathBuf::from(value);
     }
 
     home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".xpair")
-        .join("host")
+        .join("client")
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -286,16 +328,6 @@ fn home_dir() -> Option<PathBuf> {
         }
         _ => None,
     }
-}
-
-fn valid_host(host: &str) -> bool {
-    let mut chars = host.chars();
-    match chars.next() {
-        Some('-') | None => return false,
-        Some(c) if c.is_ascii_alphanumeric() || matches!(c, '.' | '_') => {}
-        Some(_) => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn launcher_present(path: &Path) -> bool {
@@ -447,6 +479,10 @@ mod tests {
         t.push_response(0, "");
         t.push_response(0, "");
         t.push_response(0, "");
+        t.push_response(
+            0,
+            r#"{"ax":true,"sr":true,"fda":true,"sharing":true,"serving":true}"#,
+        );
 
         let rows = probe_host(&t, "mac-mini", "/tmp/aqua sock");
 
@@ -456,11 +492,12 @@ mod tests {
                 Row::new("SSH (mac-mini)", "OK (key auth passed)", false),
                 Row::new("host tmux-aqua", "OK", false),
                 Row::new("host server", "up", false),
+                Row::new("host serving grant", "OK (AX✓ SR✓ FDA✓ Sharing✓)", false),
             ]
         );
 
         let calls = t.calls();
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 4);
         assert_eq!(calls[0].host, "mac-mini");
         assert_eq!(calls[0].remote_cmd, "'true'");
         assert_eq!(
@@ -471,6 +508,7 @@ mod tests {
             calls[2].remote_cmd,
             "'sh' '-lc' '\"$HOME/.local/bin/tmux-aqua\" -S '\\''/tmp/aqua sock'\\'' has-session'"
         );
+        assert_eq!(calls[3].remote_cmd, REMOTE_STATUS_CMD);
     }
 
     #[test]
@@ -479,6 +517,7 @@ mod tests {
         t.push_response(0, "");
         t.push_response(1, "");
         t.push_response(1, "");
+        t.push_response(0, "");
 
         let rows = probe_host(&t, "mac-mini", DEFAULT_AQUA_SOCK);
 
@@ -498,6 +537,14 @@ mod tests {
             rows[2],
             Row::new("host server", "down (check app launch/permissions)", false)
         );
+        assert_eq!(
+            rows[3],
+            Row::new(
+                "host serving grant",
+                "unknown (status.json absent — update the host app)",
+                false
+            )
+        );
     }
 
     #[test]
@@ -506,10 +553,34 @@ mod tests {
         t.push_response(255, "");
         t.push_response(0, "");
         t.push_response(0, "");
+        t.push_response(
+            0,
+            r#"{"ax":true,"sr":false,"fda":true,"sharing":false,"serving":false}"#,
+        );
 
         let rows = probe_host(&t, "mac-mini", DEFAULT_AQUA_SOCK);
 
         assert_eq!(rows[0], Row::new("SSH (mac-mini)", "FAILED", true));
+        assert_eq!(
+            rows[3],
+            Row::new(
+                "host serving grant",
+                "NOT serving (AX ✓ SR ✗ FDA ✓ Sharing ✗) — turn these ON in System Settings; Remote Login and File Sharing are required",
+                true
+            )
+        );
         assert!(!verdict(&rows));
+    }
+
+    #[test]
+    fn host_serving_grant_uses_ax_sr_fallback_for_older_hosts() {
+        assert_eq!(
+            host_serving_grant_row(r#"{"ax":true,"sr":true,"fda":false,"sharing":false}"#),
+            Row::new(
+                "host serving grant",
+                "OK (AX✓ SR✓; older host did not report serving/FDA/Sharing)",
+                false
+            )
+        );
     }
 }

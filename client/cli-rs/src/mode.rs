@@ -1,7 +1,7 @@
 //! Mode command (`xpair mode`).
 //!
-//! Ports `local_mode_on()`/`mode_label()`, `set_local_mode()`, and `cmd_mode()` from
-//! `client/cli/xpair:125-134`, `client/cli/xpair:195-212`, and `client/cli/xpair:531-542`.
+//! Legacy native-client helper retained for tests and embedders. The current bash CLI no
+//! longer exposes an `xpair mode` dispatch entry.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -91,7 +91,9 @@ fn resolve_local_mode(path: &Path) -> io::Result<bool> {
     if let Ok(value) = std::env::var("LOCAL_MODE") {
         return Ok(session::local_mode_on_value(&value));
     }
-    Ok(config::get_cli(path, "local_mode")? == "1")
+    Ok(config::get(path, "LOCAL_MODE")?
+        .as_deref()
+        .is_some_and(session::local_mode_on_value))
 }
 
 fn non_empty_env(key: &str) -> Option<String> {

@@ -2,7 +2,7 @@
 //!
 //! Subcommands are ported incrementally (P1+) behind this stable surface; until a command is
 //! ported it returns exit 2 with a clear "not yet implemented" message. The canonical command
-//! set mirrors the bash dispatch at `client/cli/xpair:1869-1893`.
+//! set mirrors the bash dispatch at `client/cli/xpair:2261-2287`.
 
 use std::fs;
 use std::path::Path;
@@ -16,7 +16,6 @@ use xpair::install_host;
 use xpair::launch;
 use xpair::logs;
 use xpair::mapping::{map_to_host, parse_maps};
-use xpair::mode;
 use xpair::notify;
 use xpair::open_gui;
 use xpair::session::{self, SshTransport};
@@ -32,7 +31,6 @@ const SUBCOMMANDS: &[&str] = &[
     "ls",
     "map",
     "config",
-    "mode",
     "onboard",
     "open-gui",
     "discover",
@@ -79,9 +77,8 @@ fn main() -> ExitCode {
         "desktop" => tools::run_passthrough("xpair-desktop", &args[1..]),
         "mount" => tools::run_passthrough("xpair-mount", &args[1..]),
         "map" => cmd_map(&args[1..]),
-        "mode" => cmd_mode(&args[1..]),
         "config" => run_config(&args[1..]),
-        // `roots` is a legacy alias of `map` (client/cli/xpair:1873).
+        // `roots` is a legacy alias of `map` (client/cli/xpair:2266).
         "roots" => cmd_map(&args[1..]),
         other if SUBCOMMANDS.contains(&other) => {
             eprintln!(
@@ -112,18 +109,6 @@ fn print_help() {
     );
 }
 
-fn cmd_mode(args: &[String]) -> ExitCode {
-    let path = match config::default_client_env_path() {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("xpair mode: {err}");
-            return ExitCode::from(2);
-        }
-    };
-
-    mode::run(args, &path)
-}
-
 fn cmd_status(args: &[String]) -> ExitCode {
     if !args.is_empty() {
         eprintln!("usage: xpair status");
@@ -145,13 +130,6 @@ fn cmd_status(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let local_mode = match resolve_local_mode(&path) {
-        Ok(local_mode) => local_mode,
-        Err(err) => {
-            eprintln!("xpair status: {err}");
-            return ExitCode::from(1);
-        }
-    };
     let aqua_sock = resolve_aqua_sock();
     let status_json = match fs::read_to_string(status::status_file_path(&path)) {
         Ok(status_json) => Some(status_json),
@@ -168,7 +146,6 @@ fn cmd_status(args: &[String]) -> ExitCode {
         status::render_status(
             &transport,
             &host,
-            local_mode,
             &aqua_sock,
             status_json.as_deref(),
             status::now_ts()
@@ -178,7 +155,20 @@ fn cmd_status(args: &[String]) -> ExitCode {
 }
 
 fn cmd_map(args: &[String]) -> ExitCode {
-    let raw_maps = std::env::var("FOLDER_MAPS").unwrap_or_default();
+    let path = match config::default_client_env_path() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("xpair map: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let raw_maps = match resolve_raw_maps(&path) {
+        Ok(raw_maps) => raw_maps,
+        Err(err) => {
+            eprintln!("xpair map: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let pairs = parse_maps(&raw_maps);
 
     match args {
@@ -229,22 +219,14 @@ fn cmd_ls(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let local_mode = match resolve_local_mode(&path) {
-        Ok(local_mode) => local_mode,
-        Err(err) => {
-            eprintln!("xpair ls: {err}");
-            return ExitCode::from(1);
-        }
-    };
     let aqua_sock = resolve_aqua_sock();
-    let remote = !host.is_empty() && !local_mode;
     let transport = SshTransport;
 
     if json {
-        let output = if remote {
-            session::render_remote_json(&transport, &host, &aqua_sock)
+        let output = if host.is_empty() {
+            session::render_json("host", "", &[])
         } else {
-            session::render_local_json(&aqua_sock)
+            session::render_remote_json(&transport, &host, &aqua_sock)
         };
         println!("{output}");
         return ExitCode::SUCCESS;
@@ -259,10 +241,10 @@ fn cmd_ls(args: &[String]) -> ExitCode {
     };
     let pairs = parse_maps(&raw_maps);
     let map_list = render_map_list(&pairs);
-    let output = if remote {
-        session::render_remote_text(&transport, &host, &aqua_sock, &map_list)
+    let output = if host.is_empty() {
+        session::render_text("host", "", "", &map_list)
     } else {
-        session::render_local_text(&aqua_sock, &map_list)
+        session::render_remote_text(&transport, &host, &aqua_sock, &map_list)
     };
     print!("{output}");
     ExitCode::SUCCESS
@@ -285,13 +267,6 @@ fn resolve_host(path: &Path) -> std::io::Result<String> {
         return Ok(host);
     }
     config::get_cli(path, "host")
-}
-
-fn resolve_local_mode(path: &Path) -> std::io::Result<bool> {
-    if let Ok(value) = std::env::var("LOCAL_MODE") {
-        return Ok(session::local_mode_on_value(&value));
-    }
-    Ok(config::get_cli(path, "local_mode")? == "1")
 }
 
 fn resolve_raw_maps(path: &Path) -> std::io::Result<String> {
@@ -340,7 +315,7 @@ fn run_config(args: &[String]) -> ExitCode {
         },
         "get" => {
             if args.len() != 2 {
-                eprintln!("config get <host|mode|local_mode|terminal|engine>");
+                eprintln!("config get <host|terminal|engine>");
                 return ExitCode::from(2);
             }
             match config::get_cli(&path, &args[1]) {
@@ -360,7 +335,7 @@ fn run_config(args: &[String]) -> ExitCode {
         }
         "set" => {
             if args.len() != 3 {
-                eprintln!("config set <host|mode|local_mode|terminal|engine> <value>");
+                eprintln!("config set <host|terminal|engine> <value>");
                 return ExitCode::from(2);
             }
             match config::set_cli(&path, &args[1], &args[2]) {

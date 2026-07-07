@@ -1,8 +1,8 @@
 //! Launch a folder into a tmux-aqua session.
 //!
-//! Ports the decision layer of `cmd_launch()` from `client/cli/xpair:747-824`
+//! Ports the decision layer of `cmd_launch()` from `client/cli/xpair:885-960`
 //! plus the portable remote session construction from `client/cli/xpair-launch`.
-//! The host-probe onboarding branch (`client/cli/xpair:782-815`) remains deferred.
+//! The host-probe onboarding branch (`client/cli/xpair:919-953`) remains deferred.
 //! Local launch keeps the macOS-only process boundary small while the naming and
 //! session-selection core stays pure and tested.
 
@@ -43,7 +43,7 @@ pub struct LocalLaunchPlan {
 
 /// Parse `xpair launch` args with the bash exit-code contract.
 pub fn parse_launch_args(args: &[String]) -> Result<LaunchReq, (String, u8)> {
-    let mut target_pref = None;
+    let target_pref = None;
     let mut fresh = false;
     let mut yes = false;
     let mut engine = None;
@@ -52,14 +52,6 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchReq, (String, u8)> {
 
     while i < args.len() {
         match args[i].as_str() {
-            "--local" => {
-                target_pref = Some(Target::Local);
-                i += 1;
-            }
-            "--remote" => {
-                target_pref = Some(Target::Remote);
-                i += 1;
-            }
             "--fresh" => {
                 fresh = true;
                 i += 1;
@@ -75,6 +67,9 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchReq, (String, u8)> {
                 };
                 engine = Some(canon);
                 i += 2;
+            }
+            opt if opt.starts_with("--") => {
+                return Err((format!("unknown launch option: {opt}"), 2));
             }
             _ => {
                 dir = Some(args[i].clone());
@@ -92,7 +87,7 @@ pub fn parse_launch_args(args: &[String]) -> Result<LaunchReq, (String, u8)> {
     })
 }
 
-/// Canonicalize the launch engine aliases from `client/cli/xpair:113-119`.
+/// Canonicalize the launch engine aliases from `client/cli/xpair:158-164`.
 pub fn canonical_engine(engine: &str) -> Option<String> {
     match engine {
         "claude" | "claudecode" | "claude-code" => Some("claude".to_string()),
@@ -103,7 +98,7 @@ pub fn canonical_engine(engine: &str) -> Option<String> {
     }
 }
 
-/// Resolve the launch target using the same precedence as `attach` and `ls`.
+/// Resolve the launch target. Current bash launch is a single configured-host path.
 pub fn resolve_target(pref: Option<Target>, local_mode: bool, host: &str) -> Target {
     crate::attach::resolve_target(pref, local_mode, host)
 }
@@ -111,9 +106,9 @@ pub fn resolve_target(pref: Option<Target>, local_mode: bool, host: &str) -> Tar
 /// Derive the deterministic project session base from a mapped host dir.
 ///
 /// Mirrors `_proj_base()` and the final `.`/`:` normalization from
-/// `client/cli/xpair-launch:237-247`, with the remote host prefix added by
+/// `client/cli/xpair-launch:341-360`, with the remote host prefix added by
 /// [`remote_session_name_for`] just like `REMOTE_PROJ` at
-/// `client/cli/xpair-launch:580-585`.
+/// `client/cli/xpair-launch:504-509`.
 pub fn session_name_for(host_dir: &str) -> String {
     normalize_session_name(&proj_base(host_dir))
 }
@@ -133,7 +128,7 @@ pub fn remote_session_name_for(host: &str, host_dir: &str) -> String {
 /// Derive the local tmux session base from the local host and project dir.
 ///
 /// Bash computes `LOCAL_PROJ="${LOCAL_HOST}_$(_proj_base "$PROJECT_DIR")"`
-/// and then normalizes `.`/`:` in `client/cli/xpair-launch:245-250`.
+/// and then normalizes `.`/`:` in `client/cli/xpair-launch:504-509`.
 pub fn local_session_base_for(local_host: &str, project_dir: &str) -> String {
     normalize_session_name(&format!("{local_host}_{}", session_name_for(project_dir)))
 }
@@ -387,7 +382,7 @@ fn run_local_macos(path: &Path, host: &str, req: &LaunchReq) -> ExitCode {
 
 fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> ExitCode {
     if host.is_empty() {
-        eprintln!("no REMOTE_HOST configured -- use --local or 'xpair config set host <ssh-host>'");
+        eprintln!("no host configured — set one in Xpair.app or: xpair config set host <ssh-host>");
         return ExitCode::from(1);
     }
 
@@ -414,7 +409,7 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
             return ExitCode::from(2);
         }
     };
-    // Deferred: the interactive unmapped-dir host probe from `client/cli/xpair:782-815`.
+    // Deferred: the interactive unmapped-dir host probe from `client/cli/xpair:919-953`.
     // The Rust path maps deterministically and lets the remote tmux setup surface failures.
 
     let aqua_sock = resolve_aqua_sock();
@@ -533,7 +528,13 @@ fn sanitize_readable_name(name: &str) -> String {
 fn normalize_session_name(session: &str) -> String {
     session
         .chars()
-        .map(|ch| if matches!(ch, '.' | ':') { '_' } else { ch })
+        .map(|ch| {
+            if matches!(ch, '.' | ':' | '@') {
+                '_'
+            } else {
+                ch
+            }
+        })
         .collect()
 }
 
@@ -676,10 +677,8 @@ fn resolve_host(path: &Path) -> std::io::Result<String> {
 }
 
 fn resolve_local_mode(path: &Path) -> std::io::Result<bool> {
-    if let Ok(value) = std::env::var("LOCAL_MODE") {
-        return Ok(session::local_mode_on_value(&value));
-    }
-    Ok(config::get_cli(path, "local_mode")? == "1")
+    let _ = path;
+    Ok(false)
 }
 
 fn resolve_raw_maps(path: &Path) -> std::io::Result<String> {
@@ -979,8 +978,6 @@ mod tests {
     fn parses_all_launch_flags_and_last_positional_dir() {
         assert_eq!(
             parse(&[
-                "--local",
-                "--remote",
                 "--fresh",
                 "--yes",
                 "-y",
@@ -991,7 +988,7 @@ mod tests {
             ])
             .unwrap(),
             LaunchReq {
-                target_pref: Some(Target::Remote),
+                target_pref: None,
                 fresh: true,
                 yes: true,
                 engine: Some("claude".to_string()),
@@ -1030,6 +1027,14 @@ mod tests {
                 2,
             ))
         );
+        assert_eq!(
+            parse(&["--local"]),
+            Err(("unknown launch option: --local".to_string(), 2))
+        );
+        assert_eq!(
+            parse(&["--remote"]),
+            Err(("unknown launch option: --remote".to_string(), 2))
+        );
     }
 
     #[test]
@@ -1053,9 +1058,9 @@ mod tests {
             resolve_target(Some(Target::Remote), true, ""),
             Target::Remote
         );
-        assert_eq!(resolve_target(None, true, "mac"), Target::Local);
+        assert_eq!(resolve_target(None, true, "mac"), Target::Remote);
         assert_eq!(resolve_target(None, false, "mac"), Target::Remote);
-        assert_eq!(resolve_target(None, false, ""), Target::Local);
+        assert_eq!(resolve_target(None, false, ""), Target::Remote);
     }
 
     #[test]
@@ -1075,6 +1080,10 @@ mod tests {
         assert_eq!(
             remote_session_name_for("mac.local", "/Users/me/project"),
             "mac_local_project_8779b_1"
+        );
+        assert_eq!(
+            remote_session_name_for("alice@mac.local", "/Users/me/project"),
+            "alice_mac_local_project_8779b_1"
         );
     }
 

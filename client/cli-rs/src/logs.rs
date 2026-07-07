@@ -1,6 +1,6 @@
 //! `xpair logs` command construction and thin process shims.
 //!
-//! Ports `cmd_logs()` from `client/cli/xpair:1075-1113`: bash-compatible argument
+//! Ports `cmd_logs()` from `client/cli/xpair:1255-1307`: bash-compatible argument
 //! parsing, local log collection, host log tailing, and local log tailing. The pure
 //! builders below are the parity surface; the process-spawning functions are intentionally
 //! small and uncovered.
@@ -30,7 +30,7 @@ pub struct LogsReq {
 
 /// Parse the bash-compatible `logs` flags.
 ///
-/// Unknown args are ignored, matching `client/cli/xpair:1082`.
+/// Unknown args are ignored, matching `client/cli/xpair:1262`.
 pub fn parse_logs_args(args: &[String]) -> LogsReq {
     let mut req = LogsReq {
         host: false,

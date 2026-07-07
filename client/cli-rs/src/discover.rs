@@ -1,6 +1,6 @@
 //! `xpair discover` — peer discovery for the onboarding bridge.
 //!
-//! Ports `cmd_discover()` (`client/cli/xpair:1281-1549`): emit a normalized JSON peer
+//! Ports `cmd_discover()` (`client/cli/xpair:1469-1758`): emit a normalized JSON peer
 //! list on stdout (the Electron `onboarding-bridge.js` consumes it). Two modes:
 //!
 //!   - `--fingerprint <host>`: fetch ONE host's ed25519 key fingerprint
@@ -31,7 +31,7 @@ use crate::platform::Os;
 const XPAIR_ROLES: &[&str] = &["host", "both", "client"];
 
 /// macOS install layouts for the Tailscale CLI (App Store sandbox, brew arm64, brew x86_64).
-/// Ported from `rp_tailscale_bin()` (`client/cli/xpair:1290-1300`); harmless on non-macOS (the
+/// Ported from `rp_tailscale_bin()` (`client/cli/xpair:1457-1467`); harmless on non-macOS (the
 /// absolute paths simply won't exist), where the PATH lookup for `tailscale[.exe]` takes over.
 const MAC_TAILSCALE_PATHS: &[&str] = &[
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
@@ -50,7 +50,7 @@ pub struct DiscoverArgs {
     pub fingerprint_host: Option<String>,
 }
 
-/// Parse `discover` args (`client/cli/xpair:1320-1327`). Default timeout 4; a non-numeric
+/// Parse `discover` args (`client/cli/xpair:1472-1479`). Default timeout 4; a non-numeric
 /// `--timeout` resets to 4. Unknown tokens are ignored, matching the bash `*) shift` arm.
 pub fn parse_args(args: &[String]) -> DiscoverArgs {
     let mut timeout_raw = String::from("4");
@@ -86,7 +86,7 @@ pub fn parse_args(args: &[String]) -> DiscoverArgs {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Normalize a fingerprint to the canonical `SHA256:…` form (accept bare base64).
-/// Ports `rp_norm_fp()` (`client/cli/xpair:1279`).
+/// Ports `rp_norm_fp()` (`client/cli/xpair:1445-1446`).
 pub fn normalize_fp(s: &str) -> String {
     if s.starts_with("SHA256:") {
         s.to_string()
@@ -160,7 +160,7 @@ pub struct OutPeer {
     pub status: String,
 }
 
-/// Parse `tailscale status --json` into discovery records (`client/cli/xpair:1412-1429`).
+/// Parse `tailscale status --json` into discovery records (`client/cli/xpair:1578-1619`).
 ///
 /// Iterates `Peer` values in order; skips devices whose `OS` is KNOWN-non-macOS (XpairHost is a
 /// macOS app — keep unknown/empty OS to avoid dropping a real Mac with missing metadata). Name is
@@ -218,7 +218,7 @@ pub fn parse_tailscale_peers(json: &str) -> Vec<Record> {
     records
 }
 
-/// Parse all `Host` alias tokens from an `ssh_config` body (`client/cli/xpair:1438-1449`).
+/// Parse all `Host` alias tokens from an `ssh_config` body (`client/cli/xpair:1627-1639`).
 pub fn parse_ssh_config_aliases(cfg_text: &str) -> BTreeSet<String> {
     let mut aliases = BTreeSet::new();
     for line in cfg_text.lines() {
@@ -253,7 +253,7 @@ fn strip_keyword_ci<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Dedup + cross-reference + status (the python emitter, `client/cli/xpair:1432-1547`)
+// Dedup + cross-reference + status (the python emitter, `client/cli/xpair:1621-1757`)
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct PeerAcc {
@@ -349,7 +349,7 @@ pub fn build_peers(
 }
 
 /// Prefer an ssh-config `Host` alias for this peer (full name, the short first label of a tailnet
-/// FQDN, or any addr) so install/connect uses the alias's IdentityFile + User. `client/cli/xpair:1513`.
+/// FQDN, or any addr) so install/connect uses the alias's IdentityFile + User. `client/cli/xpair:1713-1722`.
 fn alias_for(name: &str, addrs: &[String], aliases: &BTreeSet<String>) -> Option<String> {
     let short = name.split('.').next().unwrap_or(name).to_string();
     let mut cands = vec![name.to_string(), short];
@@ -359,7 +359,7 @@ fn alias_for(name: &str, addrs: &[String], aliases: &BTreeSet<String>) -> Option
         .find(|cand| !cand.is_empty() && aliases.contains(cand))
 }
 
-/// Connect status for a peer (`client/cli/xpair:1476-1486`): known in ssh config / `REMOTE_HOST`
+/// Connect status for a peer (`client/cli/xpair:1673-1683`): known in ssh config / `REMOTE_HOST`
 /// → `reconnect` only when the host app is CONFIRMED present (else `setup`); an Xpair-role peer →
 /// `connect`; otherwise plain SSH `setup`.
 fn status_for(
@@ -421,7 +421,7 @@ pub fn render_peers_json(peers: &[OutPeer]) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// First existing candidate path, or `None`. Pure: `exists` is injected (real = `Path::is_file`).
-/// Ports `rp_tailscale_bin()` selection (`client/cli/xpair:1290-1300`).
+/// Ports `rp_tailscale_bin()` selection (`client/cli/xpair:1457-1467`).
 pub fn find_tailscale(candidates: &[String], exists: impl Fn(&str) -> bool) -> Option<String> {
     candidates.iter().find(|c| exists(c)).cloned()
 }

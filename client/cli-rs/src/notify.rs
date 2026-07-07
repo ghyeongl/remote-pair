@@ -1,6 +1,6 @@
 //! `xpair notify` host notification queue rendering.
 //!
-//! Ports `cmd_notify()` from `client/cli/xpair:1712-1775`: bash-compatible `-n`
+//! Ports `cmd_notify()` from `client/cli/xpair:2091-2154`: bash-compatible `-n`
 //! parsing, local `notify.conf` `ENABLED_TYPES` semantics, best-effort host queue
 //! tailing, and the python pretty-printer shape without adding a JSON dependency.
 
@@ -33,7 +33,7 @@ pub struct NotifyReq {
 
 /// Parse `notify` flags.
 ///
-/// Unknown args are ignored, matching `client/cli/xpair:1714-1717`. Invalid or
+/// Unknown args are ignored, matching `client/cli/xpair:2093-2098`. Invalid or
 /// non-positive `-n` values fall back to 20.
 pub fn parse_notify_args(args: &[String]) -> NotifyReq {
     let mut req = NotifyReq { n: 20 };

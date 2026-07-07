@@ -1,6 +1,6 @@
 //! `xpair host-permissions` advisory JSON.
 //!
-//! Ports `cmd_host_permissions()` from `client/cli/xpair:1656-1684`: resolve a host,
+//! Ports `cmd_host_permissions()` from `client/cli/xpair:2034-2063`: resolve a host,
 //! read the host app's `status.json` over the transport seam, and always emit compact
 //! JSON with exit 0. The remote command is fixed and contains no user input; it relies on
 //! the remote POSIX shell for `~` expansion and stderr redirection.
@@ -49,7 +49,15 @@ pub fn alive(pid: Option<i64>, ts: Option<i64>, now_ts: i64) -> bool {
 }
 
 /// Render exact compact JSON in bash-compatible key order.
-pub fn render_json(alive: bool, ax: bool, sr: bool, fda: bool, err: &str) -> String {
+pub fn render_json(
+    alive: bool,
+    ax: bool,
+    sr: bool,
+    fda: bool,
+    sharing: bool,
+    serving: Option<bool>,
+    err: &str,
+) -> String {
     let mut out = String::new();
     out.push_str("{\"alive\":");
     out.push_str(bool_json(alive));
@@ -59,6 +67,12 @@ pub fn render_json(alive: bool, ax: bool, sr: bool, fda: bool, err: &str) -> Str
     out.push_str(bool_json(sr));
     out.push_str(",\"fda\":");
     out.push_str(bool_json(fda));
+    out.push_str(",\"sharing\":");
+    out.push_str(bool_json(sharing));
+    if let Some(serving) = serving {
+        out.push_str(",\"serving\":");
+        out.push_str(bool_json(serving));
+    }
     out.push_str(",\"err\":\"");
     push_json_string_body(&mut out, err);
     out.push_str("\"}");
@@ -100,7 +114,7 @@ pub fn run_with_transport<T: Transport + ?Sized, W: Write>(
 ) -> ExitCode {
     let host = resolve_host(args, client_env_path);
     let rendered = if host.is_empty() {
-        render_json(false, false, false, false, NO_HOST_ERR)
+        render_json(false, false, false, false, false, None, NO_HOST_ERR)
     } else {
         render_host_permissions(transport, &host, now_ts)
     };
@@ -120,7 +134,7 @@ fn render_host_permissions<T: Transport + ?Sized>(
         .unwrap_or_default();
 
     if command_substitution_empty(&raw) {
-        return render_json(false, false, false, false, NO_STATUS_ERR);
+        return render_json(false, false, false, false, false, None, NO_STATUS_ERR);
     }
 
     render_status_json(&raw, now_ts)
@@ -128,7 +142,7 @@ fn render_host_permissions<T: Transport + ?Sized>(
 
 fn render_status_json(raw: &str, now_ts: i64) -> String {
     if !valid_json_object(raw) {
-        return render_json(false, false, false, false, BAD_STATUS_ERR);
+        return render_json(false, false, false, false, false, None, BAD_STATUS_ERR);
     }
 
     let parsed = status::parse_status_json(raw);
@@ -137,6 +151,8 @@ fn render_status_json(raw: &str, now_ts: i64) -> String {
         parsed.ax,
         parsed.sr,
         parsed.fda,
+        parsed.sharing,
+        parsed.serving,
         "",
     )
 }
@@ -188,7 +204,7 @@ fn build_ssh_argv(os: platform::Os, host: &str, remote_cmd: &str) -> Vec<String>
         "-o".to_string(),
         "NumberOfPasswordPrompts=0".to_string(),
         "-o".to_string(),
-        "StrictHostKeyChecking=accept-new".to_string(),
+        "StrictHostKeyChecking=yes".to_string(),
         "-T".to_string(),
         "-n".to_string(),
         host.to_string(),
@@ -559,12 +575,12 @@ mod tests {
     #[test]
     fn renders_compact_json_exactly() {
         assert_eq!(
-            render_json(false, false, false, false, "no host"),
-            "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"err\":\"no host\"}"
+            render_json(false, false, false, false, false, None, "no host"),
+            "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"sharing\":false,\"err\":\"no host\"}"
         );
         assert_eq!(
-            render_json(true, true, false, true, ""),
-            "{\"alive\":true,\"ax\":true,\"sr\":false,\"fda\":true,\"err\":\"\"}"
+            render_json(true, true, false, true, true, Some(true), ""),
+            "{\"alive\":true,\"ax\":true,\"sr\":false,\"fda\":true,\"sharing\":true,\"serving\":true,\"err\":\"\"}"
         );
     }
 
@@ -582,11 +598,11 @@ mod tests {
                 r#"{"pid":123,"ts":95,"ax":true,"sr":false,"fda":true}"#,
                 100
             ),
-            "{\"alive\":true,\"ax\":true,\"sr\":false,\"fda\":true,\"err\":\"\"}"
+            "{\"alive\":true,\"ax\":true,\"sr\":false,\"fda\":true,\"sharing\":false,\"err\":\"\"}"
         );
         assert_eq!(
-            render_status_json(r#"{"ts":95,"ax":true,"sr":true,"fda":false}"#, 100),
-            "{\"alive\":false,\"ax\":true,\"sr\":true,\"fda\":false,\"err\":\"\"}"
+            render_status_json(r#"{"ts":95,"ax":true,"sr":true,"fda":false,"sharing":true,"serving":true}"#, 100),
+            "{\"alive\":false,\"ax\":true,\"sr\":true,\"fda\":false,\"sharing\":true,\"serving\":true,\"err\":\"\"}"
         );
     }
 
@@ -594,14 +610,17 @@ mod tests {
     fn bad_status_json_renders_advisory_error() {
         assert_eq!(
             render_status_json(r#"{"pid":123,"ts":"#, 100),
-            "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"err\":\"bad status.json\"}"
+            "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"sharing\":false,\"err\":\"bad status.json\"}"
         );
     }
 
     #[test]
     fn host_query_uses_mock_transport_and_exact_remote_cmd() {
         let transport = MockTransport::new();
-        transport.push_response(0, r#"{"pid":123,"ts":95,"ax":true,"sr":false,"fda":true}"#);
+        transport.push_response(
+            0,
+            r#"{"pid":123,"ts":95,"ax":true,"sr":false,"fda":true,"sharing":true,"serving":false}"#,
+        );
         let mut out = Vec::new();
 
         let code = run_with_transport(
@@ -615,7 +634,7 @@ mod tests {
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "{\"alive\":true,\"ax\":true,\"sr\":false,\"fda\":true,\"err\":\"\"}\n"
+            "{\"alive\":true,\"ax\":true,\"sr\":false,\"fda\":true,\"sharing\":true,\"serving\":false,\"err\":\"\"}\n"
         );
         let calls = transport.calls();
         assert_eq!(calls.len(), 1);
@@ -640,7 +659,7 @@ mod tests {
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"err\":\"no status.json (host app not running?)\"}\n"
+            "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"sharing\":false,\"err\":\"no status.json (host app not running?)\"}\n"
         );
         let calls = transport.calls();
         assert_eq!(calls.len(), 1);
@@ -658,7 +677,7 @@ mod tests {
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(
                 String::from_utf8(out).unwrap(),
-                "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"err\":\"no host\"}\n"
+                "{\"alive\":false,\"ax\":false,\"sr\":false,\"fda\":false,\"sharing\":false,\"err\":\"no host\"}\n"
             );
             assert!(transport.calls().is_empty());
         });
@@ -670,7 +689,7 @@ mod tests {
             let tmp = TestPath::new("config-host");
             tmp.write("REMOTE_HOST=mac-from-config\n");
             let transport = MockTransport::new();
-            transport.push_response(0, r#"{"pid":1,"ts":99,"ax":false,"sr":true,"fda":false}"#);
+            transport.push_response(0, r#"{"pid":1,"ts":99,"ax":false,"sr":true,"fda":false,"sharing":true,"serving":false}"#);
             let mut out = Vec::new();
 
             let code = run_with_transport(&[], Some(&tmp.path), 100, &transport, &mut out);
@@ -678,7 +697,7 @@ mod tests {
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(
                 String::from_utf8(out).unwrap(),
-                "{\"alive\":true,\"ax\":false,\"sr\":true,\"fda\":false,\"err\":\"\"}\n"
+                "{\"alive\":true,\"ax\":false,\"sr\":true,\"fda\":false,\"sharing\":true,\"serving\":false,\"err\":\"\"}\n"
             );
             let calls = transport.calls();
             assert_eq!(calls.len(), 1);
@@ -707,7 +726,7 @@ mod tests {
                 "-o",
                 "NumberOfPasswordPrompts=0",
                 "-o",
-                "StrictHostKeyChecking=accept-new",
+                "StrictHostKeyChecking=yes",
                 "-T",
                 "-n",
                 "mac-mini",

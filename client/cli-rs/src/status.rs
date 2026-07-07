@@ -1,13 +1,13 @@
 //! Status report rendering for `xpair status`.
 //!
-//! Ports the portable core of `cmd_status()` from `client/cli/xpair:910-938`:
+//! Ports the portable core of `cmd_status()` from `client/cli/xpair:1054-1083`:
 //! fixed-width rows, flat `status.json` permission gates, host server reachability through
-//! [`crate::transport::Transport`], and the bash `mode_label()` shape from
-//! `client/cli/xpair:125-134`.
+//! [`crate::transport::Transport`], and the configured-host row.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config;
 use crate::remote_quote;
 use crate::transport::Transport;
 
@@ -19,12 +19,14 @@ pub struct StatusJson {
     pub ax: bool,
     pub sr: bool,
     pub fda: bool,
+    pub sharing: bool,
+    pub serving: Option<bool>,
     pub ts: Option<i64>,
 }
 
 /// Parse the app's tiny flat JSON status payload without adding a JSON dependency.
 ///
-/// Mirrors the bash `_jget()`/`_mark()` behavior at `client/cli/xpair:151-152` for the
+/// Mirrors the bash `_jget()`/`_mark()` behavior at `client/cli/xpair:218-228` for the
 /// fields `cmd_status()` consumes: only literal/string `true` grants a boolean, and
 /// missing keys fall back to false/None.
 pub fn parse_status_json(s: &str) -> StatusJson {
@@ -32,6 +34,8 @@ pub fn parse_status_json(s: &str) -> StatusJson {
         ax: scalar_field(s, "ax").as_deref() == Some("true"),
         sr: scalar_field(s, "sr").as_deref() == Some("true"),
         fda: scalar_field(s, "fda").as_deref() == Some("true"),
+        sharing: scalar_field(s, "sharing").as_deref() == Some("true"),
+        serving: scalar_field(s, "serving").map(|value| value == "true"),
         ts: scalar_field(s, "ts").and_then(|value| value.parse::<i64>().ok()),
     }
 }
@@ -45,7 +49,7 @@ pub fn mark(b: bool) -> char {
     }
 }
 
-/// Render the `permissions` row and, when AX+SR is not granted, the indented gate warning.
+/// Render the `permissions` row and, when the host is not serving, the indented gate warning.
 pub fn render_permissions_row(status: &StatusJson, now_ts: i64) -> String {
     let age = now_ts - status.ts.unwrap_or(0);
     let stale = if age > 15 {
@@ -57,19 +61,21 @@ pub fn render_permissions_row(status: &StatusJson, now_ts: i64) -> String {
     let mut out = row(
         "permissions",
         &format!(
-            "AX {}  SR {}  FDA {}   (status.json, {}s ago{})",
+            "AX {}  SR {}  FDA {}  Sharing {}   (status.json, {}s ago{})",
             mark(status.ax),
             mark(status.sr),
             mark(status.fda),
+            mark(status.sharing),
             age,
             stale
         ),
     );
 
-    if !(status.ax && status.sr) {
+    let serving = status.serving.unwrap_or(status.ax && status.sr);
+    if !serving {
         out.push_str(&row(
             "",
-            "⚠ computer-use gated: AX+SR must both be ✓. If ✗, the app is running but NOT granted → grant in System Settings (this is NOT 'host down').",
+            "⚠ not serving: Accessibility, Screen Recording, Full Disk Access (Privacy & Security) + Remote Login and File Sharing (General → Sharing) must ALL be ✓. The app is running but a required grant is off (this is NOT 'host down').",
         ));
     }
 
@@ -94,31 +100,22 @@ pub fn render_host_server_row<T: Transport + ?Sized>(
     }
 }
 
-/// Render the configured remote host row.
-pub fn render_remote_row(remote_host: &str) -> String {
+/// Render the configured host row.
+pub fn render_host_row(remote_host: &str) -> String {
     row(
-        "remote",
+        "host",
         if remote_host.is_empty() {
-            "(local-only)"
+            "(no host configured)"
         } else {
             remote_host
         },
     )
 }
 
-/// Render the bash-compatible mode row.
-///
-/// The `mode_label()` logic (`client/cli/xpair:125-134`) lives in [`crate::mode`] — the single
-/// source of truth shared with the `mode` subcommand.
-pub fn render_mode_row(local_mode: bool, remote_host: &str) -> String {
-    row("mode", &crate::mode::mode_label(local_mode, remote_host))
-}
-
 /// Render the live portable subset of `xpair status`.
 pub fn render_status<T: Transport + ?Sized>(
     transport: &T,
     remote_host: &str,
-    local_mode: bool,
     aqua_sock: &str,
     status_json: Option<&str>,
     now_ts: i64,
@@ -126,8 +123,7 @@ pub fn render_status<T: Transport + ?Sized>(
     let mut out = String::new();
 
     // deferred (P2): macOS app pid liveness via launchctl/pgrep.
-    let use_remote = !remote_host.is_empty() && !local_mode;
-    if use_remote {
+    if !remote_host.is_empty() {
         out.push_str(&render_host_server_row(transport, remote_host, aqua_sock));
     }
 
@@ -140,22 +136,22 @@ pub fn render_status<T: Transport + ?Sized>(
 
     // deferred (P2): in-host session detection via TMUX/aqua socket context.
     // deferred (P2): heartbeat file mtime freshness.
-    out.push_str(&render_remote_row(remote_host));
-    out.push_str(&render_mode_row(local_mode, remote_host));
+    out.push_str(&render_host_row(remote_host));
     // deferred (P2): bundle prefix reporting.
 
     out
 }
 
-/// Resolve the local app status file path using bash's `$STATUS_FILE`/`$RP_DIR/logs/status.json`.
+/// Resolve the local app status file path using bash's `$STATUS_FILE`/`$RP_HOST_DIR/logs/status.json`.
 pub fn status_file_path(client_env_path: &Path) -> PathBuf {
     if let Some(path) = non_empty_env("STATUS_FILE") {
         return PathBuf::from(path);
     }
 
-    client_env_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
+    config::default_rp_dir()
+        .ok()
+        .or_else(|| client_env_path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("logs")
         .join("status.json")
 }
@@ -214,6 +210,8 @@ mod tests {
                 ax: true,
                 sr: true,
                 fda: true,
+                sharing: false,
+                serving: None,
                 ts: Some(123),
             }
         );
@@ -227,6 +225,8 @@ mod tests {
                 ax: true,
                 sr: false,
                 fda: false,
+                sharing: false,
+                serving: None,
                 ts: Some(456),
             }
         );
@@ -240,6 +240,8 @@ mod tests {
                 ax: false,
                 sr: false,
                 fda: false,
+                sharing: false,
+                serving: None,
                 ts: None,
             }
         );
@@ -251,12 +253,14 @@ mod tests {
             ax: true,
             sr: true,
             fda: true,
+            sharing: true,
+            serving: Some(true),
             ts: Some(90),
         };
 
         assert_eq!(
             render_permissions_row(&status, 100),
-            "permissions    AX ✓  SR ✓  FDA ✓   (status.json, 10s ago)\n"
+            "permissions    AX ✓  SR ✓  FDA ✓  Sharing ✓   (status.json, 10s ago)\n"
         );
     }
 
@@ -266,12 +270,31 @@ mod tests {
             ax: true,
             sr: false,
             fda: true,
+            sharing: false,
+            serving: Some(false),
             ts: Some(80),
         };
 
         assert_eq!(
             render_permissions_row(&status, 100),
-            "permissions    AX ✓  SR ✗  FDA ✓   (status.json, 20s ago — STALE, app may be down)\n               ⚠ computer-use gated: AX+SR must both be ✓. If ✗, the app is running but NOT granted → grant in System Settings (this is NOT 'host down').\n"
+            "permissions    AX ✓  SR ✗  FDA ✓  Sharing ✗   (status.json, 20s ago — STALE, app may be down)\n               ⚠ not serving: Accessibility, Screen Recording, Full Disk Access (Privacy & Security) + Remote Login and File Sharing (General → Sharing) must ALL be ✓. The app is running but a required grant is off (this is NOT 'host down').\n"
+        );
+    }
+
+    #[test]
+    fn render_permissions_falls_back_to_ax_sr_for_older_status_json() {
+        let status = StatusJson {
+            ax: true,
+            sr: true,
+            fda: false,
+            sharing: false,
+            serving: None,
+            ts: Some(90),
+        };
+
+        assert_eq!(
+            render_permissions_row(&status, 100),
+            "permissions    AX ✓  SR ✓  FDA ✗  Sharing ✗   (status.json, 10s ago)\n"
         );
     }
 
@@ -306,18 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn mode_and_remote_rows_match_bash_labels() {
-        assert_eq!(render_remote_row("mac-mini"), "remote         mac-mini\n");
-        assert_eq!(render_remote_row(""), "remote         (local-only)\n");
-        assert_eq!(
-            render_mode_row(true, "mac-mini"),
-            "mode           local (transient)\n"
-        );
-        assert_eq!(
-            render_mode_row(false, "mac-mini"),
-            "mode           auto (remote)\n"
-        );
-        assert_eq!(render_mode_row(false, ""), "mode           auto (local)\n");
+    fn host_row_matches_bash_label() {
+        assert_eq!(render_host_row("mac-mini"), "host           mac-mini\n");
+        assert_eq!(render_host_row(""), "host           (no host configured)\n");
     }
 
     #[test]
@@ -326,8 +340,8 @@ mod tests {
         transport.push_response(0, "");
 
         assert_eq!(
-            render_status(&transport, "mac-mini", false, "/tmp/aqua-tmux.sock", None, 100),
-            "host server    up (/tmp/aqua-tmux.sock)\nremote         mac-mini\nmode           auto (remote)\n"
+            render_status(&transport, "mac-mini", "/tmp/aqua-tmux.sock", None, 100),
+            "host server    up (/tmp/aqua-tmux.sock)\nhost           mac-mini\n"
         );
     }
 }
