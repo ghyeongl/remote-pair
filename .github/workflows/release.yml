@@ -106,7 +106,9 @@ jobs:
           echo "Signing identities:"; security find-identity -v -p codesigning | grep "RemotePair Local Signing" || true
 
           # Build + sign + verify (build-host finds the cert by CN in the search list above).
-          ./host/build-host.sh
+          # RP_SENTRY_DSN (repo secret) → build-host.sh injects it into Info.plist as RPSentryDSN.
+          # Empty (e.g. forks without the secret) ⇒ build-host.sh skips injection ⇒ crash reporting Noop.
+          RP_SENTRY_DSN="${{ secrets.RP_SENTRY_DSN }}" ./host/build-host.sh
 
           # Gate: the host asset MUST be signed with the stable cert (not ad-hoc) before we publish.
           codesign -dvv build/XpairHost.app 2>&1 | grep -q "Authority=RemotePair Local Signing" \
