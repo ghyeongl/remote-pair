@@ -1096,6 +1096,21 @@ function cliSupportsPasswordStdin() {
   }
 }
 
+/* Does the INSTALLED CLI convey the host's serving verdict? The guard trusts `serving` from a modern
+ * host but falls back to ax/sr when it is absent (older HOST). A stale ~/.local/bin/xpair, however,
+ * would DROP the field even from a modern host, letting a not-serving host through the ax/sr fallback.
+ * Feature-detect the installed CLI's source (same conservative pattern as cliSupportsPasswordStdin):
+ * unreadable/old ⇒ false ⇒ the guard routes to WELCOME to reinstall the bundled CLI. */
+function cliSupportsServing() {
+  const bin = rpBinAbs();
+  if (!bin) return false;
+  try {
+    return fs.readFileSync(bin, "utf8").includes('d.get("serving")');
+  } catch {
+    return false;
+  }
+}
+
 // --- Engine constants (claude | codex | opencode | shell) -------------------------------------
 // Agent engines run ON THE HOST; these drive the host-side install/auth-check/auth-set guards.
 // `shell` is a valid session engine (plain login shell, no install/auth guard), so it is only a
@@ -1204,6 +1219,13 @@ const bridge = {
       return { ready: false, bin, err: why };
     }
     return { ready: true, bin, err: "" };
+  },
+
+  // Feature-detect: is the installed CLI new enough to surface the host's serving verdict? Used by the
+  // launch guard so a stale CLI (that would silently drop `serving`) routes to a reinstall, not past
+  // the ax/sr fallback that is only meant for genuinely older HOSTS.
+  cliSupportsServing() {
+    return cliSupportsServing();
   },
 
   // CLI auto-install (component ⓪ — the "no dead end" path). cliReady===false used to be a hard wall;

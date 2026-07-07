@@ -253,7 +253,7 @@ need_app_guidance() {
    • App binary only: ${APP_NAME}.zip from Releases → ~/Applications → open once (daemon only;
      run the host setup above for approve rules + the approve skill).
        https://github.com/${GH_REPO:-x10lab/xpair}/releases/latest
-   Then grant Accessibility, Screen Recording, Full Disk Access + File Sharing once. Verify with: xpair status
+   Then grant Accessibility, Screen Recording, Full Disk Access (Privacy & Security) + File Sharing (General → Sharing). Verify with: xpair status
    (This client/CLI maps/launches/attaches; approve & host run where the app lives.)
 EOF
 }
@@ -865,12 +865,14 @@ cmd_onboard() {
   local _sj_local=""
   [ -f "$STATUS_FILE" ] && _sj_local="$(cat "$STATUS_FILE" 2>/dev/null || true)"
   if [ -n "$_sj_local" ]; then
-    local _ax _sr
+    local _ax _sr _fda _sharing _serving
     _ax="$(_jget "$_sj_local" ax)"; _sr="$(_jget "$_sj_local" sr)"
-    if [ "$_ax" = true ] && [ "$_sr" = true ]; then
-      ok "Onboarding complete. AX✓ SR✓ — computer-use ready. Edit later with 'xpair config' / 'xpair map'."
+    _fda="$(_jget "$_sj_local" fda)"; _sharing="$(_jget "$_sj_local" sharing)"; _serving="$(_jget "$_sj_local" serving)"
+    # Gate on the host's own serving verdict; hosts that predate it omit the field → fall back to AX+SR.
+    if [ "$_serving" = true ] || { [ -z "$_serving" ] && [ "$_ax" = true ] && [ "$_sr" = true ]; }; then
+      ok "Onboarding complete. AX✓ SR✓ FDA✓ File Sharing✓ — ready to serve. Edit later with 'xpair config' / 'xpair map'."
     else
-      warn "Not done yet: System Settings → Privacy & Security → turn $APP_NAME ON for Accessibility (AX=$_ax), Screen Recording (SR=$_sr), Full Disk Access, and File Sharing (all required to serve). Re-run 'xpair onboard' to confirm."
+      warn "Not done yet (AX=$_ax SR=$_sr FDA=$_fda Sharing=$_sharing): grant Accessibility, Screen Recording, Full Disk Access (System Settings → Privacy & Security) AND File Sharing (System Settings → General → Sharing) for $APP_NAME. Re-run 'xpair onboard' to confirm."
     fi
   else
     ok "Onboarding complete. Edit later with 'xpair config' / 'xpair map'."
@@ -1058,11 +1060,13 @@ cmd_status() {
   if [ -f "$STATUS_FILE" ]; then
     local s sage sts; s="$(cat "$STATUS_FILE" 2>/dev/null)"
     sts="$(_jget "$s" ts)"; sage=$(( $(date +%s) - ${sts:-0} ))
-    printf '%-14s AX %s  SR %s  FDA %s   (status.json, %ss ago%s)\n' "permissions" \
-      "$(_mark "$(_jget "$s" ax)")" "$(_mark "$(_jget "$s" sr)")" "$(_mark "$(_jget "$s" fda)")" \
+    printf '%-14s AX %s  SR %s  FDA %s  Sharing %s   (status.json, %ss ago%s)\n' "permissions" \
+      "$(_mark "$(_jget "$s" ax)")" "$(_mark "$(_jget "$s" sr)")" "$(_mark "$(_jget "$s" fda)")" "$(_mark "$(_jget "$s" sharing)")" \
       "$sage" "$([ "$sage" -gt 15 ] && echo ' — STALE, app may be down')"
-    [ "$(_jget "$s" ax)" = true ] && [ "$(_jget "$s" sr)" = true ] || \
-      printf '%-14s %s\n' "" "⚠ computer-use gated: AX+SR must both be ✓. If ✗, the app is running but NOT granted → grant in System Settings (this is NOT 'host down')."
+    # `serving` (host allGranted) is the real gate; hosts that predate it omit the field → fall back to AX+SR.
+    _srv="$(_jget "$s" serving)"
+    { [ "$_srv" = true ] || { [ -z "$_srv" ] && [ "$(_jget "$s" ax)" = true ] && [ "$(_jget "$s" sr)" = true ]; }; } || \
+      printf '%-14s %s\n' "" "⚠ not serving: AX/SR + Full Disk Access (Privacy & Security) and File Sharing (General → Sharing) must all be ✓. The app is running but a required grant is off (this is NOT 'host down')."
   elif [ -n "$p" ] || host_up; then
     printf '%-14s %s\n' "permissions" "unknown (no status.json yet — update host app)"
   fi
@@ -2013,8 +2017,9 @@ cmd_install_host() {
   if [ -n "$account" ] && [ -n "$guiuser" ] && [ "$account" != "$guiuser" ]; then
     warn "target account '$account' ≠ host GUI-session account '$guiuser' — TCC grant must be done while logged in as the GUI user on the host's screen."
   fi
-  c "Next, on the HOST's physical screen: System Settings → Privacy & Security →"
-  printf '   turn %s ON for Accessibility, Screen Recording, Full Disk Access + File Sharing (macOS cannot grant these remotely).\n' "$APP_NAME"
+  c "Next, on the HOST's physical screen (macOS cannot grant these remotely):"
+  printf '   • System Settings → Privacy & Security → turn %s ON for Accessibility, Screen Recording, Full Disk Access\n' "$APP_NAME"
+  printf '   • System Settings → General → Sharing → turn File Sharing ON (required for SMB folder mounts)\n'
   ok "install-host complete for $target"
 }
 
