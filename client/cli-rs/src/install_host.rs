@@ -1241,11 +1241,14 @@ fn temp_bootstrap_path() -> PathBuf {
 
 fn upsert_ssh_config_block(path: &Path, host: &str, block: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
     }
 
     let begin = format!("# >>> xpair: {host} >>>");
     let end = format!("# <<< xpair: {host} <<<");
+    let original_mode = existing_file_mode(path)?;
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -1269,7 +1272,127 @@ fn upsert_ssh_config_block(path: &Path, host: &str, block: &str) -> io::Result<(
         }
     }
     out.push_str(block);
-    fs::write(path, out)
+    atomic_replace_ssh_config(path, &out, original_mode)
+}
+
+fn atomic_replace_ssh_config(
+    path: &Path,
+    contents: &str,
+    original_mode: Option<u32>,
+) -> io::Result<()> {
+    let tmp = ssh_config_temp_path(path);
+    let result = (|| {
+        let mut file = create_private_temp_file(&tmp)?;
+        file.write_all(contents.as_bytes())?;
+        file.flush()?;
+        drop(file);
+        replace_file(&tmp, path)?;
+        set_file_mode(path, original_mode.unwrap_or(0o600))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn ssh_config_temp_path(path: &Path) -> PathBuf {
+    let nonce = timestamp_nanos();
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config"))
+        .to_os_string();
+    name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
+    path.with_file_name(name)
+}
+
+#[cfg(unix)]
+fn create_private_temp_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_temp_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn existing_file_mode(path: &Path) -> io::Result<Option<u32>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o7777)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn existing_file_mode(path: &Path) -> io::Result<Option<u32>> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_path: &Path, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    extern "system" {
+        fn MoveFileExW(
+            lpExistingFileName: *const u16,
+            lpNewFileName: *const u16,
+            dwFlags: u32,
+        ) -> i32;
+    }
+
+    let from_w: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to_w: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let ok = unsafe {
+        MoveFileExW(
+            from_w.as_ptr(),
+            to_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
 }
 
 #[cfg(windows)]
@@ -1793,6 +1916,82 @@ mod tests {
         assert!(
             block.contains(r#"  IdentityFile "C:\\Users\\Alice Smith\\.ssh\\id \"work\"_ed25519""#)
         );
+    }
+
+    #[test]
+    fn ssh_config_upsert_creates_missing_file_with_private_mode() {
+        let tmp = TestDir::new("ssh-config-create-mode");
+        let path = tmp.path.join(".ssh").join("config");
+
+        upsert_ssh_config_block(
+            &path,
+            "mac-mini",
+            &build_ssh_config_block_for_os(
+                Os::Linux,
+                "mac-mini",
+                "192.0.2.10",
+                "alice",
+                "/Users/me/.ssh/id_ed25519",
+            ),
+        )
+        .unwrap();
+
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("Host mac-mini\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_config_upsert_preserves_existing_mode_and_drops_old_block() {
+        let tmp = TestDir::new("ssh-config-preserve-mode");
+        let path = tmp.path.join("config");
+        fs::write(
+            &path,
+            "# keep\n# >>> xpair: mac-mini >>>\nold\n# <<< xpair: mac-mini <<<\nHost other\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o640);
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+
+        upsert_ssh_config_block(
+            &path,
+            "mac-mini",
+            &build_ssh_config_block_for_os(
+                Os::Linux,
+                "mac-mini",
+                "192.0.2.10",
+                "alice",
+                "/Users/me/.ssh/id_ed25519",
+            ),
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep\n"));
+        assert!(text.contains("Host other\n"));
+        assert!(text.contains("Host mac-mini\n"));
+        assert!(!text.contains("\nold\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
     }
 
     #[test]

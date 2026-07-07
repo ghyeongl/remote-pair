@@ -110,7 +110,7 @@ pub fn map_to_host_for_os(
 /// - `\\?\C:\a` and `\\?\UNC\server\share`: strip the long-path prefix first.
 /// - `/mnt/c/...` and `\\wsl$\...`: reject with `MapError::WslPath`.
 /// - Host results are POSIX paths, so backslashes become `/` after substitution.
-fn canonicalize_client_path(path: &str) -> Result<String, MapError> {
+pub fn canonicalize_client_path(path: &str) -> Result<String, MapError> {
     let mut out = path.replace('\\', "/");
     reject_wsl_path(path, &out)?;
 

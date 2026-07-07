@@ -17,7 +17,7 @@ use xpair::host_permissions;
 use xpair::install_host;
 use xpair::launch;
 use xpair::logs;
-use xpair::mapping::{parse_maps, FolderMap};
+use xpair::mapping::{canonicalize_client_path, parse_maps, FolderMap};
 use xpair::notify;
 use xpair::open_gui;
 use xpair::platform::Os;
@@ -663,11 +663,8 @@ fn normalize_posix_path_for_cmp(path: &str) -> String {
 }
 
 fn normalize_windows_path_for_cmp(path: &str) -> String {
-    let mut normalized = path.replace('/', "\\");
-    if let Some(stripped) = normalized.strip_prefix(r"\\?\") {
-        normalized = stripped.to_string();
-    }
-    while normalized.len() > 3 && normalized.ends_with('\\') {
+    let mut normalized = canonicalize_client_path(path).unwrap_or_else(|_| path.replace('\\', "/"));
+    while normalized.len() > 3 && normalized.ends_with('/') {
         normalized.pop();
     }
     normalized.to_ascii_lowercase()
@@ -981,6 +978,23 @@ mod tests {
             r"c:\users\alice\project",
             Os::Windows
         ));
+    }
+
+    #[test]
+    fn windows_map_rm_comparison_normalizes_long_unc_prefix() {
+        assert!(map_client_eq_for_os(
+            r"\\?\UNC\Server\Share\Project",
+            r"\\server\share\project",
+            Os::Windows
+        ));
+        assert_eq!(
+            remove_client_from_raw_maps(
+                r"\\server\share\project::/host/project;D:\Other::/host/other",
+                r"\\?\UNC\server\share\project",
+                Os::Windows,
+            ),
+            r"D:\Other::/host/other"
+        );
     }
 
     #[test]

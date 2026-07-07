@@ -1572,6 +1572,9 @@ fn resolve_remote_engine<T: Transport + ?Sized>(
 }
 
 fn resolve_client_engine_fallback(path: &Path) -> Result<String, String> {
+    if let Some(engine) = non_empty_env("ENGINE") {
+        return Ok(engine);
+    }
     config::get_cli(path, "engine").map_err(|err| err.to_string())
 }
 
@@ -2423,10 +2426,12 @@ mod tests {
         transport.push_response(0, "opencode\n");
         let req = parse(&[]).unwrap();
 
-        assert_eq!(
-            resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
-            Engine::Opencode
-        );
+        with_env(&[("ENGINE", Some("shell"))], || {
+            assert_eq!(
+                resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
+                Engine::Opencode
+            );
+        });
 
         let calls = transport.calls();
         assert_eq!(calls.len(), 1);
@@ -2445,6 +2450,38 @@ mod tests {
             resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
             Engine::Codex
         );
+    }
+
+    #[test]
+    fn process_engine_wins_over_client_env_when_host_engine_is_invalid() {
+        let tmp = TestPath::new("process-engine");
+        tmp.write("ENGINE=opencode\n");
+        let transport = MockTransport::new();
+        transport.push_response(0, "unknown\n");
+        let req = parse(&[]).unwrap();
+
+        with_env(&[("ENGINE", Some("codex"))], || {
+            assert_eq!(
+                resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
+                Engine::Codex
+            );
+        });
+    }
+
+    #[test]
+    fn client_env_engine_is_used_when_process_engine_is_absent() {
+        let tmp = TestPath::new("file-engine");
+        tmp.write("ENGINE=opencode\n");
+        let transport = MockTransport::new();
+        transport.push_response(0, "unknown\n");
+        let req = parse(&[]).unwrap();
+
+        with_env(&[("ENGINE", None)], || {
+            assert_eq!(
+                resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
+                Engine::Opencode
+            );
+        });
     }
 
     #[test]
