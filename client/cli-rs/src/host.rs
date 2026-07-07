@@ -261,7 +261,11 @@ fn start_host_app<R: LocalRuntime>(context: &LocalContext, runtime: &mut R) {
     ) {
         return;
     }
-    let current_label = format!("gui/$(id -u)/{}", context.identity.bundle_prefix);
+    let Some(uid) = launchctl_uid(runtime) else {
+        return;
+    };
+
+    let current_label = format!("gui/{uid}/{}", context.identity.bundle_prefix);
     if command_success(
         runtime,
         CommandSpec::new(
@@ -271,7 +275,7 @@ fn start_host_app<R: LocalRuntime>(context: &LocalContext, runtime: &mut R) {
     ) {
         return;
     }
-    let forward_label = format!("gui/$(id -u)/{}", context.identity.forward_bundle);
+    let forward_label = format!("gui/{uid}/{}", context.identity.forward_bundle);
     let _ = command_success(
         runtime,
         CommandSpec::new(
@@ -279,6 +283,17 @@ fn start_host_app<R: LocalRuntime>(context: &LocalContext, runtime: &mut R) {
             vec!["kickstart".to_string(), "-k".to_string(), forward_label],
         ),
     );
+}
+
+fn launchctl_uid<R: LocalRuntime>(runtime: &mut R) -> Option<String> {
+    let output = runtime
+        .output(&CommandSpec::new("id", vec!["-u".to_string()]))
+        .ok()?;
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && line.chars().all(|ch| ch.is_ascii_digit()))
+        .map(str::to_string)
 }
 
 fn command_success<R: LocalRuntime>(runtime: &mut R, command: CommandSpec) -> bool {
@@ -708,6 +723,7 @@ mod tests {
         runtime.status_codes.push_back(1);
         runtime.status_codes.push_back(0);
         runtime.status_codes.push_back(0);
+        runtime.outputs.push_back("501\n".to_string());
         let mut out = Vec::new();
         let mut err = Vec::new();
 
@@ -722,11 +738,12 @@ mod tests {
             runtime.calls[2],
             CommandSpec::new("open", strings(&["-a", "Xpair"]))
         );
+        assert_eq!(runtime.calls[3], CommandSpec::new("id", strings(&["-u"])));
         assert_eq!(
-            runtime.calls[3],
+            runtime.calls[4],
             CommandSpec::new(
                 "launchctl",
-                strings(&["kickstart", "-k", "gui/$(id -u)/com.x10lab.xpair-host"])
+                strings(&["kickstart", "-k", "gui/501/com.x10lab.xpair-host"])
             )
         );
         assert!(String::from_utf8(out).unwrap().contains("host server OK\n"));

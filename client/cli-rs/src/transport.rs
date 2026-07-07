@@ -14,11 +14,35 @@ pub struct Output {
     pub stdout: String,
 }
 
+/// Result of an auth-sensitive SSH command where stderr matters for recovery codes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthOutput {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Abstraction over "run things against the host". P0 defines `ssh_exec`; `attach`, `reach`,
 /// and `dir_check` are added in P2 as the launch/attach path is ported.
 pub trait Transport {
     /// Run `remote_cmd` (already a POSIX-safe payload — see [`crate::remote_quote`]) on `host`.
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> std::io::Result<Output>;
+
+    /// Run the one password-bootstrap auth probe. Implementors that do not need special
+    /// auth handling can fall back to `ssh_exec`.
+    fn ssh_auth_probe(&self, host: &str, remote_cmd: &str) -> std::io::Result<AuthOutput> {
+        self.ssh_exec(host, remote_cmd).map(|out| AuthOutput {
+            code: out.code,
+            stdout: out.stdout,
+            stderr: String::new(),
+        })
+    }
+
+    /// Retire one-shot password wiring after the bootstrap auth succeeds.
+    fn retire_password_auth(&self) {}
+
+    /// Best-effort cleanup hook for transports that opened a ControlMaster.
+    fn cleanup(&self, _host: &str) {}
 }
 
 /// A record of one transport call, for assertions in tests.

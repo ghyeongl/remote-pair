@@ -6,14 +6,12 @@
 //!   - `--fingerprint <host>`: fetch ONE host's ed25519 key fingerprint
 //!     (`ssh-keyscan | ssh-keygen -lf -`) for the manual-entry TOFU path →
 //!     `{"fp":"SHA256:…"}` or `{"fp":null,"err":"…"}` (compact, matching the bash printf).
-//!   - default: discover peers from **Tailscale** (`tailscale status --json`), cross-reference
-//!     `~/.ssh/config` + `REMOTE_HOST`, dedup by host-key fingerprint, and emit a JSON array
+//!   - default: discover peers from LAN UDP beacons + **Tailscale** (`tailscale status --json`),
+//!     cross-reference `~/.ssh/config` + `REMOTE_HOST`, dedup by host-key fingerprint, and emit a JSON array
 //!     (spaced, matching the bash `python -c 'json.dumps(...)'` emitter).
 //!
-//! **LAN/Bonjour (`dns-sd`) discovery is intentionally not implemented here.** It is a
-//! macOS-runtime-only path (decision **D6**: "mDNS dropped on Windows"); the bash already gates
-//! it on `command -v dns-sd`, so a client without `dns-sd` contributes no LAN peers — which is
-//! every non-macOS client. Surfacing it as deferred (not faked) keeps the peer list honest.
+//! LAN discovery listens for the native XpairHost UDP beacon. Bonjour/`dns-sd` discovery remains
+//! out of scope for the native client.
 //!
 //! Decomposition mirrors the other ported verbs: the JSON parse/merge/render core is pure and
 //! unit-tested; the process spawns (`ssh -G`, `ssh-keyscan`, `ssh-keygen`, `tailscale`, and the
@@ -22,13 +20,18 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::net::UdpSocket;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::platform::Os;
 
 /// Roles that mark a peer as advertising the Xpair service (key-auth `connect`, not plain `setup`).
 const XPAIR_ROLES: &[&str] = &["host", "both", "client"];
+const DEFAULT_LAN_BEACON_PORT: u16 = 8892;
+const PAIRING_METADATA_PORT: u16 = 8891;
+const PAIRING_METADATA_TIMEOUT: &str = "0.8";
 
 /// macOS install layouts for the Tailscale CLI (App Store sandbox, brew arm64, brew x86_64).
 /// Ported from `rp_tailscale_bin()` (`client/cli/xpair:1457-1467`); harmless on non-macOS (the
@@ -146,6 +149,7 @@ pub struct Record {
     pub source: String,
     pub fp: String,
     pub role: String,
+    pub host_user: String,
 }
 
 /// A deduped/merged peer as emitted to the bridge.
@@ -154,20 +158,29 @@ pub struct OutPeer {
     pub name: String,
     pub addrs: Vec<String>,
     pub target: String,
+    pub pairing_address: String,
     pub source: String,
     pub sources: Vec<String>,
     pub fp: Option<String>,
+    pub host_user: Option<String>,
     pub status: String,
 }
 
 /// Parse `tailscale status --json` into discovery records (`client/cli/xpair:1578-1619`).
 ///
 /// Iterates `Peer` values in order; skips devices whose `OS` is KNOWN-non-macOS (XpairHost is a
-/// macOS app — keep unknown/empty OS to avoid dropping a real Mac with missing metadata). Name is
-/// `DNSName` (trailing dot stripped) falling back to `HostName`; addr is the first `TailscaleIPs`
-/// entry (else the name); role column carries the online/offline hint. A parse failure yields an
-/// empty list (the bash swallows it via `except: sys.exit(0)`).
+/// macOS app — keep unknown/empty OS to avoid dropping a real Mac with missing metadata) and peers
+/// that explicitly report `Online:false`. Name is `DNSName` (trailing dot stripped) falling back to
+/// `HostName`; addr is the first `TailscaleIPs` entry (else the name). Online peers are enriched
+/// with pairing metadata via the supplied fetcher. A parse failure yields an empty list.
 pub fn parse_tailscale_peers(json: &str) -> Vec<Record> {
+    parse_tailscale_peers_with_metadata(json, |_| None)
+}
+
+pub fn parse_tailscale_peers_with_metadata(
+    json: &str,
+    mut fetch_meta: impl FnMut(&str) -> Option<PairingMetadata>,
+) -> Vec<Record> {
     let mut records = Vec::new();
     let Some(root) = JsonValue::parse(json) else {
         return records;
@@ -183,6 +196,9 @@ pub fn parse_tailscale_peers(json: &str) -> Vec<Record> {
             .trim()
             .to_ascii_lowercase();
         if !os.is_empty() && os != "macos" {
+            continue;
+        }
+        if peer.get("Online").and_then(JsonValue::as_bool) == Some(false) {
             continue;
         }
         let name = peer
@@ -203,19 +219,63 @@ pub fn parse_tailscale_peers(json: &str) -> Vec<Record> {
             .and_then(JsonValue::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| name.clone());
-        let online = peer
-            .get("Online")
-            .and_then(JsonValue::as_bool)
-            .unwrap_or(false);
+        let meta = fetch_meta(&addr).unwrap_or_default();
+        let name = meta.hostname.unwrap_or(name);
         records.push(Record {
             name,
             addr,
             source: "tailscale".to_string(),
-            fp: String::new(),
-            role: if online { "online" } else { "offline" }.to_string(),
+            fp: meta.fp.unwrap_or_default(),
+            role: meta.role.unwrap_or_default(),
+            host_user: meta.host_user.unwrap_or_default(),
         });
     }
     records
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PairingMetadata {
+    pub fp: Option<String>,
+    pub role: Option<String>,
+    pub host_user: Option<String>,
+    pub hostname: Option<String>,
+}
+
+pub fn parse_pairing_metadata(json: &str) -> Option<PairingMetadata> {
+    let root = JsonValue::parse(json)?;
+    let fp = root
+        .get("hostKeyFP")
+        .and_then(JsonValue::as_str)
+        .or_else(|| root.get("fp").and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_fp);
+    let role = root
+        .get("role")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let host_user = root
+        .get("hostUser")
+        .and_then(JsonValue::as_str)
+        .or_else(|| root.get("user").and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let hostname = root
+        .get("hostname")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('.').to_string());
+
+    Some(PairingMetadata {
+        fp,
+        role,
+        host_user,
+        hostname,
+    })
 }
 
 /// Parse all `Host` alias tokens from an `ssh_config` body (`client/cli/xpair:1627-1639`).
@@ -262,6 +322,7 @@ struct PeerAcc {
     sources: Vec<String>,
     fp: Option<String>,
     role: String,
+    host_user: String,
 }
 
 /// Merge records into deduped peers and resolve each peer's connect `status`.
@@ -296,6 +357,7 @@ pub fn build_peers(
                     Some(r.fp.clone())
                 },
                 role: r.role.clone(),
+                host_user: r.host_user.clone(),
             }
         });
         if !r.addr.is_empty() && !entry.addrs.contains(&r.addr) {
@@ -309,6 +371,9 @@ pub fn build_peers(
         }
         if entry.role.is_empty() && XPAIR_ROLES.contains(&r.role.as_str()) {
             entry.role = r.role.clone();
+        }
+        if entry.host_user.is_empty() && !r.host_user.is_empty() {
+            entry.host_user = r.host_user.clone();
         }
     }
 
@@ -329,6 +394,8 @@ pub fn build_peers(
             .unwrap_or_else(|| "ssh".to_string());
         let target = if aliases.contains(&name) || name == remote_host {
             name.clone()
+        } else if !p.host_user.is_empty() && !addr.is_empty() {
+            format!("{}@{}", p.host_user, addr)
         } else if !addr.is_empty() {
             addr.clone()
         } else {
@@ -339,9 +406,15 @@ pub fn build_peers(
             name,
             addrs: p.addrs.clone(),
             target,
+            pairing_address: addr,
             source: src,
             sources: p.sources.clone(),
             fp: p.fp.clone(),
+            host_user: if p.host_user.is_empty() {
+                None
+            } else {
+                Some(p.host_user.clone())
+            },
             status,
         });
     }
@@ -401,6 +474,7 @@ pub fn render_peers_json(peers: &[OutPeer]) -> String {
         push_json_key(&mut out, "addrs", false);
         push_json_string_array(&mut out, &p.addrs);
         push_json_kv_str(&mut out, "target", &p.target, false);
+        push_json_kv_str(&mut out, "pairingAddress", &p.pairing_address, false);
         push_json_kv_str(&mut out, "source", &p.source, false);
         push_json_key(&mut out, "sources", false);
         push_json_string_array(&mut out, &p.sources);
@@ -410,6 +484,9 @@ pub fn render_peers_json(peers: &[OutPeer]) -> String {
             None => out.push_str("null"),
         }
         push_json_kv_str(&mut out, "status", &p.status, false);
+        if let Some(host_user) = &p.host_user {
+            push_json_kv_str(&mut out, "hostUser", host_user, false);
+        }
         out.push('}');
     }
     out.push(']');
@@ -456,11 +533,12 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // LAN/Bonjour (dns-sd) discovery is deferred (D6, macOS-runtime-only) — no records.
-    let mut records = Vec::new();
+    let mut records = listen_lan_beacons(parsed.timeout);
     if let Some(bin) = find_tailscale(&tailscale_candidates(), |p| Path::new(p).is_file()) {
         if let Some(json) = run_tailscale_status(&bin) {
-            records.extend(parse_tailscale_peers(&json));
+            records.extend(parse_tailscale_peers_with_metadata(&json, |addr| {
+                fetch_pairing_metadata(addr)
+            }));
         }
     }
 
@@ -533,6 +611,164 @@ fn run_tailscale_status(bin: &str) -> Option<String> {
         .output()
         .ok()?;
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn listen_lan_beacons(timeout: u32) -> Vec<Record> {
+    let port = non_empty_env("RP_LAN_BEACON_PORT")
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_LAN_BEACON_PORT);
+    let window = Duration::from_secs_f64((timeout as f64).min(2.5));
+    if window.is_zero() {
+        return Vec::new();
+    }
+    let Ok(sock) = bind_lan_socket(port) else {
+        return Vec::new();
+    };
+    let deadline = Instant::now() + window;
+    let mut buf = [0u8; 2048];
+    let mut records = Vec::new();
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let _ = sock.set_read_timeout(Some(remaining.min(Duration::from_millis(250))));
+        let (len, sender) = match sock.recv_from(&mut buf) {
+            Ok(result) => result,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => break,
+        };
+        if len > 512 {
+            continue;
+        }
+        let Some(record) = parse_lan_beacon(&buf[..len], &sender.ip().to_string()) else {
+            continue;
+        };
+        records.push(record);
+    }
+
+    records
+}
+
+fn parse_lan_beacon(data: &[u8], sender_addr: &str) -> Option<Record> {
+    if data.len() > 512 {
+        return None;
+    }
+    let text = std::str::from_utf8(data).ok()?.trim();
+    let root = JsonValue::parse(text)?;
+    if root.get("v").and_then(JsonValue::as_i64) != Some(1) {
+        return None;
+    }
+    if root.get("kind").and_then(JsonValue::as_str) != Some("xpair-host") {
+        return None;
+    }
+    let mut name = root
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+    if name.is_empty() {
+        name = sender_addr.to_string();
+    }
+    let fp = root
+        .get("fp")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|fp| !fp.is_empty())
+        .map(normalize_fp)
+        .unwrap_or_default();
+    if name.is_empty() && fp.is_empty() {
+        return None;
+    }
+    let role = root
+        .get("role")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let host_user = root
+        .get("user")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    Some(Record {
+        name,
+        addr: sender_addr.to_string(),
+        source: "lan".to_string(),
+        fp,
+        role,
+        host_user,
+    })
+}
+
+fn bind_lan_socket(port: u16) -> io::Result<UdpSocket> {
+    bind_lan_socket_reuse(port).or_else(|_| UdpSocket::bind(("0.0.0.0", port)))
+}
+
+#[cfg(unix)]
+fn bind_lan_socket_reuse(port: u16) -> io::Result<UdpSocket> {
+    unix_udp_reuse::bind_udp_any(port)
+}
+
+#[cfg(not(unix))]
+fn bind_lan_socket_reuse(port: u16) -> io::Result<UdpSocket> {
+    let _ = port;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "pre-bind SO_REUSEADDR not available in std on this platform",
+    ))
+}
+
+fn fetch_pairing_metadata(addr: &str) -> Option<PairingMetadata> {
+    fetch_pairing_metadata_with_exec(addr, |program, args| {
+        let output = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+pub fn fetch_pairing_metadata_with_exec(
+    addr: &str,
+    mut exec: impl FnMut(&str, &[String]) -> Option<String>,
+) -> Option<PairingMetadata> {
+    if addr.is_empty() {
+        return None;
+    }
+    let wrapped = if addr.contains(':') && !addr.starts_with('[') {
+        format!("[{addr}]")
+    } else {
+        addr.to_string()
+    };
+    let url = format!("http://{wrapped}:{PAIRING_METADATA_PORT}/.well-known/xpair-pairing.json");
+    let args = vec![
+        "-fsSL".to_string(),
+        "--max-time".to_string(),
+        PAIRING_METADATA_TIMEOUT.to_string(),
+        url,
+    ];
+    let body = exec("curl", &args)?;
+    parse_pairing_metadata(&body)
 }
 
 /// `host_app_present` SSH probe shim (uncovered — network). Returns `Some(true)` when
@@ -702,6 +938,13 @@ impl JsonValue {
         }
     }
 
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            JsonValue::Num(raw) => raw.parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
     fn as_array(&self) -> Option<&[JsonValue]> {
         match self {
             JsonValue::Arr(items) => Some(items),
@@ -713,6 +956,124 @@ impl JsonValue {
         match self {
             JsonValue::Obj(fields) => Some(fields),
             _ => None,
+        }
+    }
+}
+
+#[cfg(unix)]
+mod unix_udp_reuse {
+    use std::ffi::{c_int, c_void};
+    use std::io;
+    use std::mem;
+    use std::net::UdpSocket;
+    use std::os::fd::FromRawFd;
+
+    const AF_INET: c_int = 2;
+    const SOCK_DGRAM: c_int = 2;
+    const SOL_SOCKET: c_int = 1;
+    const SO_REUSEADDR: c_int = 2;
+    #[cfg(target_os = "macos")]
+    const SO_REUSEPORT: c_int = 0x0200;
+    #[cfg(not(target_os = "macos"))]
+    const SO_REUSEPORT: c_int = 15;
+
+    type SockLen = u32;
+
+    #[repr(C)]
+    struct InAddr {
+        s_addr: u32,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    struct SockAddrIn {
+        sin_len: u8,
+        sin_family: u8,
+        sin_port: u16,
+        sin_addr: InAddr,
+        sin_zero: [u8; 8],
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[repr(C)]
+    struct SockAddrIn {
+        sin_family: u16,
+        sin_port: u16,
+        sin_addr: InAddr,
+        sin_zero: [u8; 8],
+    }
+
+    unsafe extern "C" {
+        fn socket(domain: c_int, type_: c_int, protocol: c_int) -> c_int;
+        fn setsockopt(
+            socket: c_int,
+            level: c_int,
+            option_name: c_int,
+            option_value: *const c_void,
+            option_len: SockLen,
+        ) -> c_int;
+        fn bind(socket: c_int, address: *const c_void, address_len: SockLen) -> c_int;
+        fn close(fd: c_int) -> c_int;
+    }
+
+    pub fn bind_udp_any(port: u16) -> io::Result<UdpSocket> {
+        // SAFETY: raw socket calls are used only to set pre-bind reuse flags that std
+        // does not expose. On every failing path the fd is closed before returning.
+        unsafe {
+            let fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let yes: c_int = 1;
+            let opt_len = mem::size_of_val(&yes) as SockLen;
+            if setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                (&yes as *const c_int).cast::<c_void>(),
+                opt_len,
+            ) != 0
+            {
+                let err = io::Error::last_os_error();
+                let _ = close(fd);
+                return Err(err);
+            }
+            let _ = setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_REUSEPORT,
+                (&yes as *const c_int).cast::<c_void>(),
+                opt_len,
+            );
+
+            #[cfg(target_os = "macos")]
+            let addr = SockAddrIn {
+                sin_len: mem::size_of::<SockAddrIn>() as u8,
+                sin_family: AF_INET as u8,
+                sin_port: port.to_be(),
+                sin_addr: InAddr { s_addr: 0 },
+                sin_zero: [0; 8],
+            };
+            #[cfg(not(target_os = "macos"))]
+            let addr = SockAddrIn {
+                sin_family: AF_INET as u16,
+                sin_port: port.to_be(),
+                sin_addr: InAddr { s_addr: 0 },
+                sin_zero: [0; 8],
+            };
+            if bind(
+                fd,
+                (&addr as *const SockAddrIn).cast::<c_void>(),
+                mem::size_of::<SockAddrIn>() as SockLen,
+            ) != 0
+            {
+                let err = io::Error::last_os_error();
+                let _ = close(fd);
+                return Err(err);
+            }
+
+            Ok(UdpSocket::from_raw_fd(fd))
         }
     }
 }
@@ -940,6 +1301,25 @@ mod tests {
             source: source.into(),
             fp: fp.into(),
             role: role.into(),
+            host_user: String::new(),
+        }
+    }
+
+    fn rec_user(
+        name: &str,
+        addr: &str,
+        source: &str,
+        fp: &str,
+        role: &str,
+        host_user: &str,
+    ) -> Record {
+        Record {
+            name: name.into(),
+            addr: addr.into(),
+            source: source.into(),
+            fp: fp.into(),
+            role: role.into(),
+            host_user: host_user.into(),
         }
     }
 
@@ -1020,15 +1400,78 @@ mod tests {
           }
         }"#;
         let recs = parse_tailscale_peers(json);
-        assert_eq!(recs.len(), 2, "linux peer dropped");
+        assert_eq!(recs.len(), 1, "linux and explicit offline peers dropped");
         assert_eq!(recs[0].name, "gh-mac-m1.tailnet.ts.net");
         assert_eq!(recs[0].addr, "100.64.0.1");
         assert_eq!(recs[0].source, "tailscale");
-        assert_eq!(recs[0].role, "online");
-        // empty OS kept; no IPs → addr falls back to name; offline
-        assert_eq!(recs[1].name, "mystery");
-        assert_eq!(recs[1].addr, "mystery");
-        assert_eq!(recs[1].role, "offline");
+        assert_eq!(recs[0].role, "");
+    }
+
+    #[test]
+    fn parse_tailscale_peers_applies_pairing_metadata() {
+        let json = r#"{"Peer":{"k1":{"OS":"macOS","DNSName":"old.tailnet.ts.net.","TailscaleIPs":["100.64.0.1"],"Online":true}}}"#;
+        let recs = parse_tailscale_peers_with_metadata(json, |addr| {
+            assert_eq!(addr, "100.64.0.1");
+            Some(PairingMetadata {
+                fp: Some("SHA256:meta".to_string()),
+                role: Some("host".to_string()),
+                host_user: Some("alice".to_string()),
+                hostname: Some("new-name".to_string()),
+            })
+        });
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].name, "new-name");
+        assert_eq!(recs[0].fp, "SHA256:meta");
+        assert_eq!(recs[0].role, "host");
+        assert_eq!(recs[0].host_user, "alice");
+    }
+
+    #[test]
+    fn parse_pairing_metadata_normalizes_fields() {
+        let meta = parse_pairing_metadata(
+            r#"{"hostKeyFP":"bare","role":"host","hostUser":"alice","hostname":"mac.local."}"#,
+        )
+        .unwrap();
+        assert_eq!(meta.fp.as_deref(), Some("SHA256:bare"));
+        assert_eq!(meta.role.as_deref(), Some("host"));
+        assert_eq!(meta.host_user.as_deref(), Some("alice"));
+        assert_eq!(meta.hostname.as_deref(), Some("mac.local"));
+    }
+
+    #[test]
+    fn fetch_pairing_metadata_wraps_ipv6_and_uses_curl_timeout() {
+        let meta = fetch_pairing_metadata_with_exec("fd7a::1", |program, args| {
+            assert_eq!(program, "curl");
+            assert_eq!(
+                args,
+                &[
+                    "-fsSL".to_string(),
+                    "--max-time".to_string(),
+                    "0.8".to_string(),
+                    "http://[fd7a::1]:8891/.well-known/xpair-pairing.json".to_string(),
+                ]
+            );
+            Some(r#"{"fp":"SHA256:k","user":"bob"}"#.to_string())
+        })
+        .unwrap();
+        assert_eq!(meta.fp.as_deref(), Some("SHA256:k"));
+        assert_eq!(meta.host_user.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn parse_lan_beacon_accepts_only_xpair_host_v1() {
+        let valid = br#"{"v":1,"kind":"xpair-host","name":"Beacon.","fp":"bare","role":"host","user":"alice"}"#;
+        let rec = parse_lan_beacon(valid, "127.0.0.1").unwrap();
+        assert_eq!(rec.name, "Beacon");
+        assert_eq!(rec.addr, "127.0.0.1");
+        assert_eq!(rec.source, "lan");
+        assert_eq!(rec.fp, "SHA256:bare");
+        assert_eq!(rec.role, "host");
+        assert_eq!(rec.host_user, "alice");
+        assert!(
+            parse_lan_beacon(br#"{"v":1,"kind":"other","name":"Wrong"}"#, "127.0.0.1").is_none()
+        );
+        assert!(parse_lan_beacon(b"not-json", "127.0.0.1").is_none());
     }
 
     #[test]
@@ -1075,6 +1518,22 @@ mod tests {
         let peers = build_peers(&recs, &aliases(&[]), "", |_| None);
         assert_eq!(peers[0].status, "connect");
         assert_eq!(peers[0].target, "100.64.0.5");
+        assert_eq!(peers[0].pairing_address, "100.64.0.5");
+    }
+
+    #[test]
+    fn target_uses_host_user_when_no_alias_matches() {
+        let recs = vec![rec_user(
+            "peer",
+            "100.64.0.5",
+            "tailscale",
+            "SHA256:z",
+            "host",
+            "alice",
+        )];
+        let peers = build_peers(&recs, &aliases(&[]), "", |_| None);
+        assert_eq!(peers[0].target, "alice@100.64.0.5");
+        assert_eq!(peers[0].host_user.as_deref(), Some("alice"));
     }
 
     #[test]
@@ -1145,14 +1604,16 @@ mod tests {
             name: "gh-mac-m1".into(),
             addrs: vec!["100.64.0.1".into(), "192.168.1.9".into()],
             target: "gh-mac-m1".into(),
+            pairing_address: "100.64.0.1".into(),
             source: "tailscale".into(),
             sources: vec!["tailscale".into()],
             fp: None,
+            host_user: None,
             status: "reconnect".into(),
         }];
         assert_eq!(
             render_peers_json(&peers),
-            "[{\"name\": \"gh-mac-m1\", \"addrs\": [\"100.64.0.1\", \"192.168.1.9\"], \"target\": \"gh-mac-m1\", \"source\": \"tailscale\", \"sources\": [\"tailscale\"], \"fp\": null, \"status\": \"reconnect\"}]"
+            "[{\"name\": \"gh-mac-m1\", \"addrs\": [\"100.64.0.1\", \"192.168.1.9\"], \"target\": \"gh-mac-m1\", \"pairingAddress\": \"100.64.0.1\", \"source\": \"tailscale\", \"sources\": [\"tailscale\"], \"fp\": null, \"status\": \"reconnect\"}]"
         );
     }
 
@@ -1162,14 +1623,16 @@ mod tests {
             name: "p".into(),
             addrs: vec![],
             target: "p".into(),
+            pairing_address: "p".into(),
             source: "ssh".into(),
             sources: vec![],
             fp: Some("SHA256:k".into()),
+            host_user: Some("alice".into()),
             status: "setup".into(),
         }];
         assert_eq!(
             render_peers_json(&peers),
-            "[{\"name\": \"p\", \"addrs\": [], \"target\": \"p\", \"source\": \"ssh\", \"sources\": [], \"fp\": \"SHA256:k\", \"status\": \"setup\"}]"
+            "[{\"name\": \"p\", \"addrs\": [], \"target\": \"p\", \"pairingAddress\": \"p\", \"source\": \"ssh\", \"sources\": [], \"fp\": \"SHA256:k\", \"status\": \"setup\", \"hostUser\": \"alice\"}]"
         );
     }
 

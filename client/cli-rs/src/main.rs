@@ -17,9 +17,10 @@ use xpair::host_permissions;
 use xpair::install_host;
 use xpair::launch;
 use xpair::logs;
-use xpair::mapping::{map_to_host, parse_maps};
+use xpair::mapping::{parse_maps, FolderMap};
 use xpair::notify;
 use xpair::open_gui;
+use xpair::platform::Os;
 use xpair::session::{self, SshTransport};
 use xpair::status;
 use xpair::tools;
@@ -77,9 +78,9 @@ fn main() -> ExitCode {
         "notify" => notify::run(&args[1..]),
         "install-host" => install_host::run(&args[1..]),
         "host-permissions" => host_permissions::run(&args[1..]),
-        "editor" => tools::run_passthrough("xpair-editor", &args[1..]),
-        "desktop" => tools::run_passthrough("xpair-desktop", &args[1..]),
-        "mount" => tools::run_passthrough("xpair-mount", &args[1..]),
+        "editor" => run_tool_or_windows_gate("editor", "xpair-editor", &args[1..]),
+        "desktop" => run_tool_or_windows_gate("desktop", "xpair-desktop", &args[1..]),
+        "mount" => run_tool_or_windows_gate("mount", "xpair-mount", &args[1..]),
         "map" => cmd_map(&args[1..]),
         "config" => run_config(&args[1..]),
         "onboard" => {
@@ -172,33 +173,123 @@ fn cmd_map(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let raw_maps = match resolve_raw_maps(&path) {
-        Ok(raw_maps) => raw_maps,
-        Err(err) => {
-            eprintln!("xpair map: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let pairs = parse_maps(&raw_maps);
+    let verb = args.first().map(String::as_str).unwrap_or("list");
 
-    match args {
-        [flag] if flag == "--list" => {
-            println!("{}", render_map_list(&pairs));
+    match verb {
+        "list" | "" => {
+            if args.len() > 2 || args.get(1).is_some_and(|arg| arg != "--json") {
+                eprintln!(
+                    "map [list|add <clientDir> <hostDir> [--method mount|sync]|rm <clientDir>]"
+                );
+                return ExitCode::from(2);
+            }
+            let raw_maps = match resolve_raw_maps(&path) {
+                Ok(raw_maps) => raw_maps,
+                Err(err) => {
+                    eprintln!("xpair map: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            let raw_modes = match resolve_raw_modes(&path) {
+                Ok(raw_modes) => raw_modes,
+                Err(err) => {
+                    eprintln!("xpair map: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            let pairs = parse_maps(&raw_maps);
+            let modes = parse_maps(&raw_modes);
+            if args.get(1).is_some_and(|arg| arg == "--json") {
+                println!("{}", render_map_json(&pairs, &modes));
+            } else {
+                print!("{}", render_map_list(&pairs));
+            }
             ExitCode::SUCCESS
         }
-        [client_path] => match map_to_host(client_path, &pairs) {
-            Ok(host_path) => {
-                println!("{host_path}");
-                ExitCode::SUCCESS
+        "add" => {
+            let add = match parse_map_add_args(&args[1..]) {
+                Ok(add) => add,
+                Err(message) => {
+                    eprintln!("{message}");
+                    return ExitCode::from(2);
+                }
+            };
+            let client_dir = match canonical_client_dir(&add.client) {
+                Ok(dir) => dir,
+                Err(()) => {
+                    eprintln!("client path not found: {}", add.client);
+                    return ExitCode::from(1);
+                }
+            };
+            let raw_maps = match resolve_raw_maps(&path) {
+                Ok(raw_maps) => raw_maps,
+                Err(err) => {
+                    eprintln!("xpair map: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            let pairs = parse_maps(&raw_maps);
+            if is_mapped(&client_dir, &pairs, Os::current()) {
+                println!("already mapped (or under a mapped root): {client_dir}");
+                return ExitCode::SUCCESS;
             }
-            Err(err) => {
-                eprintln!("{err}");
-                ExitCode::from(2)
+
+            let method = add.method.unwrap_or_else(|| infer_map_method(&client_dir));
+            if !matches!(method.as_str(), "mount" | "sync") {
+                eprintln!("invalid method: {method} (mount|sync)");
+                return ExitCode::from(2);
             }
-        },
+
+            let host_dir = add.host.unwrap_or_else(|| client_dir.clone());
+            let entry = format!("{client_dir}::{host_dir}");
+            let new_maps = if raw_maps.is_empty() {
+                entry
+            } else {
+                format!("{raw_maps};{entry}")
+            };
+            if let Err(err) = config::set(&path, "FOLDER_MAPS", &new_maps) {
+                eprintln!("xpair map: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = set_map_mode(&path, &client_dir, &method) {
+                eprintln!("xpair map: {err}");
+                return ExitCode::from(1);
+            }
+            println!("mapping added: {client_dir}  →  {host_dir} ({method})");
+            ExitCode::SUCCESS
+        }
+        "rm" => {
+            if args.len() != 2 || args[1].is_empty() {
+                eprintln!("map rm <clientDir>");
+                return ExitCode::from(2);
+            }
+            let client_dir = &args[1];
+            let raw_maps = match resolve_raw_maps(&path) {
+                Ok(raw_maps) => raw_maps,
+                Err(err) => {
+                    eprintln!("xpair map: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            let kept = parse_maps(&raw_maps)
+                .into_iter()
+                .filter(|(client, _)| client != client_dir)
+                .map(|(client, host)| format!("{client}::{host}"))
+                .collect::<Vec<_>>()
+                .join(";");
+            if let Err(err) = config::set(&path, "FOLDER_MAPS", &kept) {
+                eprintln!("xpair map: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = remove_map_mode(&path, client_dir) {
+                eprintln!("xpair map: {err}");
+                return ExitCode::from(1);
+            }
+            println!("mapping removed: {client_dir}");
+            ExitCode::SUCCESS
+        }
         _ => {
-            eprintln!("usage: xpair map <client_path>");
-            eprintln!("       xpair map --list");
+            eprintln!("map [list|add <clientDir> <hostDir> [--method mount|sync]|rm <clientDir>]");
             ExitCode::from(2)
         }
     }
@@ -234,12 +325,22 @@ fn cmd_ls(args: &[String]) -> ExitCode {
 
     if json {
         let output = if host.is_empty() {
-            session::render_json("host", "", &[])
+            Ok(session::render_json("host", "", &[]))
         } else {
-            session::render_remote_json(&transport, &host, &aqua_sock)
+            session::render_remote_json_checked(&transport, &host, &aqua_sock)
         };
-        println!("{output}");
-        return ExitCode::SUCCESS;
+        return match output {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(session::RemoteListError::Transport) => {
+                eprintln!(
+                    "warning: session listing failed — host '{host}' unreachable (ssh transport)"
+                );
+                ExitCode::from(3)
+            }
+        };
     }
 
     let raw_maps = match resolve_raw_maps(&path) {
@@ -261,15 +362,20 @@ fn cmd_ls(args: &[String]) -> ExitCode {
 }
 
 fn render_map_list(pairs: &[(String, String)]) -> String {
+    let mut out = String::from("Folder mappings (client → host):\n");
     if pairs.is_empty() {
-        return "(none)".to_string();
+        out.push_str("  (none)\n");
+        return out;
     }
 
-    pairs
-        .iter()
-        .map(|(client, host)| format!("{client}::{host}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    for (client, host) in pairs {
+        out.push_str("  ");
+        out.push_str(client);
+        out.push_str("  →  ");
+        out.push_str(host);
+        out.push('\n');
+    }
+    out
 }
 
 fn resolve_host(path: &Path) -> std::io::Result<String> {
@@ -290,6 +396,215 @@ fn resolve_raw_maps(path: &Path) -> std::io::Result<String> {
         return Ok(raw_maps);
     }
     Ok(config::get(path, "SYNC_ROOTS")?.unwrap_or_default())
+}
+
+fn resolve_raw_modes(path: &Path) -> std::io::Result<String> {
+    if let Some(raw_modes) = non_empty_env("FOLDER_MAP_MODES") {
+        return Ok(raw_modes);
+    }
+    Ok(config::get(path, "FOLDER_MAP_MODES")?.unwrap_or_default())
+}
+
+struct MapAddArgs {
+    client: String,
+    host: Option<String>,
+    method: Option<String>,
+}
+
+fn parse_map_add_args(args: &[String]) -> Result<MapAddArgs, String> {
+    if args.is_empty() {
+        return Err("map add <clientDir> <hostDir> [--method mount|sync]".to_string());
+    }
+
+    let client = args[0].clone();
+    let mut host = None;
+    let mut method = None;
+    let mut idx = 1;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--method" => {
+                let Some(value) = args.get(idx + 1) else {
+                    return Err("map add <clientDir> <hostDir> [--method mount|sync]".to_string());
+                };
+                method = Some(value.clone());
+                idx += 2;
+            }
+            value if value.starts_with("--") => {
+                return Err(format!("unknown map add option: {value}"));
+            }
+            value => {
+                if host.is_none() {
+                    host = Some(value.to_string());
+                } else if method.is_none() {
+                    method = Some(value.to_string());
+                } else {
+                    return Err("map add <clientDir> <hostDir> [--method mount|sync]".to_string());
+                }
+                idx += 1;
+            }
+        }
+    }
+
+    Ok(MapAddArgs {
+        client,
+        host,
+        method,
+    })
+}
+
+fn canonical_client_dir(path: &str) -> Result<String, ()> {
+    let path = fs::canonicalize(path).map_err(|_| ())?;
+    if path.is_dir() {
+        Ok(path.to_string_lossy().into_owned())
+    } else {
+        Err(())
+    }
+}
+
+fn is_mapped(client_dir: &str, pairs: &[FolderMap], os: Os) -> bool {
+    pairs
+        .iter()
+        .any(|(client, _)| path_eq_or_child_for_os(client_dir, client, os))
+}
+
+fn path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        path.eq_ignore_ascii_case(prefix)
+            || (path.len() > prefix.len()
+                && path.as_bytes().get(prefix.len()) == Some(&b'/')
+                && path[..prefix.len()].eq_ignore_ascii_case(prefix))
+    } else {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+}
+
+fn set_map_mode(path: &Path, client_dir: &str, method: &str) -> std::io::Result<()> {
+    let raw = resolve_raw_modes(path)?;
+    let mut entries = parse_maps(&raw)
+        .into_iter()
+        .filter(|(client, _)| client != client_dir)
+        .map(|(client, mode)| format!("{client}::{mode}"))
+        .collect::<Vec<_>>();
+    entries.push(format!("{client_dir}::{method}"));
+    config::set(path, "FOLDER_MAP_MODES", &entries.join(";"))
+}
+
+fn remove_map_mode(path: &Path, client_dir: &str) -> std::io::Result<()> {
+    let raw = resolve_raw_modes(path)?;
+    let entries = parse_maps(&raw)
+        .into_iter()
+        .filter(|(client, _)| client != client_dir)
+        .map(|(client, mode)| format!("{client}::{mode}"))
+        .collect::<Vec<_>>();
+    config::set(path, "FOLDER_MAP_MODES", &entries.join(";"))
+}
+
+fn render_map_json(pairs: &[FolderMap], modes: &[FolderMap]) -> String {
+    let mut out = String::from("[");
+    for (idx, (client, host)) in pairs.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"client\":");
+        push_json_quoted(&mut out, client);
+        out.push_str(",\"host\":");
+        push_json_quoted(&mut out, host);
+        out.push_str(",\"method\":");
+        push_json_quoted(&mut out, &map_mode_for(client, modes));
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+fn map_mode_for(client: &str, modes: &[FolderMap]) -> String {
+    modes
+        .iter()
+        .find(|(mode_client, _)| mode_client == client)
+        .map(|(_, mode)| mode.clone())
+        .unwrap_or_else(|| infer_map_method(client))
+}
+
+fn infer_map_method(client: &str) -> String {
+    if !client.starts_with("/Volumes/") {
+        return "sync".to_string();
+    }
+    let Some(host) = non_empty_env("REMOTE_HOST") else {
+        return "sync".to_string();
+    };
+    let host = host.rsplit('@').next().unwrap_or(&host);
+    let output = std::process::Command::new("mount").output().ok();
+    let Some(output) = output else {
+        return "sync".to_string();
+    };
+    let mount = String::from_utf8_lossy(&output.stdout);
+    for line in mount.lines() {
+        if !line.contains(" (smbfs") {
+            continue;
+        }
+        let Some((source, rest)) = line.split_once(" on ") else {
+            continue;
+        };
+        let Some((mountpoint, _)) = rest.split_once(" (smbfs") else {
+            continue;
+        };
+        let source_matches = source.contains(&format!("@{host}/"))
+            || source
+                .strip_prefix("//")
+                .is_some_and(|s| s.starts_with(&format!("{host}/")));
+        let path_matches = client == mountpoint
+            || client
+                .strip_prefix(mountpoint)
+                .is_some_and(|suffix| suffix.starts_with('/'));
+        if source_matches && path_matches {
+            return "mount".to_string();
+        }
+    }
+    "sync".to_string()
+}
+
+fn push_json_quoted(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch <= '\u{1f}' => {
+                out.push_str("\\u00");
+                let byte = ch as u8;
+                out.push(hex_digit(byte >> 4));
+                out.push(hex_digit(byte & 0x0f));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+fn hex_digit(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + (n - 10)) as char,
+        _ => unreachable!("hex nibble is always <= 15"),
+    }
+}
+
+fn run_tool_or_windows_gate(verb: &str, tool: &str, args: &[String]) -> ExitCode {
+    if Os::current() == Os::Windows {
+        match verb {
+            "editor" | "desktop" => eprintln!("xpair {verb}: IDE-driven on Windows"),
+            "mount" => eprintln!("xpair mount: replaced by UNC mappings on Windows"),
+            _ => eprintln!("xpair {verb}: unavailable on Windows"),
+        }
+        return ExitCode::from(2);
+    }
+    tools::run_passthrough(tool, args)
 }
 
 fn resolve_aqua_sock() -> String {

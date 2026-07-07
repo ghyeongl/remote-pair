@@ -7,6 +7,7 @@
 use std::io;
 use std::process::{Command, Stdio};
 
+use crate::platform::Os;
 use crate::remote_quote;
 use crate::transport::{Output, Transport};
 
@@ -28,11 +29,10 @@ pub struct SshTransport;
 
 impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
+        let os = Os::current();
         let out = Command::new("ssh")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("ConnectTimeout=5")
+            .args(os.ssh_mux_neutralizer_args())
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"])
             .arg(host)
             .arg(remote_cmd)
             .stdin(Stdio::null())
@@ -134,8 +134,22 @@ pub fn render_text(target: &str, host: &str, raw_session_stdout: &str, map_list:
 
 /// Render remote JSON by asking the host through the transport seam.
 pub fn render_remote_json<T: Transport>(transport: &T, host: &str, aqua_sock: &str) -> String {
-    let raw = remote_stdout(transport, host, &remote_list_sessions_cmd(aqua_sock, true));
-    render_json("host", host, &parse_sessions(&raw))
+    render_remote_json_checked(transport, host, aqua_sock)
+        .unwrap_or_else(|_| render_json("host", host, &[]))
+}
+
+/// Render remote JSON, preserving bash's distinction between "no sessions" and
+/// ssh transport failure. Exit 255 means the state is unknown, not empty.
+pub fn render_remote_json_checked<T: Transport>(
+    transport: &T,
+    host: &str,
+    aqua_sock: &str,
+) -> Result<String, RemoteListError> {
+    match transport.ssh_exec(host, &remote_list_sessions_cmd(aqua_sock, true)) {
+        Ok(out) if out.code == 255 => Err(RemoteListError::Transport),
+        Ok(out) => Ok(render_json("host", host, &parse_sessions(&out.stdout))),
+        Err(_) => Err(RemoteListError::Transport),
+    }
 }
 
 /// Render remote human output by asking the host through the transport seam.
@@ -174,6 +188,11 @@ fn remote_stdout<T: Transport>(transport: &T, host: &str, remote_cmd: &str) -> S
         Ok(out) if out.code == 0 => out.stdout,
         _ => String::new(),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteListError {
+    Transport,
 }
 
 fn remote_list_sessions_cmd(aqua_sock: &str, json: bool) -> String {
@@ -354,6 +373,28 @@ mod tests {
         assert_eq!(
             calls[0].remote_cmd,
             r"$HOME/.local/bin/tmux-aqua -S '/tmp/aqua '\''sock.sock' list-sessions 2>/dev/null"
+        );
+    }
+
+    #[test]
+    fn remote_json_reports_transport_failure_instead_of_empty_list() {
+        let transport = MockTransport::new();
+        transport.push_response(255, "");
+
+        assert_eq!(
+            render_remote_json_checked(&transport, "mac.local", "/tmp/aqua"),
+            Err(RemoteListError::Transport)
+        );
+    }
+
+    #[test]
+    fn remote_json_treats_non_transport_nonzero_as_empty_sessions() {
+        let transport = MockTransport::new();
+        transport.push_response(1, "");
+
+        assert_eq!(
+            render_remote_json_checked(&transport, "mac.local", "/tmp/aqua").unwrap(),
+            "{\"target\":\"host\",\"host\":\"mac.local\",\"sessions\":[]}"
         );
     }
 }

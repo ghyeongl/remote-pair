@@ -72,8 +72,19 @@ pub fn parse_logs_args(args: &[String]) -> LogsReq {
 ///
 /// `stamp` is supplied by the caller so this stays deterministic and testable.
 pub fn build_collect_tar_argv(rp_dir: impl AsRef<Path>, stamp: &str) -> (Vec<String>, String) {
+    build_collect_tar_argv_in(rp_dir, stamp, std::env::temp_dir())
+}
+
+fn build_collect_tar_argv_in(
+    rp_dir: impl AsRef<Path>,
+    stamp: &str,
+    temp_root: impl AsRef<Path>,
+) -> (Vec<String>, String) {
     let log_dir = rp_dir.as_ref().join("logs");
-    let out = log_dir.join(format!("xpair-logs-{stamp}.tgz"));
+    let out_parent = temp_root
+        .as_ref()
+        .join(format!("xpair-logs-{stamp}.{}", std::process::id()));
+    let out = out_parent.join(format!("xpair-logs-{stamp}.tgz"));
     let parent = log_dir.parent().unwrap_or_else(|| Path::new("."));
     let basename = log_dir
         .file_name()
@@ -261,6 +272,9 @@ fn collect_logs<W: Write, E: Write>(
     err: &mut E,
 ) -> Result<(), ()> {
     let (argv, out_path) = build_collect_tar_argv(rp_dir, stamp);
+    if let Some(parent) = Path::new(&out_path).parent() {
+        fs::create_dir_all(parent).map_err(|_| ())?;
+    }
     let status = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
@@ -279,7 +293,13 @@ fn collect_logs<W: Write, E: Write>(
 
 fn run_host_follow(os: Os, host: &str, remote_cmd: &str) -> ExitCode {
     let argv = build_host_ssh_argv(os, host, remote_cmd, true);
-    match Command::new(&argv[0]).args(&argv[1..]).status() {
+    match Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+    {
         Ok(status) => exit_code_from_i32(status.code().unwrap_or(1)),
         Err(error) => {
             eprintln!("xpair logs: {error}");
@@ -296,7 +316,7 @@ fn run_local_tail<W: Write, E: Write>(
     err: &mut E,
 ) -> io::Result<ExitCode> {
     let files = local_log_files(log_dir)?;
-    if files.is_empty() && !follow {
+    if files.is_empty() {
         let _ = writeln!(out, "(no local logs at {})", path_string(log_dir));
         return Ok(ExitCode::SUCCESS);
     }
@@ -305,10 +325,16 @@ fn run_local_tail<W: Write, E: Write>(
     if follow {
         argv.push("-F".to_string());
     }
-    if files.is_empty() {
-        argv.push(path_string(log_dir.join("*.log")));
-    } else {
-        argv.extend(files.into_iter().map(path_string));
+    argv.extend(files.into_iter().map(path_string));
+
+    if follow {
+        let status = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        return Ok(exit_code_from_i32(status.code().unwrap_or(1)));
     }
 
     let output = Command::new(&argv[0])
@@ -320,8 +346,6 @@ fn run_local_tail<W: Write, E: Write>(
     if output.status.success() {
         out.write_all(&output.stdout).map_err(io::Error::other)?;
         Ok(ExitCode::SUCCESS)
-    } else if follow {
-        Ok(exit_code_from_i32(output.status.code().unwrap_or(1)))
     } else {
         let _ = writeln!(out, "(no local logs at {})", path_string(log_dir));
         let _ = err;
@@ -534,10 +558,16 @@ mod tests {
     #[test]
     fn build_collect_tar_argv_exact_shape() {
         let rp_dir = PathBuf::from("C:/Users/me/.xpair/host");
-        let (argv, out) = build_collect_tar_argv(&rp_dir, "20260102-030405");
-        let expected_out = path_string(rp_dir.join("logs").join("xpair-logs-20260102-030405.tgz"));
+        let temp_root = PathBuf::from("C:/Temp");
+        let (argv, out) = build_collect_tar_argv_in(&rp_dir, "20260102-030405", &temp_root);
+        let expected_out = path_string(
+            temp_root
+                .join(format!("xpair-logs-20260102-030405.{}", std::process::id()))
+                .join("xpair-logs-20260102-030405.tgz"),
+        );
 
         assert_eq!(out, expected_out);
+        assert!(!out.starts_with(&path_string(rp_dir.join("logs"))));
         assert_eq!(
             argv,
             vec![

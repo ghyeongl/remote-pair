@@ -9,8 +9,9 @@
 //! Deferred, by design: the non-bootstrap signed `.app` scp staging path, askpass/password-pipe
 //! authentication, and onboarding recovery. Those paths must not be faked in the native port.
 
+use std::cell::Cell;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,10 +19,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config;
 use crate::platform::{self, Os};
 use crate::remote_quote;
-use crate::transport::{Output, Transport};
+use crate::transport::{AuthOutput, Output, Transport};
 
 const USAGE: &str =
-    "install-host [--host <addr>] [--account <user>] [--force] [--bootstrap --sha256 <hex> --ref <r>]";
+    "install-host [--host <addr>] [--account <user>] [--password-stdin] [--force] [--bootstrap --sha256 <hex> --ref <r>]";
 const DEFAULT_APP_NAME: &str = "XpairHost";
 const DEFAULT_BUNDLE_PREFIX: &str = "com.x10lab.xpair-host";
 const DEFAULT_GH_REPO: &str = "x10lab/xpair";
@@ -35,6 +36,7 @@ pub struct InstallReq {
     pub sha256: Option<String>,
     pub git_ref: String,
     pub force: bool,
+    pub password_stdin: bool,
 }
 
 impl InstallReq {
@@ -67,6 +69,7 @@ fn parse_install_args_with_default_host(
     let mut sha256 = None;
     let mut git_ref = DEFAULT_REF.to_string();
     let mut force = false;
+    let mut password_stdin = false;
     let mut idx = 0;
 
     while idx < args.len() {
@@ -115,6 +118,10 @@ fn parse_install_args_with_default_host(
                 force = true;
                 idx += 1;
             }
+            "--password-stdin" => {
+                password_stdin = true;
+                idx += 1;
+            }
             _ => return Err((USAGE.to_string(), 2)),
         }
     }
@@ -140,6 +147,7 @@ fn parse_install_args_with_default_host(
         sha256,
         git_ref,
         force,
+        password_stdin,
     })
 }
 
@@ -165,6 +173,21 @@ pub fn build_authorize_key_cmd() -> String {
 }
 
 pub fn build_ssh_config_block(host: &str, hostname: &str, user: &str, identity: &str) -> String {
+    build_ssh_config_block_for_os(Os::Mac, host, hostname, user, identity)
+}
+
+pub fn build_ssh_config_block_for_os(
+    os: Os,
+    host: &str,
+    hostname: &str,
+    user: &str,
+    identity: &str,
+) -> String {
+    let keychain = if os == Os::Mac {
+        "  IgnoreUnknown UseKeychain\n  UseKeychain yes\n"
+    } else {
+        ""
+    };
     format!(
         concat!(
             "# >>> xpair: {host} >>>\n",
@@ -173,14 +196,15 @@ pub fn build_ssh_config_block(host: &str, hostname: &str, user: &str, identity: 
             "  User {user}\n",
             "  IdentityFile {identity}\n",
             "  AddKeysToAgent yes\n",
-            "  UseKeychain yes\n",
+            "{keychain}",
             "  HostKeyAlgorithms ssh-ed25519\n",
             "# <<< xpair: {host} <<<\n"
         ),
         host = host,
         hostname = hostname,
         user = user,
-        identity = identity
+        identity = identity,
+        keychain = keychain
     )
 }
 
@@ -273,21 +297,66 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let default_host = match resolve_host(&client_env_path) {
+        Ok(host) => host,
+        Err(error) => {
+            eprintln!("xpair install-host: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let req = match parse_install_args_with_default_host(args, Some(&default_host)) {
+        Ok(req) => req,
+        Err((message, code)) => {
+            eprintln!("{message}");
+            return ExitCode::from(code);
+        }
+    };
+    let settings = RuntimeSettings::load(&client_env_path);
+    let askpass = if req.password_stdin {
+        let password = match read_password_line() {
+            Ok(password) if !password.is_empty() => password,
+            Ok(_) => {
+                eprintln!("empty password on stdin");
+                return ExitCode::from(2);
+            }
+            Err(error) => {
+                eprintln!("failed to read password from stdin: {error}");
+                return ExitCode::from(2);
+            }
+        };
+        let preflight_io = LocalInstallIo;
+        if let Err(error) = preflight_io.ensure_pubkey(&settings.home_dir) {
+            eprintln!("could not ensure client pubkey: {error}");
+            return ExitCode::from(1);
+        }
+        match AskpassTemp::create(&password) {
+            Ok(helper) => Some(helper),
+            Err(error) => {
+                eprintln!("install-host: askpass setup failed: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
 
     let os = Os::current();
-    let transport = SshTransport { os };
+    let transport = SshTransport::new(os, &settings, askpass.as_ref().map(|helper| helper.path()));
     let io = LocalInstallIo;
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
 
-    run_with_transport(
-        args,
+    let code = run_parsed_with_transport(
+        &req,
+        &settings,
         &client_env_path,
         &transport,
         &io,
         &mut stdout,
         &mut stderr,
-    )
+    );
+    transport.cleanup(&req.target());
+    code
 }
 
 pub fn run_with_transport<T, I, W, E>(
@@ -320,7 +389,60 @@ where
     };
 
     let settings = RuntimeSettings::load(client_env_path);
+    run_parsed_with_transport(&req, &settings, client_env_path, transport, io, out, err)
+}
+
+fn run_parsed_with_transport<T, I, W, E>(
+    req: &InstallReq,
+    settings: &RuntimeSettings,
+    client_env_path: &Path,
+    transport: &T,
+    io: &I,
+    out: &mut W,
+    err: &mut E,
+) -> ExitCode
+where
+    T: Transport + ?Sized,
+    I: InstallIo + ?Sized,
+    W: Write,
+    E: Write,
+{
     let target = req.target();
+    if req.password_stdin {
+        let _ = writeln!(
+            out,
+            "authenticating to {target} with the supplied account password …"
+        );
+        match transport.ssh_auth_probe(&target, "true") {
+            Ok(AuthOutput {
+                code: 0,
+                stdout: _,
+                stderr: _,
+            }) => transport.retire_password_auth(),
+            Ok(AuthOutput {
+                code: _,
+                stdout,
+                stderr,
+            }) => {
+                let combined = format!("{stdout}\n{stderr}");
+                if contains_auth_denied(&combined) {
+                    let _ = writeln!(err, "PASSWORD_DENIED: account password denied for {target}");
+                    return ExitCode::from(7);
+                }
+                let detail = combined.trim();
+                if detail.is_empty() {
+                    let _ = writeln!(err, "password bootstrap failed for {target}: ssh failed");
+                } else {
+                    let _ = writeln!(err, "password bootstrap failed for {target}: {detail}");
+                }
+                return ExitCode::from(1);
+            }
+            Err(error) => {
+                let _ = writeln!(err, "password bootstrap failed for {target}: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    }
 
     if !req.force {
         let probe_cmd = build_idempotency_probe_cmd(&settings.app_name);
@@ -335,12 +457,12 @@ where
         if installed {
             let reregister_cmd = build_reregister_cmd(&settings.bundle_prefix, &settings.app_name);
             let _ = transport.ssh_exec(&target, &reregister_cmd);
-            return finish_install(&req, &settings, client_env_path, transport, io, out, err);
+            return finish_install(req, settings, client_env_path, transport, io, out, err);
         }
     }
 
     if req.bootstrap {
-        if let Err(code) = run_bootstrap_install(&req, &settings, &target, transport, io, err) {
+        if let Err(code) = run_bootstrap_install(req, settings, &target, transport, io, err) {
             return code;
         }
     } else {
@@ -354,7 +476,7 @@ where
         return ExitCode::from(1);
     }
 
-    finish_install(&req, &settings, client_env_path, transport, io, out, err)
+    finish_install(req, settings, client_env_path, transport, io, out, err)
 }
 
 fn run_bootstrap_install<T, I, E>(
@@ -442,27 +564,34 @@ where
     E: Write,
 {
     let target = req.target();
-    let pubkey = match io.ensure_pubkey(&settings.home_dir) {
-        Ok(pubkey) => pubkey,
-        Err(error) => {
-            let _ = writeln!(err, "could not resolve client pubkey: {error}");
-            return ExitCode::from(1);
-        }
-    };
+    if settings.pairing_key_path.is_file() && !req.password_stdin {
+        let _ = writeln!(
+            out,
+            "paired host (key auth): skipping personal-key authorization (restricted pairing key already grants access)"
+        );
+    } else {
+        let pubkey = match io.ensure_pubkey(&settings.home_dir) {
+            Ok(pubkey) => pubkey,
+            Err(error) => {
+                let _ = writeln!(err, "could not resolve client pubkey: {error}");
+                return ExitCode::from(1);
+            }
+        };
 
-    let auth_cmd = build_authorize_key_pipe_cmd(&pubkey);
-    match transport.ssh_exec(&target, &auth_cmd) {
-        Ok(Output { code: 0, .. }) => {}
-        Ok(Output { code, .. }) => {
-            let _ = writeln!(
-                err,
-                "failed to authorize client key on {target} (exit={code})"
-            );
-            return ExitCode::from(1);
-        }
-        Err(error) => {
-            let _ = writeln!(err, "failed to authorize client key on {target}: {error}");
-            return ExitCode::from(1);
+        let auth_cmd = build_authorize_key_pipe_cmd(&pubkey);
+        match transport.ssh_exec(&target, &auth_cmd) {
+            Ok(Output { code: 0, .. }) => {}
+            Ok(Output { code, .. }) => {
+                let _ = writeln!(
+                    err,
+                    "failed to authorize client key on {target} (exit={code})"
+                );
+                return ExitCode::from(1);
+            }
+            Err(error) => {
+                let _ = writeln!(err, "failed to authorize client key on {target}: {error}");
+                return ExitCode::from(1);
+            }
         }
     }
 
@@ -473,7 +602,13 @@ where
 
     if let Some(user) = cfg_user.filter(|user| !user.is_empty()) {
         let identity = path_string(&settings.identity_path);
-        let block = build_ssh_config_block(&req.host, &req.host, &user, &identity);
+        let block = build_ssh_config_block_for_os(
+            settings.client_os,
+            &req.host,
+            &req.host,
+            &user,
+            &identity,
+        );
         if let Err(error) = io.write_ssh_config_block(&settings.ssh_config_path, &req.host, &block)
         {
             let _ = writeln!(
@@ -569,6 +704,97 @@ fn resolve_host(client_env_path: &Path) -> io::Result<String> {
     Ok(config::get(client_env_path, "REMOTE_HOST")?.unwrap_or_default())
 }
 
+fn read_password_line() -> io::Result<String> {
+    let mut line = String::new();
+    let mut stdin = io::BufReader::new(io::stdin().lock());
+    stdin.read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn contains_auth_denied(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("permission denied") || lower.contains("authentication failed")
+}
+
+struct AskpassTemp {
+    path: PathBuf,
+}
+
+impl AskpassTemp {
+    fn create(password: &str) -> io::Result<AskpassTemp> {
+        let dir = std::env::temp_dir().join(format!(
+            "xpair-askpass-{}-{}",
+            std::process::id(),
+            timestamp_nanos()
+        ));
+        fs::create_dir_all(&dir)?;
+        #[cfg(windows)]
+        let path = dir.join("askpass.cmd");
+        #[cfg(not(windows))]
+        let path = dir.join("askpass.sh");
+
+        #[cfg(windows)]
+        let body = format!("@echo off\r\necho {}\r\n", escape_cmd_echo(password));
+        #[cfg(not(windows))]
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' {}\n",
+            remote_quote::posix_single_quote(password)
+        );
+
+        fs::write(&path, body)?;
+        chmod_best_effort(&path, 0o700);
+        Ok(AskpassTemp { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for AskpassTemp {
+    fn drop(&mut self) {
+        chmod_best_effort(&self.path, 0o600);
+        let _ = fs::remove_file(&self.path);
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn escape_cmd_echo(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '^' | '&' | '|' | '<' | '>' | '%' => vec!['^', ch],
+            _ => vec![ch],
+        })
+        .collect()
+}
+
+fn chmod_best_effort(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(path) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(mode);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+}
+
+fn timestamp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
 struct RuntimeSettings {
     app_name: String,
     bundle_prefix: String,
@@ -576,6 +802,8 @@ struct RuntimeSettings {
     home_dir: PathBuf,
     identity_path: PathBuf,
     ssh_config_path: PathBuf,
+    pairing_key_path: PathBuf,
+    client_os: Os,
 }
 
 impl RuntimeSettings {
@@ -585,6 +813,13 @@ impl RuntimeSettings {
         let ssh_config_path = non_empty_value(client_env_path, "RP_SSH_CFG")
             .map(PathBuf::from)
             .unwrap_or_else(|| home_dir.join(".ssh").join("config"));
+        let pairing_key_path = non_empty_env("PAIRING_KEY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                config::default_rp_dir()
+                    .unwrap_or_else(|_| home_dir.join(".xpair").join("host"))
+                    .join("pairing_ed25519")
+            });
 
         RuntimeSettings {
             app_name: setting(client_env_path, "APP_NAME", DEFAULT_APP_NAME),
@@ -593,6 +828,8 @@ impl RuntimeSettings {
             home_dir,
             identity_path,
             ssh_config_path,
+            pairing_key_path,
+            client_os: Os::current(),
         }
     }
 }
@@ -725,22 +962,84 @@ fn path_string(path: impl AsRef<Path>) -> String {
 
 struct SshTransport {
     os: platform::Os,
+    control_path: Option<PathBuf>,
+    askpass: Option<PathBuf>,
+    password_phase: Cell<bool>,
+    pairing_key: Option<PathBuf>,
+}
+
+impl SshTransport {
+    fn new(os: platform::Os, settings: &RuntimeSettings, askpass: Option<&Path>) -> SshTransport {
+        let control_path = if os.supports_multiplexing() {
+            Some(temp_control_path())
+        } else {
+            None
+        };
+        let pairing_key = if askpass.is_none() && settings.pairing_key_path.is_file() {
+            Some(settings.pairing_key_path.clone())
+        } else {
+            None
+        };
+        SshTransport {
+            os,
+            control_path,
+            askpass: askpass.map(Path::to_path_buf),
+            password_phase: Cell::new(askpass.is_some()),
+            pairing_key,
+        }
+    }
+
+    fn ssh_command(&self, password_phase: bool) -> Command {
+        let mut command = Command::new("ssh");
+        self.apply_ssh_options(&mut command, password_phase);
+        if password_phase {
+            if let Some(askpass) = &self.askpass {
+                command.env("SSH_ASKPASS", askpass);
+                command.env("SSH_ASKPASS_REQUIRE", "force");
+                if std::env::var_os("DISPLAY").is_none() {
+                    command.env("DISPLAY", ":0");
+                }
+            }
+        }
+        command
+    }
+
+    fn apply_ssh_options(&self, command: &mut Command, password_phase: bool) {
+        command.args(["-o", "ConnectTimeout=8"]);
+        command.args(["-o", "ConnectionAttempts=1"]);
+        command.args(["-o", "StrictHostKeyChecking=accept-new"]);
+        if let Some(control_path) = &self.control_path {
+            command.args(["-o", "ControlMaster=auto"]);
+            command.arg("-o");
+            command.arg(format!("ControlPath={}", path_string(control_path)));
+            command.args(["-o", "ControlPersist=120"]);
+        } else {
+            command.args(self.os.ssh_mux_neutralizer_args());
+        }
+        if password_phase {
+            command.args([
+                "-o",
+                "PreferredAuthentications=password,keyboard-interactive",
+            ]);
+            command.args(["-o", "PubkeyAuthentication=no"]);
+            command.args(["-o", "PasswordAuthentication=yes"]);
+            command.args(["-o", "KbdInteractiveAuthentication=yes"]);
+            command.args(["-o", "BatchMode=no"]);
+            command.args(["-o", "NumberOfPasswordPrompts=1"]);
+        } else {
+            command.args(["-o", "BatchMode=yes"]);
+            if let Some(pairing_key) = &self.pairing_key {
+                command.arg("-i");
+                command.arg(pairing_key);
+            }
+        }
+    }
 }
 
 impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
-        let output = Command::new("ssh")
-            .args(self.os.ssh_mux_neutralizer_args())
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=8",
-                "-o",
-                "ConnectionAttempts=1",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-            ])
+        let output = self
+            .ssh_command(self.password_phase.get())
             .arg(host)
             .arg(remote_cmd)
             .stdin(Stdio::null())
@@ -752,6 +1051,51 @@ impl Transport for SshTransport {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         })
     }
+
+    fn ssh_auth_probe(&self, host: &str, remote_cmd: &str) -> io::Result<AuthOutput> {
+        let output = self
+            .ssh_command(self.password_phase.get())
+            .arg(host)
+            .arg(remote_cmd)
+            .stdin(Stdio::null())
+            .output()?;
+
+        Ok(AuthOutput {
+            code: output.status.code().unwrap_or(255),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    fn retire_password_auth(&self) {
+        if self.control_path.is_some() {
+            self.password_phase.set(false);
+        }
+    }
+
+    fn cleanup(&self, host: &str) {
+        if let Some(control_path) = &self.control_path {
+            let _ = Command::new("ssh")
+                .arg("-O")
+                .arg("exit")
+                .arg("-o")
+                .arg(format!("ControlPath={}", path_string(control_path)))
+                .arg(host)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = fs::remove_file(control_path);
+        }
+    }
+}
+
+fn temp_control_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "xpair-cm-{}-{}",
+        std::process::id(),
+        timestamp_nanos()
+    ))
 }
 
 #[cfg(test)]
@@ -893,6 +1237,7 @@ mod tests {
                 "--ref",
                 "release/v1",
                 "--force",
+                "--password-stdin",
             ]))
             .unwrap();
 
@@ -905,6 +1250,7 @@ mod tests {
                     sha256: Some("abc123".to_string()),
                     git_ref: "release/v1".to_string(),
                     force: true,
+                    password_stdin: true,
                 }
             );
         });
@@ -955,6 +1301,7 @@ mod tests {
             sha256: None,
             git_ref: DEFAULT_REF.to_string(),
             force: false,
+            password_stdin: false,
         };
         assert_eq!(req.target(), "alice@mac");
 
@@ -1026,7 +1373,17 @@ mod tests {
                 "alice",
                 "/Users/me/.ssh/id_ed25519"
             ),
-            "# >>> xpair: mac-mini >>>\nHost mac-mini\n  HostName 192.0.2.10\n  User alice\n  IdentityFile /Users/me/.ssh/id_ed25519\n  AddKeysToAgent yes\n  UseKeychain yes\n  HostKeyAlgorithms ssh-ed25519\n# <<< xpair: mac-mini <<<\n"
+            "# >>> xpair: mac-mini >>>\nHost mac-mini\n  HostName 192.0.2.10\n  User alice\n  IdentityFile /Users/me/.ssh/id_ed25519\n  AddKeysToAgent yes\n  IgnoreUnknown UseKeychain\n  UseKeychain yes\n  HostKeyAlgorithms ssh-ed25519\n# <<< xpair: mac-mini <<<\n"
+        );
+        assert_eq!(
+            build_ssh_config_block_for_os(
+                Os::Linux,
+                "mac-mini",
+                "192.0.2.10",
+                "alice",
+                "/Users/me/.ssh/id_ed25519"
+            ),
+            "# >>> xpair: mac-mini >>>\nHost mac-mini\n  HostName 192.0.2.10\n  User alice\n  IdentityFile /Users/me/.ssh/id_ed25519\n  AddKeysToAgent yes\n  HostKeyAlgorithms ssh-ed25519\n# <<< xpair: mac-mini <<<\n"
         );
     }
 
@@ -1047,6 +1404,8 @@ mod tests {
                 ("BUNDLE_PREFIX", None),
                 ("RP_SSH_CFG", None),
                 ("HOME", Some("C:/Users/tester")),
+                ("RP_OS", Some("mac")),
+                ("PAIRING_KEY", None),
                 ("USERPROFILE", None),
             ],
             || {
@@ -1091,7 +1450,8 @@ mod tests {
                     [(
                         path_string(PathBuf::from("C:/Users/tester").join(".ssh").join("config")),
                         "mac-mini".to_string(),
-                        build_ssh_config_block(
+                        build_ssh_config_block_for_os(
+                            Os::Mac,
                             "mac-mini",
                             "mac-mini",
                             "alice",
@@ -1106,6 +1466,60 @@ mod tests {
                 assert_eq!(
                     config::get(tmp.client_env_path(), "REMOTE_HOST").unwrap(),
                     Some("mac-mini".to_string())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn paired_key_auth_skips_personal_key_authorization() {
+        with_env(
+            &[
+                ("REMOTE_HOST", None),
+                ("GH_REPO", None),
+                ("APP_NAME", None),
+                ("BUNDLE_PREFIX", None),
+                ("RP_SSH_CFG", None),
+                ("HOME", Some("C:/Users/tester")),
+                ("RP_OS", Some("linux")),
+                ("USERPROFILE", None),
+            ],
+            || {
+                let tmp = TestDir::new("paired");
+                let pairing_key = tmp.path.join("pairing_ed25519");
+                fs::write(&pairing_key, "pairing-private").unwrap();
+                let pairing_key_s = path_string(&pairing_key);
+                let _guard = EnvGuard::set(&[("PAIRING_KEY", Some(&pairing_key_s))]);
+                let transport = MockTransport::new();
+                transport.push_response(0, "");
+                transport.push_response(0, "");
+                let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST tester");
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+
+                let code = run_with_transport(
+                    &strings(&["--host", "mac-mini", "--account", "alice"]),
+                    &tmp.client_env_path(),
+                    &transport,
+                    &io,
+                    &mut out,
+                    &mut err,
+                );
+
+                assert_eq!(code, ExitCode::SUCCESS);
+                assert_eq!(String::from_utf8(err).unwrap(), "");
+                let out = String::from_utf8(out).unwrap();
+                assert!(out.contains("skipping personal-key authorization"));
+                assert!(out.ends_with("host set: mac-mini\n"));
+                let calls = transport.calls();
+                assert_eq!(calls.len(), 2);
+                assert_eq!(
+                    calls[0].remote_cmd,
+                    build_idempotency_probe_cmd(DEFAULT_APP_NAME)
+                );
+                assert_eq!(
+                    calls[1].remote_cmd,
+                    build_reregister_cmd(DEFAULT_BUNDLE_PREFIX, DEFAULT_APP_NAME)
                 );
             },
         );

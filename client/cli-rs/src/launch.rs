@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use crate::attach::Target;
 use crate::config;
-use crate::mapping::{map_to_host, parse_maps};
+use crate::mapping::{map_to_host_for_os, parse_maps};
 use crate::platform::Os;
 use crate::remote_quote;
 use crate::respawn::{self, Engine};
@@ -187,13 +187,13 @@ pub fn build_ensure_session_remote_cmd_for_engine(
     fresh: bool,
     cl_continue: bool,
 ) -> String {
+    if fresh {
+        return build_fresh_remote_create_loop(aqua_sock, session, host_dir, engine);
+    }
+
     let has = remote_has_session_cmd(aqua_sock, session);
     let new = remote_new_session_cmd(aqua_sock, session, host_dir, engine, cl_continue);
-    if fresh {
-        format!("{has} && exit 10; {new}")
-    } else {
-        format!("{has} || {{ {new}; }}")
-    }
+    format!("{has} || {{ {new}; }}")
 }
 
 /// Build the local argv for the remote SSH attach handoff.
@@ -246,7 +246,7 @@ pub fn ensure_remote_session(
     host_dir: &str,
     fresh: bool,
     engine: Engine,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let remote_cmd = build_ensure_session_remote_cmd_for_engine(
         engine, aqua_sock, session, host_dir, fresh, !fresh,
     );
@@ -255,7 +255,7 @@ pub fn ensure_remote_session(
         .map_err(|err| format!("remote launch setup failed: {err}"))?;
 
     if out.code == 0 {
-        Ok(())
+        Ok(extract_session_marker(&out.stdout).unwrap_or_else(|| session.to_string()))
     } else {
         Err(format!("remote launch setup failed (exit={})", out.code))
     }
@@ -402,7 +402,7 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
     };
     let pairs = parse_maps(&raw_maps);
     let client_dir = dir.to_string_lossy().into_owned();
-    let host_dir = match map_to_host(&client_dir, &pairs) {
+    let host_dir = match map_to_host_for_os(&client_dir, &pairs, Os::current()) {
         Ok(host_dir) => host_dir,
         Err(err) => {
             eprintln!("{err}");
@@ -422,12 +422,15 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         }
     };
     let transport = SshTransport;
-    if let Err(err) = ensure_remote_session(
+    let session = match ensure_remote_session(
         &transport, host, &aqua_sock, &session, &host_dir, req.fresh, engine,
     ) {
-        eprintln!("xpair launch: {err}");
-        return ExitCode::from(1);
-    }
+        Ok(session) => session,
+        Err(err) => {
+            eprintln!("xpair launch: {err}");
+            return ExitCode::from(1);
+        }
+    };
     if local_mode {
         let _ = config::set(path, "LOCAL_MODE", "0");
     }
@@ -462,6 +465,62 @@ fn remote_new_session_cmd(
     format!(
         "T=$(mktemp -t claude-respawn.XXXXXX) && printf %s {script} > \"$T\" && {REMOTE_BIN}/{TMUX_AQUA} -S {sock} new-session -d -s {session_q} -c {host_dir} \"bash $T\""
     )
+}
+
+fn build_fresh_remote_create_loop(
+    aqua_sock: &str,
+    session: &str,
+    host_dir: &str,
+    engine: Engine,
+) -> String {
+    let Some((base, n)) = split_numbered_session(session) else {
+        return remote_new_session_cmd(aqua_sock, session, host_dir, engine, false);
+    };
+    let sock = remote_quote::posix_single_quote(aqua_sock);
+    let base_q = remote_quote::posix_single_quote(&base);
+    let host_dir_q = remote_quote::posix_single_quote(host_dir);
+    let script = remote_quote::posix_single_quote(&respawn::build_respawn_script(
+        engine,
+        "__XPAIR_SESSION__",
+        false,
+    ));
+    format!(
+        concat!(
+            "BASE={base_q}; N={n}; ",
+            "while {REMOTE_BIN}/{TMUX_AQUA} -S {sock} has-session -t \"=${{BASE}}_${{N}}\" 2>/dev/null; do N=$((N+1)); done; ",
+            "SESSION=\"${{BASE}}_${{N}}\"; ",
+            "T=$(mktemp -t claude-respawn.XXXXXX) && ",
+            "printf %s {script} | sed \"s/__XPAIR_SESSION__/$SESSION/g\" > \"$T\" && ",
+            "{REMOTE_BIN}/{TMUX_AQUA} -S {sock} new-session -d -s \"$SESSION\" -c {host_dir_q} \"bash $T\" && ",
+            "printf '__SESSION__:%s\\n' \"$SESSION\""
+        ),
+        base_q = base_q,
+        n = n,
+        REMOTE_BIN = REMOTE_BIN,
+        TMUX_AQUA = TMUX_AQUA,
+        sock = sock,
+        script = script,
+        host_dir_q = host_dir_q
+    )
+}
+
+fn extract_session_marker(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("__SESSION__:"))
+        .next_back()
+        .map(str::to_string)
+        .filter(|session| !session.is_empty())
+}
+
+fn split_numbered_session(session: &str) -> Option<(String, usize)> {
+    let (base, raw_n) = session.rsplit_once('_')?;
+    let n = raw_n.parse::<usize>().ok()?;
+    if base.is_empty() || n == 0 {
+        None
+    } else {
+        Some((base.to_string(), n))
+    }
 }
 
 fn resolve_engine(path: &Path, req: &LaunchReq) -> Result<Engine, String> {
@@ -962,14 +1021,15 @@ mod tests {
         fresh: bool,
         cl_continue: bool,
     ) -> String {
-        let sock = remote_quote::posix_single_quote(aqua_sock);
-        let target = remote_quote::posix_single_quote(&format!("={session}"));
-        let has = format!("{REMOTE_BIN}/{TMUX_AQUA} -S {sock} has-session -t {target} 2>/dev/null");
-        let new =
-            expected_remote_new_session_cmd(engine, aqua_sock, session, host_dir, cl_continue);
         if fresh {
-            format!("{has} && exit 10; {new}")
+            build_fresh_remote_create_loop(aqua_sock, session, host_dir, engine)
         } else {
+            let sock = remote_quote::posix_single_quote(aqua_sock);
+            let target = remote_quote::posix_single_quote(&format!("={session}"));
+            let has =
+                format!("{REMOTE_BIN}/{TMUX_AQUA} -S {sock} has-session -t {target} 2>/dev/null");
+            let new =
+                expected_remote_new_session_cmd(engine, aqua_sock, session, host_dir, cl_continue);
             format!("{has} || {{ {new}; }}")
         }
     }
@@ -1200,13 +1260,14 @@ mod tests {
 
     #[test]
     fn builds_fresh_remote_session_command_exactly() {
+        let cmd = build_ensure_session_remote_cmd(
+            "/tmp/aqua-tmux.sock",
+            "mac_project_8779b_1",
+            "/Users/me/project",
+            true,
+        );
         assert_eq!(
-            build_ensure_session_remote_cmd(
-                "/tmp/aqua-tmux.sock",
-                "mac_project_8779b_1",
-                "/Users/me/project",
-                true,
-            ),
+            cmd,
             expected_ensure_remote_session_cmd(
                 Engine::Claude,
                 "/tmp/aqua-tmux.sock",
@@ -1216,6 +1277,9 @@ mod tests {
                 false,
             )
         );
+        assert!(!cmd.contains("exit 10"));
+        assert!(cmd.contains("while $HOME/.local/bin/tmux-aqua"));
+        assert!(cmd.contains("SESSION=\"${BASE}_${N}\""));
     }
 
     #[test]
@@ -1353,7 +1417,7 @@ mod tests {
                 false,
                 Engine::Codex,
             ),
-            Ok(())
+            Ok("mac_project_8779b_1".to_string())
         );
         assert_eq!(
             ensure_remote_session(
@@ -1383,5 +1447,24 @@ mod tests {
             )
         );
         assert_eq!(calls[1], calls[0]);
+    }
+
+    #[test]
+    fn ensure_remote_session_returns_emitted_fresh_session_marker() {
+        let transport = MockTransport::new();
+        transport.push_response(0, "setup\n__SESSION__:mac_project_8779b_2\n");
+
+        assert_eq!(
+            ensure_remote_session(
+                &transport,
+                "mac.local",
+                "/tmp/aqua-tmux.sock",
+                "mac_project_8779b_1",
+                "/Users/me/project",
+                true,
+                Engine::Claude,
+            ),
+            Ok("mac_project_8779b_2".to_string())
+        );
     }
 }

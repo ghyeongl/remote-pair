@@ -5,6 +5,7 @@
 //! `client::host` entries, empty entries are ignored, entries without `::` are identity
 //! mappings, and the longest matching client prefix wins.
 
+use crate::platform::Os;
 use std::fmt;
 
 /// One parsed `FOLDER_MAPS` entry: `(client_path, host_path)`.
@@ -53,6 +54,18 @@ pub fn parse_maps(raw: &str) -> Vec<FolderMap> {
 /// `case "$d" in "$c"|"$c"/*)` behavior. If no map matches, the canonicalized path is
 /// returned as a POSIX host-side path.
 pub fn map_to_host(client_path: &str, pairs: &[FolderMap]) -> Result<String, MapError> {
+    map_to_host_for_os(client_path, pairs, Os::current())
+}
+
+/// Resolve a client path while using the supplied client OS for prefix matching.
+///
+/// Windows-native clients compare path prefixes case-insensitively (drive letter and
+/// components). Unix clients keep the bash byte-exact prefix behavior.
+pub fn map_to_host_for_os(
+    client_path: &str,
+    pairs: &[FolderMap],
+    os: Os,
+) -> Result<String, MapError> {
     let path = canonicalize_client_path(client_path)?;
     let mut best_client = String::new();
     let mut best_host = String::new();
@@ -60,7 +73,7 @@ pub fn map_to_host(client_path: &str, pairs: &[FolderMap]) -> Result<String, Map
     for (client, host) in pairs {
         let candidate = canonicalize_client_path(client)?;
         if !candidate.is_empty()
-            && path_prefix_matches(&path, &candidate)
+            && path_prefix_matches(&path, &candidate, os)
             && candidate.len() > best_client.len()
         {
             best_client = candidate;
@@ -104,11 +117,18 @@ fn canonicalize_client_path(path: &str) -> Result<String, MapError> {
     Ok(out)
 }
 
-fn path_prefix_matches(path: &str, prefix: &str) -> bool {
-    path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+fn path_prefix_matches(path: &str, prefix: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        path.eq_ignore_ascii_case(prefix)
+            || (path.len() > prefix.len()
+                && path.as_bytes().get(prefix.len()) == Some(&b'/')
+                && path[..prefix.len()].eq_ignore_ascii_case(prefix))
+    } else {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
 }
 
 fn to_posix_path(path: &str) -> String {
@@ -226,6 +246,15 @@ mod tests {
     }
 
     #[test]
+    fn unix_prefix_match_is_byte_exact() {
+        let maps = parse_maps("/Users/Alice/Project::/host/project");
+        assert_eq!(
+            map_to_host_for_os("/users/alice/project/sub", &maps, Os::Mac).unwrap(),
+            "/users/alice/project/sub"
+        );
+    }
+
+    #[test]
     fn windows_forward_slash_input_matches_backslash_map() {
         let maps = parse_maps(r"C:\Users\me::/host/me");
         assert_eq!(
@@ -265,8 +294,26 @@ mod tests {
     fn windows_drive_letter_compare_is_case_insensitive() {
         let maps = parse_maps(r"c:\Users\me::/host/me");
         assert_eq!(
-            map_to_host(r"C:\Users\me\sub", &maps).unwrap(),
+            map_to_host_for_os(r"C:\Users\me\sub", &maps, Os::Windows).unwrap(),
             "/host/me/sub"
+        );
+    }
+
+    #[test]
+    fn windows_components_compare_case_insensitively() {
+        let maps = parse_maps(r"C:\Users\Alice\Project::/host/project");
+        assert_eq!(
+            map_to_host_for_os(r"c:\users\alice\project\Sub", &maps, Os::Windows).unwrap(),
+            "/host/project/Sub"
+        );
+    }
+
+    #[test]
+    fn windows_case_insensitive_prefix_still_requires_boundary() {
+        let maps = parse_maps(r"C:\Users\Alice\Project::/host/project");
+        assert_eq!(
+            map_to_host_for_os(r"c:\users\alice\projectile", &maps, Os::Windows).unwrap(),
+            "C:/users/alice/projectile"
         );
     }
 
