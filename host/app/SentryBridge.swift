@@ -102,8 +102,12 @@ enum SentryBridge {
         }
         guard let dsn = Bundle.main.object(forInfoDictionaryKey: dsnPlist) as? String,
               !dsn.isEmpty else {
-            // DSN not provisioned => do not init (no network). Stay no-op.
-            reporter = NoopCrashReporter(); return
+            // DSN not provisioned => do not init (no network). Stay no-op — but SAY so: a user who
+            // opted in deserves a visible reason uploads never happen. A silent Noop here hid a
+            // release pipeline that shipped every build DSN-less (RP_SENTRY_DSN unset in CI).
+            reporter = NoopCrashReporter()
+            log(.warn, "CRASH-REPORT: consent ON but RPSentryDSN missing from Info.plist — staying local-only (build with RP_SENTRY_DSN set)")
+            return
         }
         #if canImport(Sentry)
         // ── sentry-cocoa wiring point ────────────────────────────────────────────────────────────────
@@ -151,6 +155,33 @@ enum SentryBridge {
         // SDK not linked => keep no-op (build still compiles, no network).
         reporter = NoopCrashReporter()
         log(.info, "CRASH-REPORT: consent ON + DSN present, but Sentry SDK not linked in this build — staying local-only (no upload)")
+        #endif
+    }
+
+    /// End-to-end pipeline check for `XpairHost --sentry-self-test`: prints each gate's state, and
+    /// when the backend is active sends ONE synthetic marker event and flushes it. Exit 0 only when the
+    /// event was handed to the SDK and flushed; nonzero (with the failing gate printed) otherwise.
+    static func selfTest() -> Bool {
+        let consent = UserDefaults.standard.bool(forKey: consentKey)
+        let dsn = (Bundle.main.object(forInfoDictionaryKey: dsnPlist) as? String) ?? ""
+        print("consent (\(consentKey)):  \(consent ? "ON" : "OFF")")
+        print("DSN (\(dsnPlist)):        \(dsn.isEmpty ? "ABSENT" : "present")")
+        setupIfConsented()
+        print("backend:                 \(reporter.isActive ? "Sentry (active)" : "Noop")")
+        guard reporter.isActive else {
+            print("→ nothing uploads in this state; fix the gate(s) above (consent ON + DSN present + SDK linked) and re-run.")
+            return false
+        }
+        reporter.captureException(
+            name: "XpairSentrySelfTest",
+            reason: "synthetic self-test event (\(APP_VERSION))",
+            frames: ["--sentry-self-test"])
+        #if canImport(Sentry)
+        SentrySDK.flush(timeout: 5)   // returns Void; blocks up to the timeout draining the transport
+        print("→ test event sent + flushed (5s). Look for 'XpairSentrySelfTest' in the Sentry project.")
+        return true
+        #else
+        return false
         #endif
     }
 
