@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { WizardShell } from "@/components/onboarding/WizardShell";
-import { AnimatedStep } from "@/components/onboarding/AnimatedStep";
-import { useWizard } from "@/components/onboarding/useWizard";
-import { Button } from "@/components/ui/button";
+import { WizardShell } from "@shared/components/onboarding/WizardShell";
+import { AnimatedStep } from "@shared/components/onboarding/AnimatedStep";
+import { useWizard } from "@shared/components/onboarding/useWizard";
+import { Button } from "@shared/components/ui/button";
 import { StepWelcome } from "@/components/onboarding/client/StepWelcome";
 import { StepConsent } from "@/components/onboarding/client/StepConsent";
 import {

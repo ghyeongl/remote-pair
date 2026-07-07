@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { ArrowUpCircle, Check, Loader2, ShieldAlert } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { InstallProgressBar } from "@/components/onboarding/InstallProgressBar";
-import { StepDeadEnd } from "@/components/onboarding/StepDeadEnd";
+import { Button } from "@shared/components/ui/button";
+import { InstallProgressBar } from "@shared/components/onboarding/InstallProgressBar";
+import { StepDeadEnd } from "@shared/components/onboarding/StepDeadEnd";
 import { useT } from "@/lib/i18n";
 import type { DiscoveredHost } from "./StepDiscover";
 
