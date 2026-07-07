@@ -197,6 +197,7 @@ fn cmd_start_quote(arg: &str) -> String {
     for ch in arg.chars() {
         match ch {
             '"' => out.push_str("\\\""),
+            '%' => out.push_str("%%"),
             ch => out.push(ch),
         }
     }
@@ -577,14 +578,14 @@ end tell
             build_terminal_spawn(
                 Os::Windows,
                 "terminal",
-                "C:\\Program Files\\Xpair (Preview)\\xpair.exe",
-                "C:\\Users\\Alice\\Work Projects\\repo (main)",
+                "C:\\Program Files\\Xpair %Preview%\\xpair.exe",
+                "C:\\Users\\Alice\\%TEMP%\\repo (main)",
                 false,
             ),
             TerminalSpawn::Argv(vec![
                 "cmd".to_string(),
                 "/c".to_string(),
-                "start \"\" \"C:\\Program Files\\Xpair (Preview)\\xpair.exe\" \"launch\" \"C:\\Users\\Alice\\Work Projects\\repo (main)\"".to_string(),
+                "start \"\" \"C:\\Program Files\\Xpair %%Preview%%\\xpair.exe\" \"launch\" \"C:\\Users\\Alice\\%%TEMP%%\\repo (main)\"".to_string(),
             ])
         );
     }

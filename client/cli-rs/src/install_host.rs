@@ -577,7 +577,22 @@ where
 {
     let remote_cmd = build_release_download_install_remote_cmd(settings);
     match transport.ssh_exec(target, &remote_cmd) {
-        Ok(Output { code: 0, .. }) => Ok(()),
+        Ok(Output { code: 0, stdout }) if release_install_completed(&stdout) => Ok(()),
+        Ok(Output { code: 0, stdout }) => {
+            let detail = stdout.trim();
+            if detail.is_empty() {
+                let _ = writeln!(
+                    err,
+                    "HOST_APP_SELF_INSTALL_INCOMPLETE: release install completed without host app marker"
+                );
+            } else {
+                let _ = writeln!(
+                    err,
+                    "HOST_APP_SELF_INSTALL_INCOMPLETE: release install completed without host app marker\n{detail}"
+                );
+            }
+            Err(ExitCode::from(1))
+        }
         Ok(Output { code, stdout }) => {
             let detail = stdout.trim();
             if detail.is_empty() {
@@ -592,6 +607,12 @@ where
             Err(ExitCode::from(1))
         }
     }
+}
+
+fn release_install_completed(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|line| line.starts_with("__XPAIR_HOST_APP__:"))
 }
 
 fn build_release_download_install_remote_cmd(settings: &RuntimeSettings) -> String {
@@ -691,6 +712,17 @@ curl -fsSL "$url" -o "$zip"
 src="$tmp/extract/${app}.app"
 [ -d "$src" ] || { printf 'release zip did not contain %s.app\n' "$app" >&2; exit 1; }
 
+sign_cn="RemotePair Local Signing"
+if ! /usr/bin/codesign --verify --strict "$src" >/dev/null 2>&1; then
+  printf 'CODE_SIGNATURE_VERIFY_FAILED: codesign --verify --strict failed for %s\n' "$src"
+  exit 1
+fi
+leaf_cn="$(/usr/bin/codesign -dvv "$src" 2>&1 | awk -F= '/^Authority=/{print $2; exit}')"
+if [ "$leaf_cn" != "$sign_cn" ]; then
+  printf 'CODE_SIGNATURE_CERT_MISMATCH: expected leaf CN "%s", got "%s"\n' "$sign_cn" "${leaf_cn:-<none>}"
+  exit 1
+fi
+
 copy_app() {
   _src="$1"; _dest="$2"
   rm -rf "$_dest" 2>/dev/null || true
@@ -720,11 +752,31 @@ fi
 xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 pkill -f "/${app}.app/Contents/MacOS/${app}" 2>/dev/null || true
 sleep 1
-/bin/launchctl kickstart -k "gui/$(id -u)/${bundle}" 2>/dev/null || /usr/bin/open "$dest" 2>/dev/null || /usr/bin/open -a "$app" 2>/dev/null || true
+launch_marker="$tmp/launch-marker"
+: > "$launch_marker"
+launch_ok=0
+if /bin/launchctl kickstart -k "gui/$(id -u)/${bundle}" 2>/dev/null; then
+  launch_ok=1
+elif /usr/bin/open "$dest" 2>/dev/null; then
+  launch_ok=1
+elif /usr/bin/open -a "$app" 2>/dev/null; then
+  launch_ok=1
+fi
+[ "$launch_ok" = 1 ] || { printf 'HOST_APP_LAUNCH_FAILED: could not launch %s\n' "$dest"; exit 1; }
+host_env="$HOME/.xpair/host/host.env"
+status_json="$HOME/.xpair/host/logs/status.json"
+host_env_ready=0
+serving_state_seen=0
 for _i in 1 2 3 4 5 6 7 8 9 10; do
-  [ -s "$HOME/.xpair/host/host.env" ] && break
+  [ -s "$host_env" ] && host_env_ready=1
+  if [ -s "$status_json" ] && [ "$status_json" -nt "$launch_marker" ] && /usr/bin/grep -q '"serving"' "$status_json"; then
+    serving_state_seen=1
+  fi
+  [ "$host_env_ready" = 1 ] && [ "$serving_state_seen" = 1 ] && break
   sleep 0.5
 done
+[ "$host_env_ready" = 1 ] || { printf 'HOST_APP_SELF_INSTALL_INCOMPLETE: %s was not created\n' "$host_env"; exit 1; }
+[ "$serving_state_seen" = 1 ] || { printf 'HOST_APP_SERVING_STATE_TIMEOUT: %s did not report serving state after launch\n' "$status_json"; exit 1; }
 printf '__XPAIR_HOST_APP__:%s\n' "$dest"
 "#
 }
@@ -2104,15 +2156,65 @@ mod tests {
                 assert!(calls[1].remote_cmd.contains("/usr/bin/ditto -x -k"));
                 assert!(calls[1]
                     .remote_cmd
+                    .contains("/usr/bin/codesign --verify --strict \"$src\""));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("/usr/bin/codesign -dvv \"$src\""));
+                assert!(calls[1].remote_cmd.contains("RemotePair Local Signing"));
+                assert!(
+                    calls[1].remote_cmd.find("codesign --verify").unwrap()
+                        < calls[1]
+                            .remote_cmd
+                            .find("copy_app \"$src\" \"$dest\"")
+                            .unwrap()
+                );
+                assert!(calls[1]
+                    .remote_cmd
                     .contains("install_root=\"/Applications\""));
                 assert!(calls[1]
                     .remote_cmd
                     .contains("install_root=\"$HOME/Applications\""));
                 assert!(calls[1].remote_cmd.contains("/bin/launchctl kickstart -k"));
+                assert!(calls[1].remote_cmd.contains("HOST_APP_LAUNCH_FAILED"));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("HOST_APP_SERVING_STATE_TIMEOUT"));
                 assert_eq!(
                     calls[2].remote_cmd,
                     build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn release_install_zero_without_success_marker_is_failure() {
+        with_env(
+            &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
+            || {
+                let tmp = TestDir::new("release-install-no-marker");
+                let transport = MockTransport::new();
+                transport.push_response(1, "");
+                transport.push_response(0, "downloaded but not installed\n");
+                let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST");
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+
+                let code = run_with_transport(
+                    &strings(&["--host", "mac-mini", "--account", "alice"]),
+                    &tmp.client_env_path(),
+                    &transport,
+                    &io,
+                    &mut out,
+                    &mut err,
+                );
+
+                assert_eq!(code, ExitCode::from(1));
+                assert_eq!(String::from_utf8(out).unwrap(), "");
+                assert!(String::from_utf8(err)
+                    .unwrap()
+                    .contains("HOST_APP_SELF_INSTALL_INCOMPLETE"));
+                assert_eq!(transport.calls().len(), 2);
             },
         );
     }

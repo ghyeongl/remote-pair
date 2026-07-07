@@ -290,17 +290,37 @@ fn cmd_map(args: &[String]) -> ExitCode {
             let os = Os::current();
             let client_dir = canonical_client_dir(&args[1])
                 .unwrap_or_else(|_| normalize_client_dir_literal_for_os(&args[1], os));
-            let raw_maps = match resolve_raw_maps(&path) {
+            let raw_maps = match resolve_raw_maps_with_source(&path) {
                 Ok(raw_maps) => raw_maps,
                 Err(err) => {
                     eprintln!("xpair map: {err}");
                     return ExitCode::from(1);
                 }
             };
-            let kept = remove_client_from_raw_maps(&raw_maps, &client_dir, os);
+            let kept = remove_client_from_raw_maps(&raw_maps.value, &client_dir, os);
             if let Err(err) = config::set(&path, "FOLDER_MAPS", &kept) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
+            }
+            if kept.is_empty()
+                && matches!(
+                    raw_maps.source,
+                    RawMapsSource::FileFolderMaps | RawMapsSource::FileSyncRoots
+                )
+            {
+                match config::get(&path, "SYNC_ROOTS") {
+                    Ok(Some(sync_roots)) if !sync_roots.is_empty() => {
+                        if let Err(err) = config::set(&path, "SYNC_ROOTS", "") {
+                            eprintln!("xpair map: {err}");
+                            return ExitCode::from(1);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        eprintln!("xpair map: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
             }
             if let Err(err) = remove_map_mode_for_os(&path, &client_dir, os) {
                 eprintln!("xpair map: {err}");
@@ -413,17 +433,51 @@ fn resolve_host(path: &Path) -> std::io::Result<String> {
     config::get_cli(path, "host")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawMapsSource {
+    EnvFolderMaps,
+    EnvSyncRoots,
+    FileFolderMaps,
+    FileSyncRoots,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawMaps {
+    value: String,
+    source: RawMapsSource,
+}
+
 fn resolve_raw_maps(path: &Path) -> std::io::Result<String> {
+    Ok(resolve_raw_maps_with_source(path)?.value)
+}
+
+fn resolve_raw_maps_with_source(path: &Path) -> std::io::Result<RawMaps> {
     if let Some(raw_maps) = non_empty_env("FOLDER_MAPS") {
-        return Ok(raw_maps);
+        return Ok(RawMaps {
+            value: raw_maps,
+            source: RawMapsSource::EnvFolderMaps,
+        });
     }
     if let Some(raw_maps) = non_empty_env("SYNC_ROOTS") {
-        return Ok(raw_maps);
+        return Ok(RawMaps {
+            value: raw_maps,
+            source: RawMapsSource::EnvSyncRoots,
+        });
     }
     if let Some(raw_maps) = config::get(path, "FOLDER_MAPS")?.filter(|maps| !maps.is_empty()) {
-        return Ok(raw_maps);
+        return Ok(RawMaps {
+            value: raw_maps,
+            source: RawMapsSource::FileFolderMaps,
+        });
     }
-    Ok(config::get(path, "SYNC_ROOTS")?.unwrap_or_default())
+    let value = config::get(path, "SYNC_ROOTS")?.unwrap_or_default();
+    let source = if value.is_empty() {
+        RawMapsSource::None
+    } else {
+        RawMapsSource::FileSyncRoots
+    };
+    Ok(RawMaps { value, source })
 }
 
 fn resolve_raw_modes(path: &Path) -> std::io::Result<String> {
@@ -820,9 +874,35 @@ fn run_config(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> TestDir {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "xpair-main-test-{}-{id}-{name}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            TestDir { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     struct EnvGuard {
         saved: Vec<(&'static str, Option<OsString>)>,
@@ -863,6 +943,10 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    fn path_string(path: impl AsRef<Path>) -> String {
+        path.as_ref().to_string_lossy().into_owned()
     }
 
     #[test]
@@ -932,6 +1016,43 @@ mod tests {
             ),
             "/tmp/keep::/host/keep"
         );
+    }
+
+    #[test]
+    fn map_rm_clears_legacy_sync_roots_when_last_mapping_removed() {
+        let tmp = TestDir::new("legacy-sync-rm");
+        let client_dir = tmp.path.join("project");
+        fs::create_dir_all(&client_dir).unwrap();
+        let client_dir_s = path_string(fs::canonicalize(&client_dir).unwrap());
+        let client_env = tmp.path.join("client.env");
+        fs::write(
+            &client_env,
+            format!("SYNC_ROOTS={}::/host/project\n", client_dir_s),
+        )
+        .unwrap();
+        let client_env_s = path_string(&client_env);
+
+        with_env(
+            &[
+                ("CLIENT_ENV", Some(&client_env_s)),
+                ("FOLDER_MAPS", None),
+                ("SYNC_ROOTS", None),
+                ("RP_CLIENT_DIR", None),
+            ],
+            || {
+                assert_eq!(cmd_map(&strings(&["rm", &client_dir_s])), ExitCode::SUCCESS);
+            },
+        );
+
+        assert_eq!(
+            config::get(&client_env, "FOLDER_MAPS").unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(
+            config::get(&client_env, "SYNC_ROOTS").unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(resolve_raw_maps(&client_env).unwrap(), "");
     }
 
     #[test]

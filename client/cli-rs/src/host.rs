@@ -55,13 +55,16 @@ pub(crate) struct AppIdentity {
 }
 
 impl AppIdentity {
-    fn load() -> AppIdentity {
+    fn load(rp_host_dir: &Path) -> AppIdentity {
         AppIdentity {
-            app_name: non_empty_env("APP_NAME").unwrap_or_else(|| DEFAULT_APP_NAME.to_string()),
-            bundle_prefix: non_empty_env("BUNDLE_PREFIX")
+            app_name: resolve_host_env_stack_value(rp_host_dir, "APP_NAME")
+                .unwrap_or_else(|| DEFAULT_APP_NAME.to_string()),
+            bundle_prefix: resolve_host_env_stack_value(rp_host_dir, "BUNDLE_PREFIX")
                 .unwrap_or_else(|| DEFAULT_BUNDLE_PREFIX.to_string()),
-            forward_app: FORWARD_APP.to_string(),
-            forward_bundle: FORWARD_BUNDLE.to_string(),
+            forward_app: resolve_host_env_stack_value(rp_host_dir, "FORWARD_APP")
+                .unwrap_or_else(|| FORWARD_APP.to_string()),
+            forward_bundle: resolve_host_env_stack_value(rp_host_dir, "FORWARD_BUNDLE")
+                .unwrap_or_else(|| FORWARD_BUNDLE.to_string()),
         }
     }
 }
@@ -109,7 +112,7 @@ impl LocalContext {
 
         LocalContext {
             os: Os::current(),
-            identity: AppIdentity::load(),
+            identity: AppIdentity::load(&rp_host_dir),
             common: load_host_common(&rp_host_dir, &home),
             host_env: load_host_env(&rp_host_dir),
             home,
@@ -415,6 +418,15 @@ fn load_host_env(rp_host_dir: &Path) -> HostEnv {
     }
 }
 
+fn resolve_host_env_stack_value(rp_host_dir: &Path, key: &str) -> Option<String> {
+    non_empty_env(key).or_else(|| {
+        config::get(rp_host_dir.join("host.env"), key)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())
+    })
+}
+
 fn default_rp_host_dir() -> PathBuf {
     config::default_rp_dir()
         .ok()
@@ -613,6 +625,12 @@ mod tests {
         fn set(key: &'static str, value: &str) -> EnvGuard {
             let old = std::env::var(key).ok();
             std::env::set_var(key, value);
+            EnvGuard { key, old }
+        }
+
+        fn unset(key: &'static str) -> EnvGuard {
+            let old = std::env::var(key).ok();
+            std::env::remove_var(key);
             EnvGuard { key, old }
         }
     }
@@ -821,5 +839,33 @@ mod tests {
         let common = load_host_common(&rp_host_dir, &tmp.path.join("home"));
 
         assert_eq!(common.aqua_sock, "/tmp/env-aqua.sock");
+    }
+
+    #[test]
+    fn app_identity_loads_from_process_env_then_host_env_stack() {
+        let _app_guard = EnvGuard::set("APP_NAME", "EnvHost");
+        let _bundle_guard = EnvGuard::unset("BUNDLE_PREFIX");
+        let _forward_app_guard = EnvGuard::unset("FORWARD_APP");
+        let _forward_bundle_guard = EnvGuard::unset("FORWARD_BUNDLE");
+        let tmp = TestDir::new("identity-env-stack");
+        let rp_host_dir = tmp.path.join("host");
+        fs::create_dir_all(&rp_host_dir).unwrap();
+        fs::write(
+            rp_host_dir.join("common.env"),
+            "APP_NAME=CommonHost\nBUNDLE_PREFIX=com.example.common\nFORWARD_APP=CommonForward\nFORWARD_BUNDLE=com.example.common-forward\n",
+        )
+        .unwrap();
+        fs::write(
+            rp_host_dir.join("host.env"),
+            "APP_NAME=FileHost\nBUNDLE_PREFIX=com.example.host\nFORWARD_APP=FileForward\nFORWARD_BUNDLE=com.example.forward\n",
+        )
+        .unwrap();
+
+        let identity = AppIdentity::load(&rp_host_dir);
+
+        assert_eq!(identity.app_name, "EnvHost");
+        assert_eq!(identity.bundle_prefix, "com.example.host");
+        assert_eq!(identity.forward_app, "FileForward");
+        assert_eq!(identity.forward_bundle, "com.example.forward");
     }
 }
