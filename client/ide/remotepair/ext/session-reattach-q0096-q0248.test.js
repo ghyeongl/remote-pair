@@ -53,8 +53,8 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
 
   assert.match(
     patch,
-    /function cachedDetachedSessions\(\): readonly string\[\] \{[\s\S]*const local = localAttachedSessionNames\(\);[\s\S]*liveSessionCache\.filter\(s => !local\.has\(s\.name\)\)\.map\(s => s\.name\)/,
-    "detached cards must come from live tmux sessions that are not local attached terminal tabs",
+    /function cachedDetachedSessions\(\): readonly string\[\] \{[\s\S]*const local = localAttachedSessionNames\(\);[\s\S]*liveSessionCache\.filter\(s => s\.attached === 0 && !local\.has\(s\.name\)\)\.map\(s => s\.name\)/,
+    "detached cards must come from unattached live tmux sessions that are not local attached terminal tabs",
   );
   assert.match(
     patch,
@@ -64,7 +64,22 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
   assert.match(
     patch,
     /function cachedRemoteAttachedSessions\(\): readonly string\[\] \{[\s\S]*s\.attached > 0 && !local\.has\(s\.name\)/,
-    "sessions attached elsewhere must still appear outside the local Attached tab",
+    "sessions attached elsewhere must be tracked separately from Detached cards",
+  );
+  assert.match(
+    patch,
+    /const remoteAttached = cachedRemoteAttachedSessions\(\);[\s\S]*remoteAttached\.length > 0 \? localize\('remotepairAttachedElsewhere', "Some sessions are attached in another window or device\."\)/,
+    "attached-elsewhere sessions must render only an informational hint when no detached sessions exist",
+  );
+  assert.doesNotMatch(
+    patch,
+    /selecting one will reattach it here/,
+    "attached-elsewhere hint must not imply selecting it will steal the session",
+  );
+  assert.match(
+    patch,
+    /const names = cachedDetachedSessions\(\);[\s\S]*this\.recordHistory\(names\);[\s\S]*for \(const name of names\)/,
+    "Detached must record displayed live detached names into last-seen History",
   );
   assert.match(
     patch,

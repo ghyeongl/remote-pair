@@ -43,6 +43,11 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
     "restore must reuse the real reattach path that opens a terminal and runs xpair attach",
   );
   assert.match(
+    terminalSidebar,
+    /private readonly pendingReattachSessions: string\[\] = \[\];[\s\S]*reattachSession\(name: string\): void[\s\S]*if \(!this\.editorPart\) \{[\s\S]*this\.queueReattach\(sessionName\);[\s\S]*private flushPendingReattachSessions\(\): void \{[\s\S]*for \(const name of names\) \{[\s\S]*this\.launchReattach\(name\);[\s\S]*this\.resolveEmbeddedPartReady\(\);\n\+\s*this\.flushPendingReattachSessions\(\);/,
+    "startup restore reattach requests must queue until the embedded EditorPart exists, then flush in order",
+  );
+  assert.match(
     sessionManager,
     /HISTORY_STORAGE_KEY[\s\S]*StorageScope\.WORKSPACE/,
     "terminal/session state must be persisted across workbench launches",
@@ -86,6 +91,21 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
     extension,
     /restoreOpenedSessionsOnActivation\(\)[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.reattachSession", name\)/,
     "activation restore must execute the sidebar reattach command for stored live names",
+  );
+  assert.match(
+    extension,
+    /restoreOpenedSessionsOnActivation\(\)[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*\}/,
+    "restore must keep the opened-session write gate and enable writes only after restore completes",
+  );
+  assert.doesNotMatch(
+    extension,
+    /writeOpenedSessionsNow\(host, \[\]\)/,
+    "restore must not clear the saved opened-session snapshot when the live list is empty",
+  );
+  assert.match(
+    extension,
+    /function flushOpenedSessionsWriteOnDeactivate\(\)[\s\S]*clearTimeout\(openedSessionsWriteTimer\);[\s\S]*const pending = openedSessionsPendingNames \|\| \[\];[\s\S]*host = getValidHost\(\);[\s\S]*writeOpenedSessionsNow\(host, pending\);[\s\S]*function deactivate\(\)[\s\S]*flushOpenedSessionsWriteOnDeactivate\(\)/,
+    "deactivate must synchronously drain any pending debounced opened-session write with guarded host lookup",
   );
 });
 

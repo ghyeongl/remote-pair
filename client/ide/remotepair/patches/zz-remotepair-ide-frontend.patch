@@ -2574,7 +2574,7 @@ new file mode 100644
 index 0000000..6e5d586
 --- /dev/null
 +++ b/src/vs/workbench/contrib/terminal/browser/remotePairSessionManager.ts
-@@ -0,0 +1,707 @@
+@@ -0,0 +1,709 @@
 +/*---------------------------------------------------------------------------------------------
 + *  RemotePair: bottom-panel session tabs. Three Panel view containers — Attached / Detached /
 + *  History — each surfaced as a horizontal TAB in the bottom-panel composite bar (exactly like
@@ -2762,7 +2762,7 @@ index 0000000..6e5d586
 +
 +function cachedDetachedSessions(): readonly string[] {
 +	const local = localAttachedSessionNames();
-+	return liveSessionCache.filter(s => !local.has(s.name)).map(s => s.name);
++	return liveSessionCache.filter(s => s.attached === 0 && !local.has(s.name)).map(s => s.name);
 +}
 +
 +function cachedRemoteAttachedSessions(): readonly string[] {
@@ -3078,15 +3078,17 @@ index 0000000..6e5d586
 +			return;
 +		}
 +		const names = cachedDetachedSessions();
++		const remoteAttached = cachedRemoteAttachedSessions();
 +		if (names.length === 0) {
-+			this.addEmpty(sessionCardCause ?? localize('remotepairNoDetached', "No detached sessions"));
++			this.addEmpty(sessionCardCause ?? (remoteAttached.length > 0 ? localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device.") : localize('remotepairNoDetached', "No detached sessions")));
 +			return;
 +		}
++		this.recordHistory(names);
 +		if (sessionCardCause) {
 +			this.addEmpty(sessionCardCause);
 +		}
-+		if (cachedRemoteAttachedSessions().length > 0) {
-+			this.addEmpty(localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device; selecting one will reattach it here."));
++		if (remoteAttached.length > 0) {
++			this.addEmpty(localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device."));
 +		}
 +		for (const name of names) {
 +			this.addCard(name, () => {
@@ -3430,7 +3432,7 @@ new file mode 100644
 index 00000000..820a8de4
 --- /dev/null
 +++ b/src/vs/workbench/contrib/terminal/browser/remotePairTerminalSidebar.ts
-@@ -0,0 +1,781 @@
+@@ -0,0 +1,801 @@
 +/*---------------------------------------------------------------------------------------------
 + *  RemotePair: "Terminal" sidebar container that embeds a real EditorPart so its
 + *  content is editor-tab-based (horizontal tabs), terminal-specialized.
@@ -3551,6 +3553,7 @@ index 00000000..820a8de4
 +	private static readonly INPUT_RECOVERY_GUIDANCE_COOLDOWN_MS = 30000;
 +
 +	private lastInputRecoveryGuidanceAt = 0;
++	private readonly pendingReattachSessions: string[] = [];
 +
 +	// Resolves once the embedded EditorPart has been created. The part is built on the animation
 +	// frame AFTER the view first renders (see renderBody — it cannot be built synchronously), so
@@ -3579,7 +3582,7 @@ index 00000000..820a8de4
 +
 +		// G004: route the bottom Session Manager's reattach requests into this sidebar's
 +		// embedded EditorPart group, reusing the same terminal-open path.
-+		setSessionReattacher((name) => this.launchReattach(name));
++		setSessionReattacher((name) => this.reattachSession(name));
 +
 +		// G004: supply the Session Manager's Attached row with the sidebar's own terminal
 +		// set. These instances bypass ITerminalService (S0 isolation), so we source them here.
@@ -3635,7 +3638,25 @@ index 00000000..820a8de4
 +			rpLog('warn', `reattachSession rejected invalid session name: ${name}`);
 +			return;
 +		}
++		if (!this.editorPart) {
++			this.queueReattach(sessionName);
++			return;
++		}
 +		this.launchReattach(sessionName);
++	}
++
++	private queueReattach(name: string): void {
++		if (this.pendingReattachSessions.includes(name)) {
++			return;
++		}
++		this.pendingReattachSessions.push(name);
++	}
++
++	private flushPendingReattachSessions(): void {
++		const names = this.pendingReattachSessions.splice(0);
++		for (const name of names) {
++			this.launchReattach(name);
++		}
 +	}
 +
 +	private launchReattach(name: string): void {
@@ -3920,8 +3941,9 @@ index 00000000..820a8de4
 +		// `closeActiveEditor` keybinding still targets the main part's activeGroup; out of scope here.)
 +		this.partDisposables.add(editorPartsView.registerLookupPart(part));
 +
-+		// Unblock any per-folder Browser action that was queued while the part was still building.
++		// Unblock any per-folder Browser action or restore reattach queued while the part was still building.
 +		this.resolveEmbeddedPartReady();
++		this.flushPendingReattachSessions();
 +
 +		// Blank-fix: drive the embedded part's visibility from the ViewPane body.
 +		// Editor panes (including TerminalEditor/xterm) only attach and size when their

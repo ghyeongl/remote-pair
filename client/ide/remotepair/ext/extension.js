@@ -1796,6 +1796,23 @@ function scheduleOpenedSessionsWrite(names) {
   }, OPENED_SESSIONS_DEBOUNCE_MS);
 }
 
+function flushOpenedSessionsWriteOnDeactivate() {
+  if (!openedSessionsWriteTimer) return;
+  clearTimeout(openedSessionsWriteTimer);
+  openedSessionsWriteTimer = null;
+  const pending = openedSessionsPendingNames || [];
+  openedSessionsPendingNames = null;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during deactivate flush: ${e && e.message ? e.message : e}`, "warn");
+    return;
+  }
+  if (!host) return;
+  writeOpenedSessionsNow(host, pending);
+}
+
 function enableOpenedSessionWrites() {
   openedSessionsWritesEnabled = true;
 }
@@ -1814,8 +1831,6 @@ async function waitForAvailableSessionList() {
 async function restoreOpenedSessionsOnActivation() {
   const host = getValidHost();
   const openedNames = host ? readOpenedSessions(OPENED_SESSIONS_FILE, host, { log }) : [];
-  let sessionListWasAvailable = false;
-  let liveStoredNames = 0;
   let restored = 0;
 
   try {
@@ -1832,12 +1847,10 @@ async function restoreOpenedSessionsOnActivation() {
       log("opened sessions: session list unavailable during restore; keeping snapshot", "debug");
       return 0;
     }
-    sessionListWasAvailable = true;
 
     const live = new Set(list.sessions.map((entry) => entry.name));
     for (const name of openedNames) {
       if (!SESSION_NAME_RE.test(name) || !live.has(name)) continue;
-      liveStoredNames += 1;
       try {
         await vscode.commands.executeCommand("remotepair.terminalSidebar.reattachSession", name);
         restored += 1;
@@ -1848,9 +1861,6 @@ async function restoreOpenedSessionsOnActivation() {
     return restored;
   } finally {
     enableOpenedSessionWrites();
-    if (host && openedNames.length > 0 && sessionListWasAvailable && liveStoredNames === 0) {
-      writeOpenedSessionsNow(host, []);
-    }
   }
 }
 
@@ -2385,6 +2395,7 @@ function activate(context) {
 function deactivate() {
   // Stop the heartbeat and best-effort remove the host file so the host expires this client promptly.
   try { heartbeat.stopHeartbeat(); } catch { /* never let teardown throw */ }
+  try { flushOpenedSessionsWriteOnDeactivate(); } catch { /* never let teardown throw */ }
 }
 
 module.exports = { activate, deactivate, RemoteDesktopPanel };
