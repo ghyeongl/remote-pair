@@ -2557,6 +2557,16 @@ mod tests {
     }
 
     #[test]
+    fn win32_launch_resolves_unc_child_under_mapped_share_root() {
+        let maps = parse_maps("//office-mac.local/Project::/Users/alice/Project");
+
+        assert_eq!(
+            map_to_host_for_os(r"\\OFFICE-MAC.local\project\src", &maps, Os::Windows).unwrap(),
+            "/Users/alice/Project/src"
+        );
+    }
+
+    #[test]
     fn resolves_target_precedence_like_attach() {
         assert_eq!(
             resolve_target(Some(Target::Local), false, "mac"),

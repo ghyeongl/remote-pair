@@ -17,7 +17,7 @@ use xpair::host_permissions;
 use xpair::install_host;
 use xpair::launch;
 use xpair::logs;
-use xpair::mapping::{parse_maps, FolderMap};
+use xpair::mapping::{canonicalize_client_path, discover_unc_for_hostpath, parse_maps, FolderMap};
 use xpair::notify;
 use xpair::open_gui;
 use xpair::platform::Os;
@@ -238,10 +238,10 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 eprintln!("{message}");
                 return ExitCode::from(2);
             }
-            let client_dir = match canonical_client_dir(&add.client) {
+            let client_dir = match canonical_client_dir_for_os(&add.client, os) {
                 Ok(dir) => dir,
-                Err(()) => {
-                    eprintln!("client path not found: {}", add.client);
+                Err(err) => {
+                    eprintln!("{err}");
                     return ExitCode::from(1);
                 }
             };
@@ -258,7 +258,9 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
 
-            let method = add.method.unwrap_or_else(|| infer_map_method(&client_dir));
+            let method = add
+                .method
+                .unwrap_or_else(|| infer_map_method_for_os(&client_dir, os));
             if !matches!(method.as_str(), "mount" | "sync") {
                 eprintln!("invalid method: {method} (mount|sync)");
                 return ExitCode::from(2);
@@ -535,14 +537,53 @@ fn parse_map_add_args(args: &[String]) -> Result<MapAddArgs, String> {
 }
 
 fn validate_map_add_args_for_os(add: &MapAddArgs, os: Os) -> Result<(), String> {
-    if os == Os::Windows && add.host.is_none() {
-        Err(
+    if os != Os::Windows {
+        return Ok(());
+    }
+
+    if add.host.is_none() {
+        return Err(
             "map add on Windows requires an explicit mac host path: xpair map add <clientDir> <hostDir>"
                 .to_string(),
-        )
-    } else {
-        Ok(())
+        );
     }
+    if add.method.as_deref() == Some("sync") {
+        return Err(
+            "sync mappings are not supported on Windows yet; use a UNC or mapped-drive path with --method mount"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClientDirError {
+    NotFound { path: String },
+    UncUnavailable { path: String, unc: String },
+    Invalid { message: String },
+}
+
+impl std::fmt::Display for ClientDirError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientDirError::NotFound { path } => write!(f, "client path not found: {path}"),
+            ClientDirError::UncUnavailable { path, unc } => write!(
+                f,
+                "client path not found: {path}\nHint: if this share needs credentials, run: net use {unc} /persistent:yes"
+            ),
+            ClientDirError::Invalid { message } => f.write_str(message),
+        }
+    }
+}
+
+fn canonical_client_dir_for_os(path: &str, os: Os) -> Result<String, ClientDirError> {
+    if os == Os::Windows {
+        return canonical_windows_client_dir(path);
+    }
+    canonical_client_dir(path).map_err(|()| ClientDirError::NotFound {
+        path: path.to_string(),
+    })
 }
 
 fn canonical_client_dir(path: &str) -> Result<String, ()> {
@@ -554,6 +595,40 @@ fn canonical_client_dir(path: &str) -> Result<String, ()> {
     }
 }
 
+fn canonical_windows_client_dir(path: &str) -> Result<String, ClientDirError> {
+    let canonical = fs::canonicalize(path).map_err(|_| windows_client_dir_error(path))?;
+    if !canonical.is_dir() {
+        return Err(windows_client_dir_error(path));
+    }
+    let raw = canonical.to_string_lossy();
+    let normalized = canonicalize_client_path(&raw).map_err(|err| ClientDirError::Invalid {
+        message: err.to_string(),
+    })?;
+    Ok(trim_windows_cmp_path(&normalized))
+}
+
+fn windows_client_dir_error(path: &str) -> ClientDirError {
+    if let Some(unc) = net_use_unc_target(path) {
+        ClientDirError::UncUnavailable {
+            path: path.to_string(),
+            unc,
+        }
+    } else {
+        ClientDirError::NotFound {
+            path: path.to_string(),
+        }
+    }
+}
+
+fn net_use_unc_target(path: &str) -> Option<String> {
+    let normalized = canonicalize_client_path(path).ok()?;
+    let rest = normalized.strip_prefix("//")?;
+    let mut parts = rest.split('/').filter(|part| !part.is_empty());
+    let server = parts.next()?;
+    let share = parts.next()?;
+    Some(format!(r"\\{server}\{share}"))
+}
+
 fn is_mapped(client_dir: &str, pairs: &[FolderMap], os: Os) -> bool {
     pairs
         .iter()
@@ -562,23 +637,18 @@ fn is_mapped(client_dir: &str, pairs: &[FolderMap], os: Os) -> bool {
 
 fn path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
     if os == Os::Windows {
-        path.eq_ignore_ascii_case(prefix)
-            || (path.len() > prefix.len()
-                && path
-                    .as_bytes()
-                    .get(prefix.len())
-                    .is_some_and(|ch| is_windows_separator(*ch))
-                && path[..prefix.len()].eq_ignore_ascii_case(prefix))
+        let path = normalize_windows_path_for_cmp(path);
+        let prefix = normalize_windows_path_for_cmp(prefix);
+        path == prefix
+            || path
+                .strip_prefix(&prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
     } else {
         path == prefix
             || path
                 .strip_prefix(prefix)
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }
-}
-
-fn is_windows_separator(ch: u8) -> bool {
-    matches!(ch, b'/' | b'\\')
 }
 
 fn set_map_mode(path: &Path, client_dir: &str, method: &str) -> std::io::Result<()> {
@@ -663,14 +733,16 @@ fn normalize_posix_path_for_cmp(path: &str) -> String {
 }
 
 fn normalize_windows_path_for_cmp(path: &str) -> String {
-    let mut normalized = path.replace('/', "\\");
-    if let Some(stripped) = normalized.strip_prefix(r"\\?\") {
-        normalized = stripped.to_string();
-    }
-    while normalized.len() > 3 && normalized.ends_with('\\') {
+    let normalized = canonicalize_client_path(path).unwrap_or_else(|_| path.replace('\\', "/"));
+    trim_windows_cmp_path(&normalized).to_ascii_lowercase()
+}
+
+fn trim_windows_cmp_path(path: &str) -> String {
+    let mut normalized = path.replace('\\', "/");
+    while normalized.len() > 3 && normalized.ends_with('/') {
         normalized.pop();
     }
-    normalized.to_ascii_lowercase()
+    normalized
 }
 
 fn render_map_json(pairs: &[FolderMap], modes: &[FolderMap]) -> String {
@@ -684,19 +756,27 @@ fn render_map_json(pairs: &[FolderMap], modes: &[FolderMap]) -> String {
         out.push_str(",\"host\":");
         push_json_quoted(&mut out, host);
         out.push_str(",\"method\":");
-        push_json_quoted(&mut out, &map_mode_for(client, modes));
+        push_json_quoted(&mut out, &map_mode_for_os(client, modes, Os::current()));
         out.push('}');
     }
     out.push(']');
     out
 }
 
-fn map_mode_for(client: &str, modes: &[FolderMap]) -> String {
+fn map_mode_for_os(client: &str, modes: &[FolderMap], os: Os) -> String {
     modes
         .iter()
         .find(|(mode_client, _)| mode_client == client)
         .map(|(_, mode)| mode.clone())
-        .unwrap_or_else(|| infer_map_method(client))
+        .unwrap_or_else(|| infer_map_method_for_os(client, os))
+}
+
+fn infer_map_method_for_os(client: &str, os: Os) -> String {
+    if os == Os::Windows {
+        "mount".to_string()
+    } else {
+        infer_map_method(client)
+    }
 }
 
 fn infer_map_method(client: &str) -> String {
@@ -773,14 +853,48 @@ fn run_tool_or_windows_gate(verb: &str, tool: &str, args: &[String]) -> ExitCode
     if Os::current() == Os::Windows {
         match verb {
             "editor" | "desktop" => eprintln!("xpair {verb}: IDE-driven on Windows"),
-            "mount" => eprintln!(
-                "xpair mount: Windows uses UNC paths — add the mapping with: xpair map add <UNC-or-drive path> <host path>"
-            ),
+            "mount" => eprintln!("{}", windows_mount_guidance(args)),
             _ => eprintln!("xpair {verb}: unavailable on Windows"),
         }
         return ExitCode::from(2);
     }
     tools::run_passthrough(tool, args)
+}
+
+fn windows_mount_guidance(args: &[String]) -> String {
+    windows_mount_guidance_with_host(args, configured_remote_host_for_guidance().as_deref())
+}
+
+fn configured_remote_host_for_guidance() -> Option<String> {
+    if let Some(host) = non_empty_env("REMOTE_HOST").filter(|host| config::valid_host(host)) {
+        return Some(host);
+    }
+    let path = config::default_client_env_path().ok()?;
+    resolve_host(&path).ok().filter(|host| !host.is_empty())
+}
+
+fn windows_mount_guidance_with_host(args: &[String], host: Option<&str>) -> String {
+    let host_path = match args.first().map(String::as_str) {
+        Some("mount") => args.get(1).map(String::as_str),
+        Some(value) if value.starts_with('/') => Some(value),
+        _ => None,
+    };
+    let Some(host_path) = host_path.filter(|value| !value.is_empty()) else {
+        return "xpair mount: Windows uses UNC paths; use: xpair map add \\\\<smbHost>\\<share> <host path>"
+            .to_string();
+    };
+    let Some(host) = host else {
+        return format!(
+            "xpair mount: Windows uses UNC paths; configure REMOTE_HOST, then use: xpair map add \\\\<smbHost>\\<share> {host_path}"
+        );
+    };
+    let Some(unc) = discover_unc_for_hostpath(host, host_path) else {
+        return format!(
+            "xpair mount: Windows uses UNC paths; use: xpair map add \\\\<smbHost>\\<share> {host_path}"
+        );
+    };
+    let unc_arg = unc.root.replace('/', "\\");
+    format!("xpair mount: Windows uses UNC paths; use: xpair map add {unc_arg} {host_path}")
 }
 
 fn resolve_aqua_sock(path: &Path) -> std::io::Result<String> {
@@ -976,6 +1090,11 @@ mod tests {
             "c:/users/alice/project/",
             Os::Windows
         ));
+        assert!(map_client_eq_for_os(
+            r"\\?\UNC\Office-Mac.local\Project",
+            "//office-mac.local/project/",
+            Os::Windows
+        ));
         assert!(!map_client_eq_for_os(
             r"C:\Users\Alice\ProjectX",
             r"c:\users\alice\project",
@@ -989,6 +1108,14 @@ mod tests {
             remove_client_from_raw_maps(
                 r"C:\Users\Alice\Project::/host/project;D:\Other::/host/other",
                 "c:/users/alice/project/",
+                Os::Windows,
+            ),
+            r"D:\Other::/host/other"
+        );
+        assert_eq!(
+            remove_client_from_raw_maps(
+                r"//office-mac.local/Project::/Users/alice/Project;D:\Other::/host/other",
+                r"\\?\UNC\office-mac.local\project",
                 Os::Windows,
             ),
             r"D:\Other::/host/other"
@@ -1096,6 +1223,56 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(validate_map_add_args_for_os(&add, Os::Windows), Ok(()));
+
+        let add = parse_map_add_args(&strings(&[
+            r"\\office-mac.local\Project",
+            "/Users/alice/Project",
+            "--method",
+            "sync",
+        ]))
+        .unwrap();
+        assert_eq!(
+            validate_map_add_args_for_os(&add, Os::Windows),
+            Err(
+                "sync mappings are not supported on Windows yet; use a UNC or mapped-drive path with --method mount"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn windows_map_add_unc_failures_include_net_use_hint() {
+        assert_eq!(
+            net_use_unc_target(r"\\?\UNC\office-mac.local\Project\src").unwrap(),
+            r"\\office-mac.local\Project"
+        );
+        assert_eq!(
+            windows_client_dir_error(r"\\office-mac.local\Project").to_string(),
+            "client path not found: \\\\office-mac.local\\Project\nHint: if this share needs credentials, run: net use \\\\office-mac.local\\Project /persistent:yes"
+        );
+    }
+
+    #[test]
+    fn windows_mapping_mode_defaults_to_direct_mount() {
+        assert_eq!(
+            infer_map_method_for_os("//office-mac.local/Project", Os::Windows),
+            "mount"
+        );
+        assert_eq!(
+            map_mode_for_os("//office-mac.local/Project", &[], Os::Windows),
+            "mount"
+        );
+    }
+
+    #[test]
+    fn windows_mount_guidance_uses_concrete_unc_suggestion() {
+        assert_eq!(
+            windows_mount_guidance_with_host(
+                &strings(&["mount", "/Users/alice/Projects/foo"]),
+                Some("alice@office-mac.local"),
+            ),
+            r"xpair mount: Windows uses UNC paths; use: xpair map add \\office-mac.local\foo /Users/alice/Projects/foo"
+        );
     }
 
     #[test]
