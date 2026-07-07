@@ -471,7 +471,10 @@ fn path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
     if os == Os::Windows {
         path.eq_ignore_ascii_case(prefix)
             || (path.len() > prefix.len()
-                && path.as_bytes().get(prefix.len()) == Some(&b'/')
+                && path
+                    .as_bytes()
+                    .get(prefix.len())
+                    .is_some_and(|ch| is_windows_separator(*ch))
                 && path[..prefix.len()].eq_ignore_ascii_case(prefix))
     } else {
         path == prefix
@@ -479,6 +482,10 @@ fn path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
                 .strip_prefix(prefix)
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }
+}
+
+fn is_windows_separator(ch: u8) -> bool {
+    matches!(ch, b'/' | b'\\')
 }
 
 fn set_map_mode(path: &Path, client_dir: &str, method: &str) -> std::io::Result<()> {
@@ -686,5 +693,33 @@ fn run_config(args: &[String]) -> ExitCode {
             eprintln!("config [list|get <key>|set <key> <value>|maps]");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_child_containment_accepts_forward_and_backslash_boundaries() {
+        assert!(path_eq_or_child_for_os(
+            r"C:\Users\Alice\Project\Child",
+            r"c:\users\alice\project",
+            Os::Windows
+        ));
+        assert!(path_eq_or_child_for_os(
+            "C:/Users/Alice/Project/Child",
+            "c:/users/alice/project",
+            Os::Windows
+        ));
+    }
+
+    #[test]
+    fn windows_child_containment_still_requires_separator_boundary() {
+        assert!(!path_eq_or_child_for_os(
+            r"C:\Users\Alice\Projectile",
+            r"c:\users\alice\project",
+            Os::Windows
+        ));
     }
 }

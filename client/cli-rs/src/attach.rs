@@ -75,7 +75,18 @@ pub fn resolve_target(pref: Option<Target>, local_mode: bool, host: &str) -> Tar
 
 /// Build the local argv for the interactive SSH attach handoff.
 pub fn build_remote_attach_argv(os: Os, host: &str, session: &str, aqua_sock: &str) -> Vec<String> {
+    build_remote_attach_argv_with_identity(os, host, session, aqua_sock, &[])
+}
+
+pub(crate) fn build_remote_attach_argv_with_identity(
+    os: Os,
+    host: &str,
+    session: &str,
+    aqua_sock: &str,
+    identity_args: &[String],
+) -> Vec<String> {
     let mut argv = vec!["ssh".to_string(), "-tt".to_string()];
+    argv.extend(identity_args.iter().cloned());
     argv.extend(
         os.ssh_mux_neutralizer_args()
             .iter()
@@ -224,11 +235,12 @@ fn run_remote_attach(
     }
 
     emit_terminal_title(session);
-    spawn_and_wait(&build_remote_attach_argv(
+    spawn_and_wait(&build_remote_attach_argv_with_identity(
         Os::current(),
         host,
         session,
         aqua_sock,
+        &session::pairing_identity_args(),
     ))
 }
 

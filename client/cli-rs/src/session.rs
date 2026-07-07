@@ -5,8 +5,10 @@
 //! JSON is compact with stable key order.
 
 use std::io;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use crate::config;
 use crate::platform::Os;
 use crate::remote_quote;
 use crate::transport::{Output, Transport};
@@ -31,6 +33,7 @@ impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
         let os = Os::current();
         let out = Command::new("ssh")
+            .args(pairing_identity_args())
             .args(os.ssh_mux_neutralizer_args())
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"])
             .arg(host)
@@ -44,6 +47,21 @@ impl Transport for SshTransport {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         })
     }
+}
+
+/// SSH identity arguments for the restricted host pairing key.
+///
+/// Bash offers `$RP_HOST_DIR/pairing_ed25519` with `-i` only, deliberately without
+/// `IdentitiesOnly`, so an unproven pairing key does not suppress the user's normal keys.
+pub fn pairing_identity_args() -> Vec<String> {
+    match pairing_key_path() {
+        Ok(path) if path.is_file() => vec!["-i".to_string(), path.to_string_lossy().into_owned()],
+        _ => Vec::new(),
+    }
+}
+
+fn pairing_key_path() -> io::Result<PathBuf> {
+    Ok(config::default_rp_dir()?.join("pairing_ed25519"))
 }
 
 /// Parse tab-separated `name<TAB>attached` rows.

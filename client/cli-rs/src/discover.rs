@@ -25,7 +25,9 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::config;
 use crate::platform::Os;
+use crate::session;
 
 /// Roles that mark a peer as advertising the Xpair service (key-auth `connect`, not plain `setup`).
 const XPAIR_ROLES: &[&str] = &["host", "both", "client"];
@@ -543,7 +545,7 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 
     let aliases = parse_ssh_config_aliases(&read_ssh_config());
-    let remote_host = non_empty_env("REMOTE_HOST").unwrap_or_default();
+    let remote_host = resolve_remote_host();
     let peers = build_peers(&records, &aliases, &remote_host, |target| {
         ssh_host_app_present(os, target)
     });
@@ -775,26 +777,33 @@ pub fn fetch_pairing_metadata_with_exec(
 /// XpairHost.app is confirmed installed, `Some(false)`/`None` otherwise (both → `setup`).
 /// Hardened ssh opts (publickey-only, batch, tight timeout) keep it from hanging on a cold link.
 fn ssh_host_app_present(os: Os, target: &str) -> Option<bool> {
-    let mut argv: Vec<&str> = vec![
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=4",
-        "-o",
-        "ConnectionAttempts=1",
+    let mut argv = vec![
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=4".to_string(),
+        "-o".to_string(),
+        "ConnectionAttempts=1".to_string(),
     ];
-    argv.extend(os.ssh_mux_neutralizer_args());
+    argv.extend(
+        os.ssh_mux_neutralizer_args()
+            .iter()
+            .map(|arg| arg.to_string()),
+    );
     argv.extend([
-        "-o",
-        "PreferredAuthentications=publickey",
-        "-o",
-        "NumberOfPasswordPrompts=0",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-T",
-        "-n",
-        target,
-        "[ -d /Applications/XpairHost.app ] || [ -d $HOME/Applications/XpairHost.app ]",
+        "-o".to_string(),
+        "PreferredAuthentications=publickey".to_string(),
+        "-o".to_string(),
+        "NumberOfPasswordPrompts=0".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+    ]);
+    argv.extend(session::pairing_identity_args());
+    argv.extend([
+        "-T".to_string(),
+        "-n".to_string(),
+        target.to_string(),
+        "[ -d /Applications/XpairHost.app ] || [ -d $HOME/Applications/XpairHost.app ]".to_string(),
     ]);
     let status = Command::new("ssh")
         .args(&argv)
@@ -804,6 +813,17 @@ fn ssh_host_app_present(os: Os, target: &str) -> Option<bool> {
         .status()
         .ok()?;
     Some(status.success())
+}
+
+fn resolve_remote_host() -> String {
+    if let Some(host) = non_empty_env("REMOTE_HOST") {
+        return host;
+    }
+
+    config::default_client_env_path()
+        .ok()
+        .and_then(|path| config::get_cli(path, "host").ok())
+        .unwrap_or_default()
 }
 
 fn read_ssh_config() -> String {
@@ -1285,6 +1305,41 @@ impl<'a> JsonReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let saved = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| v.to_string()).collect()
@@ -1344,6 +1399,34 @@ mod tests {
         );
         // unknown tokens ignored
         assert_eq!(parse_args(&args(&["whatever", "--json"])).timeout, 4);
+    }
+
+    #[test]
+    fn resolve_remote_host_uses_env_then_client_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("xpair-discover-client-{}.env", std::process::id()));
+        std::fs::write(&path, "REMOTE_HOST=config-host\n").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+
+        {
+            let _guard = EnvGuard::set(&[
+                ("REMOTE_HOST", None),
+                ("CLIENT_ENV", Some(&path_s)),
+                ("RP_CLIENT_DIR", None),
+            ]);
+            assert_eq!(resolve_remote_host(), "config-host");
+        }
+        {
+            let _guard = EnvGuard::set(&[
+                ("REMOTE_HOST", Some("env-host")),
+                ("CLIENT_ENV", Some(&path_s)),
+                ("RP_CLIENT_DIR", None),
+            ]);
+            assert_eq!(resolve_remote_host(), "env-host");
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 
     // ── fingerprint mode ──

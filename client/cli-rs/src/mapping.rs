@@ -121,7 +121,10 @@ fn path_prefix_matches(path: &str, prefix: &str, os: Os) -> bool {
     if os == Os::Windows {
         path.eq_ignore_ascii_case(prefix)
             || (path.len() > prefix.len()
-                && path.as_bytes().get(prefix.len()) == Some(&b'/')
+                && path
+                    .as_bytes()
+                    .get(prefix.len())
+                    .is_some_and(|ch| is_windows_separator(*ch))
                 && path[..prefix.len()].eq_ignore_ascii_case(prefix))
     } else {
         path == prefix
@@ -129,6 +132,10 @@ fn path_prefix_matches(path: &str, prefix: &str, os: Os) -> bool {
                 .strip_prefix(prefix)
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }
+}
+
+fn is_windows_separator(ch: u8) -> bool {
+    matches!(ch, b'/' | b'\\')
 }
 
 fn to_posix_path(path: &str) -> String {
@@ -315,6 +322,20 @@ mod tests {
             map_to_host_for_os(r"c:\users\alice\projectile", &maps, Os::Windows).unwrap(),
             "C:/users/alice/projectile"
         );
+    }
+
+    #[test]
+    fn windows_prefix_match_accepts_either_separator_boundary() {
+        assert!(path_prefix_matches(
+            r"C:\Users\Alice\Project\Child",
+            r"c:\users\alice\project",
+            Os::Windows
+        ));
+        assert!(path_prefix_matches(
+            "C:/Users/Alice/Project/Child",
+            "c:/users/alice/project",
+            Os::Windows
+        ));
     }
 
     #[test]

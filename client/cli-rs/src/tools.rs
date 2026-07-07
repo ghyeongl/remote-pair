@@ -1,7 +1,7 @@
 //! Thin pass-through launchers for sibling client tools.
 //!
 //! The bash CLI resolves these with `_resolve_client_tool`: PATH, `LOCAL_BIN`,
-//! `RP_DIR/bin`, then a tool beside the CLI itself. This module keeps that order
+//! `RP_CLIENT_DIR/bin`, then a tool beside the CLI itself. This module keeps that order
 //! shared for `editor`, `desktop`, and `mount`.
 
 use std::io::{self, Write};
@@ -99,7 +99,10 @@ where
 fn resolve_runtime_client_tool(name: &str) -> Option<PathBuf> {
     let on_path = find_on_path(name);
     let local_bin = config::default_local_bin().ok();
-    let rp_bin = config::default_rp_dir().ok().map(|dir| dir.join("bin"));
+    let rp_bin = config::default_client_env_path()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .map(|dir| dir.join("bin"));
     let repo_sibling = current_exe_dir();
 
     if let Some(path) = on_path {
@@ -285,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rp_bin_wins_after_local_bin() {
+    fn resolve_client_runtime_bin_wins_after_local_bin() {
         assert_eq!(
             resolve_with_present(
                 None,

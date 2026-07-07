@@ -12,6 +12,7 @@ use crate::config;
 use crate::mapping::parse_maps;
 use crate::platform::Os;
 use crate::remote_quote;
+use crate::session;
 use crate::status;
 use crate::transport::{Output, Transport};
 
@@ -76,7 +77,7 @@ fn launcher_row(launcher_path: &str, present: bool) -> Row {
     if present {
         Row::new("launcher", format!("OK ({launcher_path})"), false)
     } else {
-        Row::new("launcher", "missing — install.sh --role client", true)
+        Row::new("launcher", "absent (native CLI active)", false)
     }
 }
 
@@ -493,6 +494,7 @@ struct SshTransport {
 impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
         let output = Command::new("ssh")
+            .args(session::pairing_identity_args())
             .args(self.os.ssh_mux_neutralizer_args())
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=6"])
             .arg(host)
@@ -576,7 +578,7 @@ mod tests {
         let rows = client_local_rows("/tmp/xpair-launch", false, false, "");
         assert_eq!(
             rows[0],
-            Row::new("launcher", "missing — install.sh --role client", true)
+            Row::new("launcher", "absent (native CLI active)", false)
         );
         assert_eq!(rows[2], Row::new("ssh", "missing", true));
     }

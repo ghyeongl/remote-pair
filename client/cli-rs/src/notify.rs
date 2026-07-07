@@ -178,7 +178,7 @@ pub fn run_with_transport<T: Transport + ?Sized, W: Write, E: Write>(
         return ExitCode::SUCCESS;
     };
 
-    let conf_text = fs::read_to_string(settings.rp_dir.join("notify.conf")).ok();
+    let conf_text = fs::read_to_string(settings.host_dir.join("notify.conf")).ok();
     let enabled = parse_enabled_types(conf_text.as_deref());
     let remote_cmd = build_queue_tail_remote_cmd(req.n);
     let raw = match transport.ssh_exec(host, &remote_cmd) {
@@ -247,14 +247,14 @@ impl NotifyEvent {
 }
 
 struct RuntimeSettings {
-    rp_dir: PathBuf,
+    host_dir: PathBuf,
     remote_host: Option<String>,
 }
 
 impl RuntimeSettings {
     fn load(client_env_path: &Path) -> RuntimeSettings {
         RuntimeSettings {
-            rp_dir: rp_dir(client_env_path),
+            host_dir: host_dir(client_env_path),
             remote_host: non_empty_value(client_env_path, "REMOTE_HOST"),
         }
     }
@@ -460,22 +460,25 @@ fn next_char(s: &str, idx: usize) -> Option<char> {
     s.get(idx..)?.chars().next()
 }
 
-fn rp_dir(client_env_path: &Path) -> PathBuf {
-    if let Some(value) = non_empty_env("RP_DIR") {
+fn host_dir(client_env_path: &Path) -> PathBuf {
+    if let Some(value) = non_empty_env("RP_HOST_DIR").or_else(|| non_empty_env("RP_DIR")) {
         return PathBuf::from(value);
     }
-    if let Some(value) = config::get(client_env_path, "RP_DIR")
+    if let Some(value) = config::get(client_env_path, "RP_HOST_DIR")
         .ok()
         .flatten()
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            config::get(client_env_path, "RP_DIR")
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty())
+        })
     {
         return PathBuf::from(value);
     }
 
-    client_env_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| default_rp_dir().unwrap_or_else(|| PathBuf::from(".")))
+    default_rp_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn default_rp_dir() -> Option<PathBuf> {
@@ -550,12 +553,17 @@ mod tests {
             self.path.join("client.env")
         }
 
+        fn host_dir(&self) -> PathBuf {
+            self.path.join("host")
+        }
+
         fn write_client_env(&self, body: &str) {
             fs::write(self.client_env_path(), body).unwrap();
         }
 
         fn write_notify_conf(&self, body: &str) {
-            fs::write(self.path.join("notify.conf"), body).unwrap();
+            fs::create_dir_all(self.host_dir()).unwrap();
+            fs::write(self.host_dir().join("notify.conf"), body).unwrap();
         }
     }
 
@@ -563,6 +571,8 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(self.client_env_path());
             let _ = fs::remove_file(self.path.join("notify.conf"));
+            let _ = fs::remove_file(self.host_dir().join("notify.conf"));
+            let _ = fs::remove_dir(self.host_dir());
             let _ = fs::remove_dir(&self.path);
         }
     }
@@ -755,7 +765,7 @@ mod tests {
 
     #[test]
     fn host_pull_uses_mock_transport_and_renders_canned_jsonl() {
-        without_env(&["REMOTE_HOST", "RP_DIR"], || {
+        without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
             let tmp = TestDir::new("host-pull");
             tmp.write_client_env("REMOTE_HOST=mac-mini\n");
             let transport = MockTransport::new();
@@ -792,7 +802,7 @@ mod tests {
 
     #[test]
     fn host_pull_empty_stdout_prints_no_recent_line() {
-        without_env(&["REMOTE_HOST", "RP_DIR"], || {
+        without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
             let tmp = TestDir::new("empty");
             tmp.write_client_env("REMOTE_HOST=mac-mini\n");
             let transport = MockTransport::new();
@@ -822,9 +832,12 @@ mod tests {
 
     #[test]
     fn run_honors_empty_notify_conf_as_all_off() {
-        without_env(&["REMOTE_HOST", "RP_DIR"], || {
+        without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
             let tmp = TestDir::new("all-off");
-            tmp.write_client_env("REMOTE_HOST=mac-mini\n");
+            tmp.write_client_env(&format!(
+                "REMOTE_HOST=mac-mini\nRP_HOST_DIR={}\n",
+                tmp.host_dir().to_string_lossy()
+            ));
             tmp.write_notify_conf("ENABLED_TYPES=\n");
             let transport = MockTransport::new();
             transport.push_response(
@@ -847,6 +860,43 @@ mod tests {
 
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(String::from_utf8(out).unwrap(), "");
+            assert_eq!(String::from_utf8(err).unwrap(), "");
+        });
+    }
+
+    #[test]
+    fn run_reads_notify_conf_from_host_dir_not_client_dir() {
+        without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
+            let tmp = TestDir::new("host-conf");
+            tmp.write_client_env(&format!(
+                "REMOTE_HOST=mac-mini\nRP_HOST_DIR={}\n",
+                tmp.host_dir().to_string_lossy()
+            ));
+            fs::write(tmp.path.join("notify.conf"), "ENABLED_TYPES=\n").unwrap();
+            let transport = MockTransport::new();
+            transport.push_response(
+                0,
+                concat!(
+                    r#"{"type":"Stop","title":"Done","message":"visible","ts":"bad"}"#,
+                    "\n"
+                ),
+            );
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+
+            let code = run_with_transport(
+                &args(&[]),
+                &tmp.client_env_path(),
+                &transport,
+                &mut out,
+                &mut err,
+            );
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                "\x1b[1;33m[Stop        ]\x1b[0m 0s ago  Done\n                visible\n"
+            );
             assert_eq!(String::from_utf8(err).unwrap(), "");
         });
     }

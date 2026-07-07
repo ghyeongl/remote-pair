@@ -14,10 +14,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config;
 use crate::platform::{self, Os};
 use crate::remote_quote;
+use crate::session;
 use crate::transport::{Output, Transport};
 
 const HOST_LOG_GLOB: &str = "$HOME/.xpair/host/logs/*.log";
 const NO_HOST_LOGS: &str = "(no host logs at ~/.xpair/host/logs)";
+const DEFAULT_APP_NAME: &str = "XpairHost";
+const FORWARD_APP: &str = "Xpair";
 
 /// Parsed `xpair logs` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +108,31 @@ fn build_collect_tar_argv_in(
     )
 }
 
+fn build_collect_tar_argv_for_log_dirs(
+    log_dirs: &[PathBuf],
+    stamp: &str,
+    temp_root: impl AsRef<Path>,
+) -> (Vec<String>, String) {
+    let out_parent = temp_root
+        .as_ref()
+        .join(format!("xpair-logs-{stamp}.{}", std::process::id()));
+    let out = out_parent.join(format!("xpair-logs-{stamp}.tgz"));
+    let out = path_string(out);
+
+    let mut argv = vec!["tar".to_string(), "-czf".to_string(), out.clone()];
+    let mut current_root = None::<PathBuf>;
+    for log_dir in log_dirs {
+        let (root, rel) = tar_root_and_rel(log_dir);
+        if current_root.as_ref() != Some(&root) {
+            argv.push("-C".to_string());
+            argv.push(path_string(&root));
+            current_root = Some(root);
+        }
+        argv.push(rel);
+    }
+    (argv, out)
+}
+
 /// Build the remote POSIX command used by `xpair logs --host`.
 pub fn build_host_tail_remote_cmd(n: u32, follow: bool) -> String {
     if follow {
@@ -127,7 +155,18 @@ pub fn build_host_ssh_argv(
     remote_cmd: &str,
     follow: bool,
 ) -> Vec<String> {
+    build_host_ssh_argv_with_identity(os, host, remote_cmd, follow, &[])
+}
+
+fn build_host_ssh_argv_with_identity(
+    os: platform::Os,
+    host: &str,
+    remote_cmd: &str,
+    follow: bool,
+    identity_args: &[String],
+) -> Vec<String> {
     let mut argv = vec!["ssh".to_string()];
+    argv.extend(identity_args.iter().cloned());
     if follow {
         argv.push("-tt".to_string());
     }
@@ -198,7 +237,7 @@ pub fn run_with_transport<T: Transport + ?Sized, W: Write, E: Write>(
 
     if req.collect {
         let stamp = current_stamp();
-        return match collect_logs(&settings.rp_dir, &stamp, out, err) {
+        return match collect_logs(&settings.local_log_dirs, &stamp, out, err) {
             Ok(()) => ExitCode::SUCCESS,
             Err(()) => ExitCode::from(1),
         };
@@ -234,7 +273,7 @@ pub fn run_with_transport<T: Transport + ?Sized, W: Write, E: Write>(
         };
     }
 
-    match run_local_tail(&settings.log_dir, req.n, req.follow, out, err) {
+    match run_local_tail(&settings.local_log_dirs, req.n, req.follow, out, err) {
         Ok(code) => code,
         Err(error) => {
             let _ = writeln!(err, "xpair logs: {error}");
@@ -244,34 +283,47 @@ pub fn run_with_transport<T: Transport + ?Sized, W: Write, E: Write>(
 }
 
 struct RuntimeSettings {
-    rp_dir: PathBuf,
-    log_dir: PathBuf,
+    local_log_dirs: Vec<PathBuf>,
     remote_host: Option<String>,
 }
 
 impl RuntimeSettings {
     fn load(client_env_path: &Path) -> RuntimeSettings {
-        let rp_dir = rp_dir(client_env_path);
-        let log_dir = non_empty_value(client_env_path, "LOG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| rp_dir.join("logs"));
+        let client_dir = client_dir(client_env_path);
+        let host_dir = host_dir(client_env_path);
+        let app_name =
+            non_empty_value(client_env_path, "APP_NAME").unwrap_or_else(|| DEFAULT_APP_NAME.into());
+        let mut local_log_dirs = vec![client_dir.join("logs")];
+        if local_host_capable(&host_dir, &app_name, FORWARD_APP) {
+            local_log_dirs.push(host_dir.join("logs"));
+        }
         let remote_host = non_empty_value(client_env_path, "REMOTE_HOST");
 
         RuntimeSettings {
-            rp_dir,
-            log_dir,
+            local_log_dirs,
             remote_host,
         }
     }
 }
 
 fn collect_logs<W: Write, E: Write>(
-    rp_dir: &Path,
+    log_dirs: &[PathBuf],
     stamp: &str,
     out: &mut W,
     err: &mut E,
 ) -> Result<(), ()> {
-    let (argv, out_path) = build_collect_tar_argv(rp_dir, stamp);
+    let existing = log_dirs
+        .iter()
+        .filter(|dir| dir.is_dir())
+        .cloned()
+        .collect::<Vec<_>>();
+    if existing.is_empty() {
+        let _ = writeln!(err, "collect: no log dirs yet");
+        return Err(());
+    }
+
+    let (argv, out_path) =
+        build_collect_tar_argv_for_log_dirs(&existing, stamp, std::env::temp_dir());
     if let Some(parent) = Path::new(&out_path).parent() {
         fs::create_dir_all(parent).map_err(|_| ())?;
     }
@@ -292,7 +344,13 @@ fn collect_logs<W: Write, E: Write>(
 }
 
 fn run_host_follow(os: Os, host: &str, remote_cmd: &str) -> ExitCode {
-    let argv = build_host_ssh_argv(os, host, remote_cmd, true);
+    let argv = build_host_ssh_argv_with_identity(
+        os,
+        host,
+        remote_cmd,
+        true,
+        &session::pairing_identity_args(),
+    );
     match Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::inherit())
@@ -309,15 +367,15 @@ fn run_host_follow(os: Os, host: &str, remote_cmd: &str) -> ExitCode {
 }
 
 fn run_local_tail<W: Write, E: Write>(
-    log_dir: &Path,
+    log_dirs: &[PathBuf],
     n: u32,
     follow: bool,
     out: &mut W,
     err: &mut E,
 ) -> io::Result<ExitCode> {
-    let files = local_log_files(log_dir)?;
+    let (files, label) = local_log_files(log_dirs)?;
     if files.is_empty() {
-        let _ = writeln!(out, "(no local logs at {})", path_string(log_dir));
+        let _ = writeln!(out, "(no local logs at {label})");
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -347,44 +405,133 @@ fn run_local_tail<W: Write, E: Write>(
         out.write_all(&output.stdout).map_err(io::Error::other)?;
         Ok(ExitCode::SUCCESS)
     } else {
-        let _ = writeln!(out, "(no local logs at {})", path_string(log_dir));
+        let _ = writeln!(out, "(no local logs at {label})");
         let _ = err;
         Ok(ExitCode::SUCCESS)
     }
 }
 
-fn local_log_files(log_dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(log_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-
+fn local_log_files(log_dirs: &[PathBuf]) -> io::Result<(Vec<PathBuf>, String)> {
     let mut files = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("log") {
-            files.push(path);
+    let mut labels = Vec::new();
+    for log_dir in log_dirs {
+        let entries = match fs::read_dir(log_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        labels.push(path_string(log_dir));
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("log") {
+                files.push(path);
+            }
         }
     }
     files.sort();
-    Ok(files)
+    let label = if labels.is_empty() {
+        log_dirs
+            .first()
+            .map(path_string)
+            .unwrap_or_else(|| "logs".to_string())
+    } else {
+        labels.join(", ")
+    };
+    Ok((files, label))
 }
 
-fn rp_dir(client_env_path: &Path) -> PathBuf {
-    if let Some(value) = non_empty_env("RP_DIR") {
+fn client_dir(client_env_path: &Path) -> PathBuf {
+    if let Some(value) = non_empty_env("RP_CLIENT_DIR") {
         return PathBuf::from(value);
     }
 
     client_env_path
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| default_rp_dir().unwrap_or_else(|| PathBuf::from(".")))
+        .unwrap_or_else(|| default_client_dir().unwrap_or_else(|| PathBuf::from(".")))
+}
+
+fn host_dir(client_env_path: &Path) -> PathBuf {
+    if let Some(value) = non_empty_env("RP_HOST_DIR").or_else(|| non_empty_env("RP_DIR")) {
+        return PathBuf::from(value);
+    }
+    if let Some(value) = config::get(client_env_path, "RP_HOST_DIR")
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            config::get(client_env_path, "RP_DIR")
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty())
+        })
+    {
+        return PathBuf::from(value);
+    }
+
+    default_rp_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn local_host_capable(host_dir: &Path, app_name: &str, forward_app: &str) -> bool {
+    if host_dir.join(".manifest-host").is_file() || host_dir.join("host.env").is_file() {
+        return true;
+    }
+    if let Ok(role) = fs::read_to_string(host_dir.join("role")) {
+        if matches!(role.trim(), "host" | "both") {
+            return true;
+        }
+    }
+    for app_root in app_roots() {
+        if app_root.join(format!("{app_name}.app")).is_dir()
+            || app_root.join(format!("{forward_app}.app")).is_dir()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn app_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = home_dir() {
+        roots.push(home.join("Applications"));
+    }
+    roots
+}
+
+fn tar_root_and_rel(log_dir: &Path) -> (PathBuf, String) {
+    let Some(parent) = log_dir.parent() else {
+        return (PathBuf::from("."), path_string(log_dir));
+    };
+    let Some(role_dir) = parent.file_name().and_then(|name| name.to_str()) else {
+        return (parent.to_path_buf(), log_dir_name(log_dir));
+    };
+    if log_dir.file_name().and_then(|name| name.to_str()) == Some("logs")
+        && matches!(role_dir, "client" | "host")
+    {
+        if let Some(root) = parent.parent() {
+            return (root.to_path_buf(), format!("{role_dir}/logs"));
+        }
+    }
+
+    (parent.to_path_buf(), log_dir_name(log_dir))
+}
+
+fn log_dir_name(log_dir: &Path) -> String {
+    log_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("logs")
+        .to_string()
 }
 
 fn default_rp_dir() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".xpair").join("host"))
+}
+
+fn default_client_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(".xpair").join("client"))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -470,7 +617,13 @@ struct SshTransport {
 
 impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
-        let argv = build_host_ssh_argv(self.os, host, remote_cmd, false);
+        let argv = build_host_ssh_argv_with_identity(
+            self.os,
+            host,
+            remote_cmd,
+            false,
+            &session::pairing_identity_args(),
+        );
         let output = Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::null())
@@ -582,6 +735,36 @@ mod tests {
     }
 
     #[test]
+    fn build_collect_tar_argv_includes_client_and_host_log_roots() {
+        let log_dirs = vec![
+            PathBuf::from("C:/Users/me/.xpair/client/logs"),
+            PathBuf::from("C:/Users/me/.xpair/host/logs"),
+        ];
+        let temp_root = PathBuf::from("C:/Temp");
+        let (argv, out) =
+            build_collect_tar_argv_for_log_dirs(&log_dirs, "20260102-030405", &temp_root);
+        let expected_out = path_string(
+            temp_root
+                .join(format!("xpair-logs-20260102-030405.{}", std::process::id()))
+                .join("xpair-logs-20260102-030405.tgz"),
+        );
+
+        assert_eq!(out, expected_out);
+        assert_eq!(
+            argv,
+            vec![
+                "tar".to_string(),
+                "-czf".to_string(),
+                expected_out,
+                "-C".to_string(),
+                path_string(PathBuf::from("C:/Users/me/.xpair")),
+                "client/logs".to_string(),
+                "host/logs".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn build_host_tail_remote_cmd_has_fallback_only_when_not_following() {
         assert_eq!(
             build_host_tail_remote_cmd(25, false),
@@ -670,6 +853,29 @@ mod tests {
             calls[0].remote_cmd,
             "tail -n 7 $HOME/.xpair/host/logs/*.log 2>/dev/null || echo '(no host logs at ~/.xpair/host/logs)'"
         );
+    }
+
+    #[test]
+    fn local_log_files_include_co_located_host_logs() {
+        let root = std::env::temp_dir().join(format!("xpair-logs-local-{}", std::process::id()));
+        let client_logs = root.join("client").join("logs");
+        let host_logs = root.join("host").join("logs");
+        fs::create_dir_all(&client_logs).unwrap();
+        fs::create_dir_all(&host_logs).unwrap();
+        fs::write(client_logs.join("client.log"), "client").unwrap();
+        fs::write(host_logs.join("host.log"), "host").unwrap();
+
+        let (files, label) = local_log_files(&[client_logs.clone(), host_logs.clone()]).unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&client_logs.join("client.log")));
+        assert!(files.contains(&host_logs.join("host.log")));
+        assert!(label.contains(&path_string(&client_logs)));
+        assert!(label.contains(&path_string(&host_logs)));
+
+        let _ = fs::remove_file(client_logs.join("client.log"));
+        let _ = fs::remove_file(host_logs.join("host.log"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
