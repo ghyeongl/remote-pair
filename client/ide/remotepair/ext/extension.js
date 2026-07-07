@@ -10,6 +10,7 @@
 // after the host-side input helper reports readiness.
 
 const vscode = require("vscode");
+const crypto = require("crypto");
 const cp = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -108,13 +109,20 @@ const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
 const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
-// Per-WINDOW lock (vscode.env.sessionId is shared by the window's two extension hosts but
-// distinct across windows): dedupe the dual hosts without starving other windows' pollers.
-// Guarded access: contract tests require this module with a minimal vscode stub (no env).
+// Per-WINDOW lock scope: the window's two extension hosts share the same workspace,
+// while different windows (almost always) hold different workspaces — sessionId is NOT
+// documented as per-window, so it cannot key this. Two windows on the SAME folder share
+// one owner: acceptable (same probes, one notifier) and strictly better than per-app
+// starvation. Guarded access: contract tests require this module with a vscode stub.
 const CLIENT_SERVICES_LOCK_FILE = (() => {
-  let sid = "global";
-  try { sid = String((vscode.env && vscode.env.sessionId) || "global"); } catch (_e) { /* stubbed vscode */ }
-  return path.join(RP_CLIENT_DIR, `extension-services.${sid.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)}.lock`);
+  let scope = "global";
+  try {
+    const ws = vscode.workspace || {};
+    const id = (ws.workspaceFile && ws.workspaceFile.fsPath) ||
+      (ws.workspaceFolders || []).map((f) => f.uri.fsPath).join("|");
+    if (id) scope = crypto.createHash("sha1").update(id).digest("hex").slice(0, 12);
+  } catch (_e) { /* stubbed vscode */ }
+  return path.join(RP_CLIENT_DIR, `extension-services.${scope}.lock`);
 })();
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
 // WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
@@ -2150,6 +2158,10 @@ function activate(context) {
     probeHost();
     const hostProbeTimer = setInterval(probeHost, 20000);
     clientServiceDisposables.push({ dispose: () => clearInterval(hostProbeTimer) });
+  } else {
+    // Non-owner host: ONE startup probe so its own status-bar item doesn't sit on
+    // hostReachable=null forever; the owner runs the interval and the poller.
+    probeHost();
   }
 
   // 4) Commands.

@@ -61,16 +61,21 @@ check("app_first_launch uses the persisted consent-aware claim and no globalStat
     telemetryModule,
     /function claimFirstLaunchOnce\(\) \{[\s\S]*if \(!telemetryConsent\(\)\) return false;[\s\S]*K_FIRST_LAUNCH_STAMP/,
   );
+  // Upgrade safety: only a "pending" marker (written at genuine stamp creation) emits;
+  // a marker-less upgraded install backfills WITHOUT emitting.
+  assert.match(telemetryModule, /marker === "pending"/);
+  assert.match(telemetryModule, /backfilled:\$\{Date\.now\(\)\}/);
+  assert.match(telemetryModule, /if \(created\) upsertEnv\(K_FIRST_LAUNCH_STAMP, "pending"\)/);
 });
 
 check("notification polling and host probing are protected by the client services lock", () => {
   // Per-window scope: sessionId in the lock name dedupes the window's dual hosts without
   // starving other windows' pollers; stale sibling locks are swept by dead-pid check.
-  assert.match(
-    extension,
-    /sid = String\(\(vscode\.env && vscode\.env\.sessionId\) \|\| "global"\)/,
-  );
-  assert.match(extension, /extension-services\.\$\{sid/);
+  // Workspace-scoped (NOT sessionId — not documented per-window): both hosts of a
+  // window share the workspace; other windows get their own lock.
+  assert.match(extension, /workspaceFolders \|\| \[\]\)\.map\(\(f\) => f\.uri\.fsPath\)/);
+  assert.match(extension, /extension-services\.\$\{scope\}\.lock/);
+  assert.match(extension, /\} else \{\n    \/\/ Non-owner host: ONE startup probe[\s\S]*?probeHost\(\);/);
   assert.match(extension, /function sweepStaleServiceLocks\(\)/);
   assert.match(extension, /fs\.constants\.O_CREAT \| fs\.constants\.O_EXCL \| fs\.constants\.O_WRONLY/);
   assert.ok(extension.includes("fs.writeFileSync(fd, `${process.pid}\\n`);"));

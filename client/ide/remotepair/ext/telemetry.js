@@ -44,7 +44,7 @@ const K_SENTRY_DSN = "SENTRY_DSN"; // Sentry DSN; absent => Sentry no-op
 // fires at most once for the lifetime of the install regardless of how many times either lane
 // observes reachability.
 const K_HOST_CONNECTED_STAMP = "TELEMETRY_HOST_CONNECTED_AT"; // epoch ms of first host_connected
-const K_FIRST_LAUNCH_STAMP = "TELEMETRY_FIRST_LAUNCH_AT"; // epoch ms app_first_launch was emitted (claim gate)
+const K_FIRST_LAUNCH_STAMP = "TELEMETRY_FIRST_LAUNCH_AT"; // "pending" until emitted, then epoch ms; "backfilled:<ms>" for upgraded installs (never emitted)
 const TELEMETRY_KEYS = Object.freeze([
   K_ANON_ID,
   K_TELEMETRY_CONSENT,
@@ -364,7 +364,12 @@ function firstRunStamp() {
     const now = Date.now();
     upsertEnv(K_INSTALL_TS, String(now));
     const stamped = installTs();
-    return { ts: stamped, created: stamped === now };
+    const created = stamped === now;
+    // Mark the app_first_launch emission as OWED right where freshness is known:
+    // only a genuinely-fresh install gets "pending". Upgraded installs (stamp from an
+    // old build, no marker) must never emit - see claimFirstLaunchOnce().
+    if (created) upsertEnv(K_FIRST_LAUNCH_STAMP, "pending");
+    return { ts: stamped, created };
   } catch (_e) {
     /* telemetry must never break the app */
   }
@@ -403,9 +408,19 @@ function claimHostConnectedOnce() {
 function claimFirstLaunchOnce() {
   try {
     if (!telemetryConsent()) return false; // not consented yet — leave unclaimed for a consented launch/completion.
-    if (readEnv()[K_FIRST_LAUNCH_STAMP]) return false; // already emitted this install.
-    upsertEnv(K_FIRST_LAUNCH_STAMP, String(Date.now()));
-    return true;
+    const marker = readEnv()[K_FIRST_LAUNCH_STAMP];
+    if (marker === "pending") {
+      // Fresh install whose emission is still owed (incl. abandon-and-resume onboarding).
+      upsertEnv(K_FIRST_LAUNCH_STAMP, String(Date.now()));
+      return true;
+    }
+    if (marker) return false; // already emitted, or backfilled upgrade.
+    // No marker at all: an install upgraded from a pre-claim build (its first launch
+    // happened long ago, and old builds emitted app_first_launch themselves) — or a
+    // stamp write that raced. Backfill WITHOUT emitting: is_fresh_install=true from an
+    // old install would corrupt the fresh-install funnel; prefer under-emitting.
+    upsertEnv(K_FIRST_LAUNCH_STAMP, `backfilled:${Date.now()}`);
+    return false;
   } catch (_e) {
     return false; // on any I/O failure, prefer NOT emitting (de-dup is the priority).
   }
