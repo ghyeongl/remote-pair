@@ -30,19 +30,24 @@ function test(name, fn) {
 test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a native pre-workbench hard gate", () => {
   assert.match(
     bridge,
-    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*%ProgramFiles%\\\\Xpair\\\\xpair\.exe[\s\S]*~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)/,
-    "cliReady must resolve a real xpair binary and prove it with xpair status",
+    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*%ProgramFiles%\\\\Xpair\\\\xpair\.exe[\s\S]*~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)[\s\S]*cliSupportsServing\(\)/,
+    "cliReady must resolve a real xpair binary, prove it with xpair status, and reject CLIs that drop serving",
   );
   assert.match(
     bridge,
-    /async installCli\(\)[\s\S]*process\.platform === "win32"[\s\S]*Install the Xpair CLI \(\.msi\) first[\s\S]*OPEN_DOWNLOAD[\s\S]*CLI_DOWNLOAD_URL[\s\S]*shared", "install\.sh"[\s\S]*run\("bash", \[installer, "--role", "client"\][\s\S]*if \(!rpBinAbs\(\)\)/,
-    "installCli must return MSI guidance on Windows and use the bundled installer elsewhere",
+    /function cliSupportsServing\(\)[\s\S]*rpBinAbs\(\)[\s\S]*readFileSync\(bin, "utf8"\)\.includes\('d\.get\("serving"\)'\)/,
+    "cliReady must feature-detect the serving field surface instead of accepting old win32 CLIs",
+  );
+  assert.match(
+    bridge,
+    /async installCli\(\)[\s\S]*process\.platform === "win32"[\s\S]*const bin = rpBinAbs\(\)[\s\S]*Install the Xpair CLI \(\.msi\) first[\s\S]*run\(bin, \["status"\]\)[\s\S]*Xpair CLI found but not working[\s\S]*OPEN_DOWNLOAD[\s\S]*CLI_DOWNLOAD_URL[\s\S]*shared", "install\.sh"[\s\S]*run\("bash", \[installer, "--role", "client"\][\s\S]*if \(!rpBinAbs\(\)\)/,
+    "installCli must return MSI guidance on Windows, probe existing MSI usability, and use the bundled installer elsewhere",
   );
 
   assert.match(
     onboardingMain,
-    /if \(process\.platform !== 'darwin'\)[\s\S]*cliProbeReady\(probeBridge\)[\s\S]*START_STEP\.WELCOME/,
-    "non-Darwin pre-workbench gating must only depend on the CLI probe",
+    /const clientEnv = readClientEnv\(\)[\s\S]*const host = configuredRemoteHost\(clientEnv\)[\s\S]*if \(!host\) return START_STEP\.WELCOME[\s\S]*if \(!\(await cliProbeReady\(probeBridge\)\)\) return START_STEP\.WELCOME[\s\S]*if \(process\.platform !== 'darwin'\)[\s\S]*return null/,
+    "non-Darwin pre-workbench gating must require a configured host and usable CLI before skipping Darwin-only probes",
   );
   assert.match(
     onboardingMain,

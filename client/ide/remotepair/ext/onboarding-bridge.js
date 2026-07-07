@@ -1205,10 +1205,10 @@ function cliSupportsPasswordStdin() {
 /* Does the INSTALLED CLI convey the host's serving verdict? The guard trusts `serving` from a modern
  * host but falls back to ax/sr when it is absent (older HOST). A stale ~/.local/bin/xpair, however,
  * would DROP the field even from a modern host, letting a not-serving host through the ax/sr fallback.
- * Feature-detect the installed CLI's source (same conservative pattern as cliSupportsPasswordStdin):
- * unreadable/old ⇒ false ⇒ the guard routes to WELCOME to reinstall the bundled CLI. */
+ * Feature-detect the installed CLI's source/binary (same conservative pattern as
+ * cliSupportsPasswordStdin): unreadable/old ⇒ false ⇒ the guard routes to WELCOME to reinstall the
+ * bundled CLI/MSI. */
 function cliSupportsServing() {
-  if (process.platform === "win32") return true;
   const bin = rpBinAbs();
   if (!bin) return false;
   try {
@@ -1345,10 +1345,20 @@ const bridge = {
   // Returns {ok, err}; only a FALSE here should make App.tsx show the blocking banner (+ Retry).
   async installCli() {
     if (process.platform === "win32") {
-      if (rpBinAbs()) return { ok: true, err: "" };
+      const bin = rpBinAbs();
+      if (!bin) {
+        return {
+          ok: false,
+          err: "Install the Xpair CLI (.msi) first: https://github.com/x10lab/xpair/releases/latest",
+          action: "OPEN_DOWNLOAD",
+          url: CLI_DOWNLOAD_URL,
+        };
+      }
+      const probe = await run(bin, ["status"]);
+      if (probe.code === 0) return { ok: true, err: "" };
       return {
         ok: false,
-        err: "Install the Xpair CLI (.msi) first: https://github.com/x10lab/xpair/releases/latest",
+        err: `Xpair CLI found but not working — reinstall the .msi: ${CLI_DOWNLOAD_URL}`,
         action: "OPEN_DOWNLOAD",
         url: CLI_DOWNLOAD_URL,
       };

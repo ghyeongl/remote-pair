@@ -159,10 +159,6 @@ async function cliProbeReady(probeBridge = bridge) {
 async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   if (forcedOnboardingRequested(argv)) return START_STEP.WELCOME
 
-  if (process.platform !== 'darwin') {
-    return (await cliProbeReady(probeBridge)) ? null : START_STEP.WELCOME
-  }
-
   const clientEnv = readClientEnv()
   const host = configuredRemoteHost(clientEnv)
   if (!host) return START_STEP.WELCOME
@@ -170,6 +166,10 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   // cliReady is false for a missing, broken, OR out-of-date CLI (one too old to convey the host's
   // serving verdict) — all route to WELCOME, which reinstalls the bundled CLI via installCli.
   if (!(await cliProbeReady(probeBridge))) return START_STEP.WELCOME
+
+  if (process.platform !== 'darwin') {
+    return null
+  }
 
   try {
     const reach = await probeBridge.sshReachable(host)

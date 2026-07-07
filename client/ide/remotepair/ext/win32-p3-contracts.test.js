@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const Module = require("node:module");
+const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
 
@@ -10,6 +11,7 @@ const bridge = require("./onboarding-bridge.js");
 const extensionSource = fs.readFileSync(path.join(root, "extension.js"), "utf8");
 const bridgeSource = fs.readFileSync(path.join(root, "onboarding-bridge.js"), "utf8");
 const onboardingMainPath = path.join(root, "onboarding-main.cjs");
+const WIN32_XPAIR = "C:\\Program Files\\Xpair\\xpair.exe";
 
 let passed = 0;
 let failed = 0;
@@ -37,6 +39,67 @@ function withPatched(object, key, value, fn) {
     .finally(() => {
       object[key] = original;
     });
+}
+
+function spawnStub(result = {}, calls = []) {
+  return (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => true;
+    process.nextTick(() => {
+      if (result.error) {
+        child.emit("error", new Error(result.error));
+        return;
+      }
+      if (result.out) child.stdout.emit("data", result.out);
+      if (result.err) child.stderr.emit("data", result.err);
+      child.emit("close", result.code ?? 0);
+    });
+    return child;
+  };
+}
+
+async function withProgramFiles(fn) {
+  const previousProgramFiles = process.env.ProgramFiles;
+  try {
+    process.env.ProgramFiles = "C:\\Program Files";
+    return await fn();
+  } finally {
+    if (previousProgramFiles === undefined) delete process.env.ProgramFiles;
+    else process.env.ProgramFiles = previousProgramFiles;
+  }
+}
+
+async function withWin32InstalledExe(fn) {
+  await withPlatform("win32", async () => {
+    await withProgramFiles(async () => {
+      await withPatched(fs, "existsSync", (candidate) => candidate === WIN32_XPAIR, fn);
+    });
+  });
+}
+
+async function withOnboardingMainHome(clientEnvText, fn) {
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-win32-p3-"));
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  delete require.cache[require.resolve(onboardingMainPath)];
+  try {
+    if (clientEnvText !== null) {
+      const rpDir = path.join(home, ".xpair/client");
+      fs.mkdirSync(rpDir, { recursive: true });
+      fs.writeFileSync(path.join(rpDir, "client.env"), clientEnvText);
+    }
+    return await fn(require(onboardingMainPath), home);
+  } finally {
+    delete require.cache[require.resolve(onboardingMainPath)];
+    process.env.HOME = previousHome;
+    process.env.USERPROFILE = previousUserProfile;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 }
 
 function functionBody(source, name) {
@@ -206,17 +269,12 @@ test("P3 resolves the xpair binary per platform", () => {
 
 test("P3 rpBin/rpBinAbs follow fake process.platform on win32", async () => {
   await withPlatform("win32", async () => {
-    const previousProgramFiles = process.env.ProgramFiles;
-    try {
-      process.env.ProgramFiles = "C:\\Program Files";
+    await withProgramFiles(async () => {
       await withPatched(fs, "existsSync", (candidate) => candidate === "C:\\Program Files\\Xpair\\xpair.exe", () => {
         assert.equal(bridge.rpBin(), "C:\\Program Files\\Xpair\\xpair.exe");
         assert.equal(bridge.rpBinAbs(), "C:\\Program Files\\Xpair\\xpair.exe");
       });
-    } finally {
-      if (previousProgramFiles === undefined) delete process.env.ProgramFiles;
-      else process.env.ProgramFiles = previousProgramFiles;
-    }
+    });
   });
 });
 
@@ -250,6 +308,59 @@ test("P3 installCli on win32 returns MSI guidance without bash", async () => {
   });
 });
 
+test("P3 installCli on win32 probes an existing MSI exe before ok", async () => {
+  await withWin32InstalledExe(async () => {
+    const calls = [];
+    await withPatched(childProcess, "spawn", spawnStub({ code: 0 }, calls), async () => {
+      const result = await bridge.installCli();
+      assert.deepEqual(result, { ok: true, err: "" });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].cmd, WIN32_XPAIR);
+      assert.deepEqual(calls[0].args, ["status"]);
+      assert.equal(calls[0].opts.windowsHide, true);
+    });
+  });
+});
+
+test("P3 installCli on win32 sends broken MSI users to reinstall", async () => {
+  await withWin32InstalledExe(async () => {
+    await withPatched(childProcess, "spawn", spawnStub({ code: 7, err: "boom" }), async () => {
+      const result = await bridge.installCli();
+      assert.deepEqual(result, {
+        ok: false,
+        err: "Xpair CLI found but not working — reinstall the .msi: https://github.com/x10lab/xpair/releases/latest",
+        action: "OPEN_DOWNLOAD",
+        url: "https://github.com/x10lab/xpair/releases/latest",
+      });
+    });
+  });
+});
+
+test("P3 cliReady on win32 requires the serving-capable CLI surface", async () => {
+  await withWin32InstalledExe(async () => {
+    const realReadFileSync = fs.readFileSync;
+    await withPatched(childProcess, "spawn", spawnStub({ code: 0 }), async () => {
+      await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
+        if (candidate === WIN32_XPAIR) return 'print(json.dumps({"serving": d.get("serving")}))';
+        return realReadFileSync.call(fs, candidate, encoding);
+      }, async () => {
+        assert.deepEqual(await bridge.cliReady(), { ready: true, bin: WIN32_XPAIR, err: "" });
+      });
+
+      await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
+        if (candidate === WIN32_XPAIR) return "old host-permissions output";
+        return realReadFileSync.call(fs, candidate, encoding);
+      }, async () => {
+        assert.deepEqual(await bridge.cliReady(), {
+          ready: false,
+          bin: WIN32_XPAIR,
+          err: "installed xpair CLI is out of date — reinstall the bundled client CLI",
+        });
+      });
+    });
+  });
+});
+
 test("P3 runXpairCli uses argv spawn, not sh -lc", async () => {
   const fakeBridge = {
     rpBin: () => "/opt/xpair/bin/xpair",
@@ -276,14 +387,23 @@ test("P3 runXpairCli uses argv spawn, not sh -lc", async () => {
   assert.match(bridgeSource, /function resolveXpairCliBin/);
 });
 
-test("P3 non-Darwin pre-workbench guard passes when CLI probe passes", async () => {
+test("P3 non-Darwin pre-workbench guard requires a configured host and CLI", async () => {
   await withPlatform("win32", async () => {
-    delete require.cache[require.resolve(onboardingMainPath)];
-    const onboardingMain = require(onboardingMainPath);
-    try {
+    await withOnboardingMainHome(null, async (onboardingMain) => {
       assert.equal(
         await onboardingMain.firstFailingGuard([], {
-          cliReady: async () => ({ ready: true, bin: "C:\\Program Files\\Xpair\\xpair.exe", err: "" }),
+          cliReady: async () => {
+            throw new Error("unconfigured non-Darwin guard must stop before the CLI probe");
+          },
+        }),
+        "welcome",
+      );
+    });
+
+    await withOnboardingMainHome("REMOTE_HOST=host-win\n", async (onboardingMain) => {
+      assert.equal(
+        await onboardingMain.firstFailingGuard([], {
+          cliReady: async () => ({ ready: true, bin: WIN32_XPAIR, err: "" }),
           sshReachable: async () => {
             throw new Error("non-Darwin guard must not run remote probes");
           },
@@ -296,9 +416,7 @@ test("P3 non-Darwin pre-workbench guard passes when CLI probe passes", async () 
         }),
         "welcome",
       );
-    } finally {
-      delete require.cache[require.resolve(onboardingMainPath)];
-    }
+    });
   });
 });
 
