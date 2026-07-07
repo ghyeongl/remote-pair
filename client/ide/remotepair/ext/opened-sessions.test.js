@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const extension = fs.readFileSync(path.join(__dirname, "extension.js"), "utf8");
 
 const {
   normalizeOpenedSessionNames,
@@ -43,6 +44,19 @@ test("round-trips the atomic file format", () => {
   assert.equal(writeOpenedSessionsAtomic(file, snapshot), true);
   assert.deepStrictEqual(readOpenedSessions(file, "host-a"), ["one", "two"]);
   assert.deepStrictEqual(readOpenedSessions(file, "host-b"), []);
+});
+
+test("opened-session writes are gated to the services lock owner", () => {
+  assert.match(extension, /let openedSessionsWriteOwner = false;/);
+  assert.match(
+    extension,
+    /function scheduleOpenedSessionsWrite\(names\) \{[\s\S]*if \(!openedSessionsWriteOwner\) \{[\s\S]*opened sessions: ignored write from non-owner extension host/,
+  );
+  assert.match(
+    extension,
+    /function flushOpenedSessionsWriteOnDeactivate\(\) \{[\s\S]*if \(!openedSessionsWriteOwner\) return;[\s\S]*writeOpenedSessionsNow\(host, pending\);/,
+  );
+  assert.match(extension, /setOpenedSessionsWriteOwner\(\!!clientServicesLock\);/);
 });
 
 if (failures > 0) {

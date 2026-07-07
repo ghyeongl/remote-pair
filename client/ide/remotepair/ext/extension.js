@@ -1764,6 +1764,7 @@ function delay(ms) {
 let openedSessionsWriteTimer = null;
 let openedSessionsPendingNames = null;
 let openedSessionsWritesEnabled = false;
+let openedSessionsWriteOwner = false;
 
 function writeOpenedSessionsNow(host, names) {
   const snapshot = serializeOpenedSessions(host, names);
@@ -1779,6 +1780,10 @@ function writeOpenedSessionsNow(host, names) {
 }
 
 function scheduleOpenedSessionsWrite(names) {
+  if (!openedSessionsWriteOwner) {
+    log("opened sessions: ignored write from non-owner extension host", "debug");
+    return;
+  }
   const host = getValidHost();
   if (!host) return;
   const clean = normalizeOpenedSessionNames(names);
@@ -1797,6 +1802,7 @@ function scheduleOpenedSessionsWrite(names) {
 }
 
 function flushOpenedSessionsWriteOnDeactivate() {
+  if (!openedSessionsWriteOwner) return;
   if (!openedSessionsWriteTimer) return;
   clearTimeout(openedSessionsWriteTimer);
   openedSessionsWriteTimer = null;
@@ -1815,6 +1821,10 @@ function flushOpenedSessionsWriteOnDeactivate() {
 
 function enableOpenedSessionWrites() {
   openedSessionsWritesEnabled = true;
+}
+
+function setOpenedSessionsWriteOwner(enabled) {
+  openedSessionsWriteOwner = !!enabled;
 }
 
 async function waitForAvailableSessionList() {
@@ -1848,9 +1858,14 @@ async function restoreOpenedSessionsOnActivation() {
       return 0;
     }
 
-    const live = new Set(list.sessions.map((entry) => entry.name));
+    const live = new Map(list.sessions.map((entry) => [entry.name, entry.attached]));
     for (const name of openedNames) {
-      if (!SESSION_NAME_RE.test(name) || !live.has(name)) continue;
+      const attached = live.get(name);
+      if (!SESSION_NAME_RE.test(name) || attached === undefined) continue;
+      if (attached !== 0) {
+        log(`opened sessions: skipped restore for ${name}; attached elsewhere (${attached})`, "debug");
+        continue;
+      }
       try {
         await vscode.commands.executeCommand("remotepair.terminalSidebar.reattachSession", name);
         restored += 1;
@@ -2076,6 +2091,7 @@ function activate(context) {
   );
   const clientServiceDisposables = [];
   const clientServicesLock = claimClientServicesLock();
+  setOpenedSessionsWriteOwner(!!clientServicesLock);
   if (clientServicesLock) {
     clientServiceDisposables.push(clientServicesLock);
     context.subscriptions.push({
@@ -2363,14 +2379,18 @@ function activate(context) {
   // 5a) Warm the Sessions sidebar, restore the last-quit opened set, then default to Browser only
   //     when nothing was restored. The restore path uses the same frontend reattach command as
   //     Detached card clicks, and it gives up quietly if the host/session list is unavailable.
-  restoreOpenedSessionsOnActivation()
-    .then((restored) => {
-      if (restored === 0) {
-        return vscode.commands.executeCommand("workbench.view.explorer");
-      }
-      return undefined;
-    })
-    .then(undefined, (e) => log(`startup session restore / Browser default: ${e && e.message ? e.message : e}`, "warn"));
+  if (clientServicesLock) {
+    restoreOpenedSessionsOnActivation()
+      .then((restored) => {
+        if (restored === 0) {
+          return vscode.commands.executeCommand("workbench.view.explorer");
+        }
+        return undefined;
+      })
+      .then(undefined, (e) => log(`startup session restore / Browser default: ${e && e.message ? e.message : e}`, "warn"));
+  } else {
+    log("opened sessions: restore skipped in non-owner extension host", "debug");
+  }
 
   // 5) Open the RD editor tab on startup (Remote Desktop is this client's
   //    primary surface), then apply the one-time workbench layout. Chained so

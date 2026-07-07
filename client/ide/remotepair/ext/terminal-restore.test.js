@@ -94,6 +94,21 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     extension,
+    /const live = new Map\(list\.sessions\.map\(\(entry\) => \[entry\.name, entry\.attached\]\)\);[\s\S]*const attached = live\.get\(name\);[\s\S]*if \(attached !== 0\) \{[\s\S]*opened sessions: skipped restore for \$\{name\}; attached elsewhere/,
+    "activation restore must retain attached counts and skip sessions already attached elsewhere",
+  );
+  assert.match(
+    extension,
+    /const clientServicesLock = claimClientServicesLock\(\);\n  setOpenedSessionsWriteOwner\(\!!clientServicesLock\);/,
+    "opened-session restore/write ownership must reuse the existing client services lock",
+  );
+  assert.match(
+    extension,
+    /\/\/ 5a\) Warm the Sessions sidebar[\s\S]*if \(clientServicesLock\) \{[\s\S]*restoreOpenedSessionsOnActivation\(\)[\s\S]*\} else \{\n    log\("opened sessions: restore skipped in non-owner extension host", "debug"\);\n  \}/,
+    "startup restore must run only in the extension host that owns the services lock",
+  );
+  assert.match(
+    extension,
     /restoreOpenedSessionsOnActivation\(\)[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*\}/,
     "restore must keep the opened-session write gate and enable writes only after restore completes",
   );

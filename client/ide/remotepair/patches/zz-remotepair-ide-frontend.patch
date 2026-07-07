@@ -2734,16 +2734,11 @@ index 0000000..6e5d586
 +
 +function localAttachedSessionNames(): ReadonlySet<string> {
 +	const names = new Set<string>();
-+	const add = (value: string | undefined) => {
-+		const name = normalizedSessionName(value);
++	for (const session of attachedProvider?.getAttached() ?? []) {
++		const name = normalizedSessionName(session.sessionName);
 +		if (name) {
 +			names.add(name);
 +		}
-+	};
-+	for (const session of attachedProvider?.getAttached() ?? []) {
-+		add(session.sessionName);
-+		add(session.title);
-+		add(session.id);
 +	}
 +	return names;
 +}
@@ -3024,7 +3019,7 @@ index 0000000..6e5d586
 +			// those instances never appear in ITerminalService.instances).
 +			const provider = attachedProvider;
 +			const sessions = provider.getAttached();
-+			this.recordHistory(sessions.map(s => s.sessionName ?? s.title));
++			this.recordHistory(sessions.map(s => normalizedSessionName(s.sessionName)).filter((n): n is string => !!n));
 +			if (sessions.length === 0) {
 +				this.addEmpty(cause ?? localize('remotepairNoAttached', "No attached sessions"));
 +				return;
@@ -3048,7 +3043,6 @@ index 0000000..6e5d586
 +		} else {
 +			// Fallback: read from ITerminalService for any other terminal sources.
 +			const instances = this.terminalService.instances;
-+			this.recordHistory(instances.map(instance => instance.title));
 +			if (instances.length === 0) {
 +				this.addEmpty(cause ?? localize('remotepairNoAttached', "No attached sessions"));
 +				return;

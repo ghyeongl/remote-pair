@@ -56,6 +56,21 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
     /function cachedDetachedSessions\(\): readonly string\[\] \{[\s\S]*const local = localAttachedSessionNames\(\);[\s\S]*liveSessionCache\.filter\(s => s\.attached === 0 && !local\.has\(s\.name\)\)\.map\(s => s\.name\)/,
     "detached cards must come from unattached live tmux sessions that are not local attached terminal tabs",
   );
+  const localAttachedNames = extract(
+    patch,
+    "function localAttachedSessionNames(): ReadonlySet<string> {",
+    "function localAttachedSessionNameList(): readonly string[] {",
+  );
+  assert.match(
+    localAttachedNames,
+    /normalizedSessionName\(session\.sessionName\)[\s\S]*names\.add\(name\)/,
+    "local attached snapshots must persist only stable tmux sessionName values",
+  );
+  assert.doesNotMatch(
+    localAttachedNames,
+    /session\.title|session\.id/,
+    "local attached snapshots must never fall back to mutable display titles or terminal ids",
+  );
   assert.match(
     patch,
     /const liveNames = new Set\(cachedSessionNames\(\)\);[\s\S]*const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\)/,
@@ -80,6 +95,16 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
     patch,
     /const names = cachedDetachedSessions\(\);[\s\S]*this\.recordHistory\(names\);[\s\S]*for \(const name of names\)/,
     "Detached must record displayed live detached names into last-seen History",
+  );
+  assert.match(
+    patch,
+    /this\.recordHistory\(sessions\.map\(s => normalizedSessionName\(s\.sessionName\)\)\.filter\(\(n\): n is string => !!n\)\)/,
+    "Attached history must record only stable sessionName values",
+  );
+  assert.doesNotMatch(
+    patch,
+    /recordHistory\(sessions\.map\(s => s\.sessionName \?\? s\.title\)\)|recordHistory\(instances\.map\(instance => instance\.title\)\)/,
+    "Attached history must not fall back to mutable terminal display titles",
   );
   assert.match(
     patch,
