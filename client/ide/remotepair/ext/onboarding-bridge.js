@@ -94,6 +94,13 @@ function win32XpairBin(env = process.env) {
   return path.win32.join(programFiles, "Xpair", "xpair.exe");
 }
 
+// P5 zip layout: build.sh bundles the native CLI at <app>/resources/app/bin/xpair.exe and this
+// bridge ships at <app>/resources/app/extensions/remotepair/, so the bundled copy is two levels up.
+// Checked FIRST on win32 so the zip works without a separate MSI install.
+function win32BundledXpairBin() {
+  return path.join(__dirname, "..", "..", "bin", "xpair.exe");
+}
+
 function resolveXpairCliBin({
   platform = process.platform,
   env = process.env,
@@ -103,6 +110,8 @@ function resolveXpairCliBin({
   executable = isExecutableFile,
 } = {}) {
   if (platform === "win32") {
+    const bundled = win32BundledXpairBin();
+    if (exists(bundled)) return bundled;
     const installed = win32XpairBin(env);
     if (exists(installed)) return installed;
     return absOnly ? null : "xpair.exe";
