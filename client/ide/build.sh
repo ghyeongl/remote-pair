@@ -125,6 +125,15 @@ if [ "$RP_LOCAL_IDENTITY" = "1" ]; then
     "$VENDOR/product.json" > "$_pj_tmp" && mv "$_pj_tmp" "$VENDOR/product.json"
 fi
 
+# 2c) Build the pre-workbench onboarding webview before extension injection. dev-build.sh copies the
+#     extension tree into VSCodium, and onboarding-main.cjs loads onboarding-webview/dist/index.html
+#     from that injected tree. Keep the build output in place so the injected extension has dist/, then
+#     dev-build.sh strips source/node_modules from the copy.
+echo "→ building client onboarding webview"
+( cd "$RP/ext/onboarding-webview" && npm ci && npm run build )
+[ -f "$RP/ext/onboarding-webview/dist/index.html" ] \
+  || { echo "✗ onboarding-webview build produced no dist/index.html" >&2; exit 1; }
+
 # 3) run the Xpair orchestrator (pristine VSCodium dev/build.sh + Xpair identity)
 #    with CWD = recipe root so its relative sources (get_repo.sh, build.sh, …) resolve into vendor.
 ( cd "$VENDOR" && bash "$RP/dev-build.sh" "$@" )

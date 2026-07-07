@@ -1,36 +1,12 @@
-import { useLocale, type Locale } from "@/hooks/use-locale";
+import { createUseT, type Dict } from "@shared/lib/i18n";
 
-type Dict = Record<string, string>;
+export type { Locale, TFn } from "@shared/lib/i18n";
 
 const EN: Dict = {
-  // Wizard shell
-  "shell.back": "Back",
-  "shell.next": "Next",
-  "shell.getStarted": "Get started",
-  "shell.finish": "Finish",
-  "shell.openXpair": "Open Xpair",
-  "shell.close": "Close",
-  "shell.notAvailable": "—",
-
-  // Client Welcome
   "client.welcome.title": "Welcome to Xpair",
   "client.welcome.desc":
     "Run Claude Code on a dedicated Mac. It keeps working after you close your laptop.",
 
-  // Consent (shared)
-  "consent.crash.title": "Help us squash bugs",
-  "consent.crash.desc":
-    "If Xpair ever crashes, we can send an anonymous stack trace so we can fix it fast. No file names, no code, no personal data.",
-  "consent.crash.label": "Send crash reports",
-  "consent.crash.sub": "Anonymous. Only sent when something breaks.",
-  "consent.recommended": "Recommended",
-  "consent.analytics.title": "Shape what we build next",
-  "consent.analytics.desc":
-    "Share aggregate feature usage so we know what to improve. Never your file names, code, or keystrokes.",
-  "consent.analytics.label": "Share usage analytics",
-  "consent.analytics.sub": "Off by default. Change anytime in Settings.",
-
-  // Client Discover
   "discover.title": "Find your host",
   "discover.desc": "Scanning your same network and Tailscale for XpairHost.",
   "discover.installedQ": "Is your host installed?",
@@ -50,7 +26,6 @@ const EN: Dict = {
   "discover.badge.tailscale": "Tailscale",
   "discover.badge.ssh": "SSH",
 
-  // Client Update
   "update.tooNew.title": "This host is too new",
   "update.tooNew.desc":
     "The host is running a newer major version than this client can talk to. Update this Xpair client to continue, or pick a different host.",
@@ -68,7 +43,6 @@ const EN: Dict = {
   "update.updated": "Updated",
   "update.error": "Update failed. Try again.",
 
-  // Client WaitPerm
   "wait.denied.title": "Host denied the request",
   "wait.denied.desc":
     "The person at the host Mac rejected this pairing. If that was you by mistake, try again — otherwise pick a different host.",
@@ -82,7 +56,6 @@ const EN: Dict = {
   "wait.descPost": ". Accept it there to continue.",
   "wait.requestingFrom": "Requesting from",
 
-  // Client Mappings
   "map.title": "Folder mappings",
   "map.desc": "Mount host folders on this Mac, or pair folders for two-way sync.",
   "map.empty": "No mappings yet. Add your first below.",
@@ -110,8 +83,6 @@ const EN: Dict = {
   "map.localTitle": "Choose local folder",
   "map.localUnsupported": "Type an absolute local path starting with / or ~/.",
 
-
-  // Client Done
   "done.client.title": "You're all set",
   "done.client.pairedWith": "Paired with",
   "done.client.yourHost": "your host",
@@ -124,29 +95,9 @@ const EN: Dict = {
 };
 
 const KO: Dict = {
-  "shell.back": "이전",
-  "shell.next": "다음",
-  "shell.getStarted": "시작하기",
-  "shell.finish": "완료",
-  "shell.openXpair": "Xpair 열기",
-  "shell.close": "닫기",
-  "shell.notAvailable": "—",
-
   "client.welcome.title": "Xpair에 오신 것을 환영합니다",
   "client.welcome.desc":
     "전용 Mac에서 Claude Code를 실행하세요. 노트북을 닫아도 계속 작동합니다.",
-
-  "consent.crash.title": "버그 개선을 도와주세요",
-  "consent.crash.desc":
-    "Xpair에 문제가 생기면 익명 스택 트레이스를 보내주세요. 파일명, 코드, 개인정보는 포함되지 않습니다.",
-  "consent.crash.label": "크래시 리포트 전송",
-  "consent.crash.sub": "익명. 오류가 발생했을 때만 전송됩니다.",
-  "consent.recommended": "권장",
-  "consent.analytics.title": "다음에 만들 것을 함께 정해요",
-  "consent.analytics.desc":
-    "어떤 기능이 얼마나 쓰이는지 집계 데이터를 공유해 주세요. 파일명, 코드, 키 입력은 절대 수집하지 않습니다.",
-  "consent.analytics.label": "사용 분석 공유",
-  "consent.analytics.sub": "기본은 꺼짐. 설정에서 언제든 변경할 수 있습니다.",
 
   "discover.title": "호스트 찾기",
   "discover.desc": "같은 네트워크와 Tailscale에서 XpairHost를 검색합니다.",
@@ -224,7 +175,6 @@ const KO: Dict = {
   "map.localTitle": "로컬 폴더 선택",
   "map.localUnsupported": "로컬 절대 경로를 / 또는 ~/로 시작해서 입력하세요.",
 
-
   "done.client.title": "모두 준비되었습니다",
   "done.client.pairedWith": "페어링 완료:",
   "done.client.yourHost": "호스트",
@@ -236,18 +186,4 @@ const KO: Dict = {
   "done.folders": "개 폴더",
 };
 
-const DICTS: Record<Locale, Dict> = { en: EN, ko: KO };
-
-export type TFn = (key: keyof typeof EN | string, vars?: Record<string, string | number>) => string;
-
-function format(str: string, vars?: Record<string, string | number>) {
-  if (!vars) return str;
-  return str.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? `{${k}}`));
-}
-
-export function useT(): { t: TFn; locale: Locale } {
-  const { locale } = useLocale();
-  const dict = DICTS[locale] ?? EN;
-  const t: TFn = (key, vars) => format(dict[key] ?? EN[key] ?? String(key), vars);
-  return { t, locale };
-}
+export const useT = createUseT({ en: EN, ko: KO });
