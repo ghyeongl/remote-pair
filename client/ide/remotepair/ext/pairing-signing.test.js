@@ -163,10 +163,13 @@ check("client wait step uses real pairing request and proof polling", () => {
     ),
     "utf8",
   );
-  assert.match(discover, /hostKeyFP: peer\.fp \|\| undefined/);
-  assert.match(discover, /serviceInstanceID: peer\.serviceInstanceID/);
-  assert.match(discover, /hostNonce: peer\.hostNonce/);
-  assert.match(discover, /pairPort: peer\.pairPort/);
+  const app = fs.readFileSync(path.join(__dirname, "onboarding-webview/src/App.tsx"), "utf8");
+  assert.match(app, /window\.remotepair\.fetchPairingMeta\(target\)/);
+  assert.match(app, /hostKeyFP: meta\.fp \|\| base\.hostKeyFP \|\| h\.hostKeyFP/);
+  assert.match(app, /serviceInstanceID: meta\.serviceInstanceID \|\| undefined/);
+  assert.match(app, /hostNonce: meta\.hostNonce \|\| undefined/);
+  assert.match(app, /pairPort: meta\.pairPort \|\| undefined/);
+  assert.doesNotMatch(discover, /serviceInstanceID: peer\.serviceInstanceID|hostNonce: peer\.hostNonce|pairPort: peer\.pairPort/);
   assert.match(discover, /pairingAddress/);
   assert.match(discover, /sshTarget/);
   assert.match(wait, /window\.remotepair\.sendPairingRequest/);

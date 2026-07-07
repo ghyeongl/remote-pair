@@ -185,7 +185,7 @@ Gated on `telemetry_consent`. Property values for `reason` are the controlled en
 ### 11.4 Reserved Phase-2 event names (NOT fired yet)
 
 The names are frozen now so nothing is renamed later, but these are **not emitted** until the
-golden-path features (Bonjour LAN discovery, Tailscale-as-fallback, hosted waitlist) land:
+golden-path features (direct host discovery, Tailscale-as-fallback, hosted waitlist) land:
 `host_discovery_started`, `host_discovered`, `host_discovery_empty`, `tailscale_fallback_started`,
 `tailscale_auth_completed`, `tailscale_host_reachable`, `hosted_cta_shown`,
 `hosted_waitlist_submitted`.

@@ -32,7 +32,7 @@ const EN: Dict = {
 
   // Client Discover
   "discover.title": "Find your host",
-  "discover.desc": "Scanning your LAN and Tailscale network for XpairHost.",
+  "discover.desc": "Scanning your same network and Tailscale for XpairHost.",
   "discover.installedQ": "Is your host installed?",
   "discover.installedDesc":
     "Xpair needs XpairHost running on the Mac you want to reach. If it's already set up, it'll appear here in a moment. Otherwise, install it first and come back.",
@@ -46,6 +46,9 @@ const EN: Dict = {
     "XpairHost needs to be installed on the Mac you want to reach. Run the host onboarding on that Mac, then rescan.",
   "discover.badge.updateNeeded": "Update needed",
   "discover.badge.incompatible": "Incompatible",
+  "discover.badge.lan": "LAN",
+  "discover.badge.tailscale": "Tailscale",
+  "discover.badge.ssh": "SSH",
 
   // Client Update
   "update.tooNew.title": "This host is too new",
@@ -142,7 +145,7 @@ const KO: Dict = {
   "consent.analytics.sub": "기본은 꺼짐. 설정에서 언제든 변경할 수 있습니다.",
 
   "discover.title": "호스트 찾기",
-  "discover.desc": "LAN과 Tailscale 네트워크에서 XpairHost를 검색합니다.",
+  "discover.desc": "같은 네트워크와 Tailscale에서 XpairHost를 검색합니다.",
   "discover.installedQ": "호스트가 설치되어 있나요?",
   "discover.installedDesc":
     "연결할 Mac에 XpairHost가 실행되어 있어야 합니다. 이미 설정되어 있다면 곧 목록에 나타납니다. 아직이라면 먼저 설치하고 돌아오세요.",
@@ -156,6 +159,9 @@ const KO: Dict = {
     "연결할 Mac에 XpairHost를 설치해야 합니다. 해당 Mac에서 호스트 온보딩을 진행한 뒤 다시 검색하세요.",
   "discover.badge.updateNeeded": "업데이트 필요",
   "discover.badge.incompatible": "호환 불가",
+  "discover.badge.lan": "LAN",
+  "discover.badge.tailscale": "Tailscale",
+  "discover.badge.ssh": "SSH",
 
   "update.tooNew.title": "호스트 버전이 너무 높습니다",
   "update.tooNew.desc":

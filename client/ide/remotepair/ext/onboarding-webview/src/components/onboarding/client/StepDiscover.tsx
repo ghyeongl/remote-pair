@@ -10,14 +10,20 @@ export type DiscoveredHost = {
   pairingAddress?: string;
   sshTarget?: string;
   hostUser?: string;
-  transport: "LAN" | "Tailscale";
+  transport: "LAN" | "SSH" | "Tailscale";
   version: string;
   hostKeyFP?: string;
   serviceInstanceID?: string;
   hostNonce?: string;
   pairPort?: number;
+  pairingMetaStatus?: "loading" | "ok" | "error";
+  pairingMetaError?: string;
   outdated?: boolean;
   majorMismatch?: boolean;
+  // True once probeSelectedHost has RESOLVED for this host (success or failure). The Update
+  // auto-skip must not fire on the pre-probe default (outdated/majorMismatch both false) or a
+  // slow SSH probe would skip an outdated host before its status is known.
+  probed?: boolean;
 };
 
 type BridgePeer = Awaited<ReturnType<typeof window.remotepair.discover>>["peers"][number];
@@ -30,10 +36,12 @@ type Props = {
   engineRecovery?: boolean;
 };
 
-function peerToHost(peer: BridgePeer): DiscoveredHost {
+export function peerToHost(peer: BridgePeer): DiscoveredHost {
   const pairingAddress = peer.pairingAddress ?? peer.addrs[0] ?? peer.name;
   const sshTarget =
     peer.target ?? (peer.hostUser ? `${peer.hostUser}@${pairingAddress}` : pairingAddress);
+  const transport =
+    peer.source === "lan" ? "LAN" : peer.source === "tailscale" ? "Tailscale" : "SSH";
   return {
     id: peer.fp ?? sshTarget ?? peer.name,
     name: peer.name,
@@ -41,28 +49,22 @@ function peerToHost(peer: BridgePeer): DiscoveredHost {
     pairingAddress,
     sshTarget,
     hostUser: peer.hostUser,
-    transport: peer.source === "tailscale" ? "Tailscale" : "LAN",
+    transport,
     version: "",
-    hostKeyFP: peer.fp || undefined,
-    serviceInstanceID: peer.serviceInstanceID,
-    hostNonce: peer.hostNonce,
-    pairPort: peer.pairPort,
+    pairingMetaStatus: "loading",
   };
 }
 
-function deriveHostFlags(r: Awaited<ReturnType<typeof window.remotepair.hostAppStatus>>) {
-  const majorMismatch =
-    !!r.installed && !r.compatible && r.incompatibleKind === "major_mismatch";
-  const outdated =
-    !majorMismatch && !!r.installed && !r.compatible && r.incompatibleKind === "below_floor";
-  return { majorMismatch, outdated };
+function transportLabelKey(transport: DiscoveredHost["transport"]) {
+  if (transport === "LAN") return "discover.badge.lan";
+  if (transport === "Tailscale") return "discover.badge.tailscale";
+  return "discover.badge.ssh";
 }
 
 export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
   const { t } = useT();
   const [scanning, setScanning] = useState(true);
-  const [hosts, setHosts] = useState<DiscoveredHost[]>([]);
-  const [selectingId, setSelectingId] = useState<string | null>(null);
+  const [hosts, setHosts] = useState<BridgePeer[]>([]);
   const [scanNonce, setScanNonce] = useState(0);
   const [scanError, setScanError] = useState("");
   const [openingHost, setOpeningHost] = useState(false);
@@ -103,24 +105,14 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
         const res = await window.remotepair.discover();
         if (stopped) return;
         if (res.err) setScanError(res.err);
-        const byId = new Map<string, DiscoveredHost>();
+        const byId = new Map<string, BridgePeer>();
         for (const peer of res.peers || []) {
-          // A peer is selectable if it can pair right now (live pairing window: serviceInstanceID +
-          // hostNonce + pairPort) OR it is an installed XpairHost that only needs the Update flow.
-          // Selecting a host runs hostAppStatus(), which is the ONLY place below_floor is detected and
-          // routed to StepUpdate — so dropping non-broadcasting XpairHosts (round-10's `if (!canPair)`)
-          // hid below-floor hosts and dead-ended the upgrade in an empty Discover screen. A below-floor /
-          // not-broadcasting XpairHost carries a host-key fp (Bonjour TXT fp= or tailnet pairing metadata,
-          // both emitted only by an XpairHost) and a non-"setup" status ("connect" = advertises the Xpair
-          // role, "reconnect" = ssh host with the app confirmed present); a plain reachable Mac is
-          // fp=null + status "setup" — nothing to pair or update, so drop it. A kept non-broadcasting host
-          // routes to Update (below-floor) or WaitPerm's actionable "not broadcasting — open Connect on the
-          // host, then rescan" message, never a silent dead-end.
-          const canPair = !!(peer.serviceInstanceID && peer.hostNonce && peer.pairPort);
+          // A peer is selectable when discovery has enough evidence that it is an XpairHost. Pairing
+          // fields are fetched directly from the host after selection, so discovery stays a listing hint.
           const isXpairHost = !!peer.fp || peer.status !== "setup";
-          if (!canPair && !isXpairHost) continue;
+          if (!isXpairHost) continue;
           const host = peerToHost(peer);
-          byId.set(host.id, host);
+          byId.set(host.id, peer);
         }
         setHosts(Array.from(byId.values()));
       } catch (error) {
@@ -138,22 +130,8 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
     };
   }, [scanNonce]);
 
-  const chooseHost = async (host: DiscoveredHost) => {
-    setSelectingId(host.id);
-    try {
-      const status = await window.remotepair.hostAppStatus(host.sshTarget ?? host.address);
-      const flags = deriveHostFlags(status);
-      setSelected({
-        ...host,
-        version: status.version || host.version,
-        outdated: flags.outdated,
-        majorMismatch: flags.majorMismatch,
-      });
-    } catch {
-      setSelected(null);
-    } finally {
-      setSelectingId(null);
-    }
+  const chooseHost = (peer: BridgePeer) => {
+    setSelected(peerToHost(peer));
   };
 
   const openHostOnboarding = useCallback(async () => {
@@ -255,15 +233,15 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
           </p>
         ) : null}
 
-        {hosts.map((h) => {
+        {hosts.map((peer) => {
+          const h = peerToHost(peer);
           const host = selected?.id === h.id ? { ...h, ...selected } : h;
           return (
             <HostRow
               key={h.id}
               host={host}
               selected={selected?.id === h.id}
-              selecting={selectingId === h.id}
-              onSelect={() => void chooseHost(h)}
+              onSelect={() => chooseHost(peer)}
             />
           );
         })}
@@ -299,12 +277,10 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
 function HostRow({
   host,
   selected,
-  selecting,
   onSelect,
 }: {
   host: DiscoveredHost;
   selected: boolean;
-  selecting: boolean;
   onSelect: () => void;
 }) {
   const { t } = useT();
@@ -312,9 +288,8 @@ function HostRow({
     <button
       type="button"
       onClick={onSelect}
-      disabled={selecting}
       className={
-        "flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-70 " +
+        "flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors " +
         (selected
           ? "border-primary/40 bg-primary/5"
           : "border-border bg-card hover:border-foreground/20")
@@ -328,11 +303,7 @@ function HostRow({
             : "border-border bg-background")
         }
       >
-        {selecting ? (
-          <Loader2 className="h-3 w-3 animate-spin" />
-        ) : (
-          selected && <Check className="h-3 w-3" />
-        )}
+        {selected && <Check className="h-3 w-3" />}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -340,12 +311,12 @@ function HostRow({
           <span
             className={
               "rounded-full px-1.5 py-0.5 text-[10px] font-medium " +
-              (host.transport === "LAN"
-                ? "bg-muted text-muted-foreground"
-                : "bg-blue-500/10 text-blue-500")
+              (host.transport === "Tailscale"
+                ? "bg-blue-500/10 text-blue-500"
+                : "bg-muted text-muted-foreground")
             }
           >
-            {host.transport}
+            {t(transportLabelKey(host.transport))}
           </span>
           {host.outdated && (
             <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">

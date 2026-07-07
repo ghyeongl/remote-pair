@@ -17,7 +17,7 @@ flowchart TD
         C_Welcome["Welcome"]
         C_Consent["Consent"]
         C_HostInstalled{"Is your host<br/>installed?"}
-        C_Discover["Discover<br/>LAN+Tailscale<br/>& Select"]
+        C_Discover["Discover<br/>LAN + Tailscale<br/>& Select"]
         C_Update["Request & Do Update"]
         C_WaitPerm["Waiting for<br/>Permission grant"]
         C_FolderMap["Folder mappings"]

@@ -88,6 +88,7 @@ const RENDERER_METHODS = new Set([
   'mount',
   'defaultMountpoint',
   'discover',
+  'fetchPairingMeta',
   'sendPairingRequest',
   'pairingStatus',
   'installHost',
@@ -285,7 +286,7 @@ function openOnboardingWindow({ electron, onComplete, startStep } = {}) {
 
   _win = new BrowserWindow({
     width: 720,
-    height: 560,
+    height: 524,
     resizable: false,
     show: false, // show on ready-to-show so it appears focused, not behind
     titleBarStyle: 'hiddenInset',

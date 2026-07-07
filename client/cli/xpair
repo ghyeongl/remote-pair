@@ -15,7 +15,7 @@
 #                              View/edit client config. keys: host (REMOTE_HOST), terminal (iterm2|terminal), engine (claude|claudecode|shell|codex|opencode).
 #   xpair onboard        Interactive, re-runnable client setup (host, terminal app, folder mapping, doctor).
 #   xpair open-gui <dir> Open the configured terminal app in a new window running 'launch <dir>'.
-#   xpair discover [--json] [--timeout S]   Discover Xpair/SSH hosts (LAN Bonjour + Tailscale) → normalized JSON peer list on stdout.
+#   xpair discover [--json] [--timeout S]   Discover Xpair/SSH hosts (same-network beacon + Tailscale + known SSH context) → normalized JSON peer list on stdout.
 #   xpair install-host [--host <a>] [--account <u>] [--password-stdin] [--bootstrap --sha256 <hex> --ref <r>]   Idempotent integrity-verified remote install/repair (scp signed .app; opt-in pinned curl|bash).
 #   xpair doctor         Check SSH key connection, host app, tmux + guidance
 #   xpair approve [--for "<what>"] [--type "key:..|ocr:.."] [--timeout S]   Handle a blocked approval dialog
@@ -1440,14 +1440,12 @@ rp_ssh_config_write() {
 rp_norm_fp() { case "$1" in SHA256:*) printf '%s' "$1" ;; *) printf 'SHA256:%s' "$1" ;; esac; }
 
 # ── C1. xpair discover [--json] [--timeout S] ──
-# Concurrent LAN (Bonjour via dns-sd) + Tailscale discovery → normalized JSON
+# LAN beacon + Tailscale discovery → normalized JSON
 # peer list on stdout (the Electron bridge calls this). Schema per peer:
 #   {"name","addrs":[…],"target","pairingAddress","source":"lan|tailscale|ssh",
-#    "fp":"SHA256:…"|null,"serviceInstanceID","hostNonce","pairPort","hostUser",
-#    "status":"reconnect|connect|setup"}
+#    "fp":"SHA256:…"|null,"hostUser","status":"reconnect|connect|setup"}
 # Dedup by host-key fingerprint; cross-reference ~/.ssh/config + client.env.
-RP_BONJOUR_TYPE="_xpair._tcp"
-RP_LEGACY_BONJOUR_TYPE="_remotepair._tcp"
+RP_LAN_BEACON_PORT="${RP_LAN_BEACON_PORT:-8892}"
 RP_TAILNET_PAIRING_METADATA_PORT=8891
 # Auto-detect the Tailscale CLI across install layouts (App Store sandbox, brew, manual).
 rp_tailscale_bin() {
@@ -1475,8 +1473,8 @@ cmd_discover() {
   case "$timeout" in (''|*[!0-9]*) timeout=4 ;; esac
 
   # --fingerprint <host>: fetch ONE host's ed25519 key fingerprint via ssh-keyscan, for the
-  # Electron bridge's hostKeyFingerprint() on the manual-entry path (host not in the Bonjour/
-  # Tailscale peer list, so no advertised TXT fp to TOFU against). Emits {"fp":"SHA256:…"} or
+  # Electron bridge's hostKeyFingerprint() on the manual-entry path (host not in the Tailscale peer
+  # list, so no advertised fp to TOFU against). Emits {"fp":"SHA256:…"} or
   # {"fp":null,"err":"…"}. Matches `ssh-keygen -lf` form (same as the host's advertised fp).
   if [ -n "$_fp_host" ]; then
     local _ks _fpv="" _scan_host _scan_port
@@ -1495,68 +1493,80 @@ cmd_discover() {
   fi
 
   # Collect peers as tab-separated records:
-  # name \t addr \t source \t fp \t role \t serviceInstanceID \t hostNonce \t pairPort \t hostUser
+  # name \t addr \t source \t fp \t role \t hostUser
   # then dedup by fp (fall back to name) and emit JSON. We use a temp file rather
   # than a subshell pipe so the awk emitter sees the whole set.
   local rec; rec="$(mktemp "${TMPDIR:-/tmp}/rp-disc.XXXXXX")" || { err "mktemp failed"; return 1; }
   # shellcheck disable=SC2064
   trap "rm -f '$rec'" RETURN
 
-  # ── LAN: Bonjour browse → resolve TXT (hn/v/role/fp) ──
-  # dns-sd never exits on its own, so each phase is run bounded-then-killed. The browse needs the
-  # full window to collect every advertiser, but a `-L` resolve returns its TXT near-instantly — so
-  # resolves use a SHORT cap and run in PARALLEL (one bg job per instance) instead of serially. This
-  # turns the old browse(timeout) + N×resolve(timeout) cost into browse(timeout) + 1×resolve_to,
-  # cutting a multi-host discover from ~17s to ~5s. (BUG #5)
-  if command -v dns-sd >/dev/null 2>&1; then
-    local resolve_to=1   # TXT comes back immediately; only the kill is bounded
-    local bonjour_type
-    for bonjour_type in "$RP_BONJOUR_TYPE" "$RP_LEGACY_BONJOUR_TYPE"; do
-      local browse; browse="$(mktemp "${TMPDIR:-/tmp}/rp-bro.XXXXXX")"
-      local bpid
-      if [ "$bonjour_type" = "$RP_BONJOUR_TYPE" ]; then
-        ( dns-sd -t "$timeout" -B "$RP_BONJOUR_TYPE" >"$browse" 2>/dev/null ) & bpid=$!
-      else
-        ( dns-sd -t "$timeout" -B "$bonjour_type" >"$browse" 2>/dev/null ) & bpid=$!
-      fi
-      ( sleep "$timeout"; kill "$bpid" 2>/dev/null ) >/dev/null 2>&1 & local kpid=$!
-      wait "$bpid" 2>/dev/null || true; kill "$kpid" 2>/dev/null || true
-      # Browse lines: "<ts> Add <flags> <if> <domain> <type> <instanceName>". Collect unique instance
-      # names, then fan out one resolve per name into its own temp file, all at once.
-      local svcname lk; local -a _lpids=() _lfiles=() _lnames=()
-      while IFS= read -r line; do
-        case "$line" in *" Add "*) ;; *) continue ;; esac
-        svcname="$(printf '%s' "$line" | sed -n 's/.*'"$bonjour_type"'\.[[:space:]]*\(.*\)$/\1/p')"
-        [ -n "$svcname" ] || continue
-        case " ${_lnames[*]:-} " in *" $svcname "*) continue ;; esac   # dedup browse repeats
-        lk="$(mktemp "${TMPDIR:-/tmp}/rp-lk.XXXXXX")"
-        ( dns-sd -t "$resolve_to" -L "$svcname" "$bonjour_type" >"$lk" 2>/dev/null ) & local _p=$!
-        ( sleep "$resolve_to"; kill "$_p" 2>/dev/null ) >/dev/null 2>&1 &
-        _lpids+=("$_p"); _lfiles+=("$lk"); _lnames+=("$svcname")
-      done < "$browse"
-      rm -f "$browse"
-      # Barrier: wait for every parallel resolve to finish (or be killed), then parse each TXT.
-      local _i
-      for _i in "${!_lpids[@]}"; do wait "${_lpids[$_i]}" 2>/dev/null || true; done
-      for _i in "${!_lfiles[@]}"; do
-        lk="${_lfiles[$_i]}"; svcname="${_lnames[$_i]}"
-        # TXT comes as: ... can be reached at <target>:<port> (interface …) hn=… v=… role=… fp=…
-        local txt hn fp role addr sid nonce pp user
-        txt="$(cat "$lk" 2>/dev/null)"
-        addr="$(printf '%s' "$txt" | sed -n 's/.*reached at \([^: ]*\):.*/\1/p' | head -1)"
-        hn="$(printf '%s' "$txt"   | sed -n 's/.*[[:space:]]hn=\([^ ]*\).*/\1/p'   | head -1)"
-        fp="$(printf '%s' "$txt"   | sed -n 's/.*[[:space:]]fp=\([^ ]*\).*/\1/p'   | head -1)"
-        role="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]role=\([^ ]*\).*/\1/p' | head -1)"
-        user="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]user=\([^ ]*\).*/\1/p' | head -1)"
-        sid="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]sid=\([^ ]*\).*/\1/p' | head -1)"
-        nonce="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]nonce=\([^ ]*\).*/\1/p' | head -1)"
-        pp="$(printf '%s' "$txt" | sed -n 's/.*[[:space:]]pp=\([0-9][0-9]*\).*/\1/p' | head -1)"
-        [ -n "$hn" ] || hn="$svcname"
-        [ -n "$fp" ] && fp="$(rp_norm_fp "$fp")"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$hn" "${addr:-$hn}" "lan" "${fp:-}" "${role:-}" "${sid:-}" "${nonce:-}" "${pp:-}" "${user:-}" >> "$rec"
-        rm -f "$lk"
-      done
-    done
+  # ── LAN: listen for native XpairHost UDP beacons ──
+  if command -v python3 >/dev/null 2>&1; then
+    RP_DISCOVER_TIMEOUT="$timeout" RP_LAN_BEACON_PORT="$RP_LAN_BEACON_PORT" python3 -c 'import textwrap; exec(textwrap.dedent("""
+	import json, os, socket, sys, time
+	try:
+	    timeout = float(os.environ.get("RP_DISCOVER_TIMEOUT", "4") or "4")
+	except Exception:
+	    timeout = 4.0
+	try:
+	    port = int(os.environ.get("RP_LAN_BEACON_PORT", "8892") or "8892")
+	except Exception:
+	    port = 8892
+	window = max(0.0, min(timeout, 2.5))
+	deadline = time.monotonic() + window
+	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+	try:
+	    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+	    if hasattr(socket, "SO_REUSEPORT"):
+	        try:
+	            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+	        except OSError:
+	            pass
+	    sock.bind(("0.0.0.0", port))
+	except Exception:
+	    sys.exit(0)
+	seen = {}
+	order = []
+	try:
+	    while True:
+	        remaining = deadline - time.monotonic()
+	        if remaining <= 0:
+	            break
+	        sock.settimeout(min(0.25, remaining))
+	        try:
+	            data, sender = sock.recvfrom(2048)
+	        except socket.timeout:
+	            continue
+	        except OSError:
+	            break
+	        if len(data) > 512:
+	            continue
+	        try:
+	            msg = json.loads(data.decode("utf-8", "replace").strip())
+	        except Exception:
+	            continue
+	        if not isinstance(msg, dict):
+	            continue
+	        if msg.get("v") != 1 or msg.get("kind") != "xpair-host":
+	            continue
+	        addr = sender[0] if sender else ""
+	        name = str(msg.get("name") or "").strip().rstrip(".") or addr
+	        fp = str(msg.get("fp") or "").strip()
+	        if fp and not fp.startswith("SHA256:"):
+	            fp = "SHA256:" + fp
+	        role = str(msg.get("role") or "").strip()
+	        user = str(msg.get("user") or "").strip()
+	        if not name and not fp:
+	            continue
+	        key = fp if fp else ("name:" + name)
+	        if key not in seen:
+	            seen[key] = (name, addr, "lan", fp, role, user)
+	            order.append(key)
+	    for key in order:
+	        print("%s\t%s\t%s\t%s\t%s\t%s" % seen[key])
+	finally:
+	    sock.close()
+	"""))' >> "$rec" 2>/dev/null || true
   fi
 
   # ── Tailscale: parse `tailscale status --json` peers + Xpair pairing metadata ──
@@ -1592,12 +1602,9 @@ cmd_discover() {
 	    fp = str(meta.get("hostKeyFP") or meta.get("fp") or "")
 	    if fp and not fp.startswith("SHA256:"): fp = "SHA256:" + fp
 	    role = str(meta.get("role") or "")
-	    sid = str(meta.get("serviceInstanceID") or meta.get("sid") or "")
-	    nonce = str(meta.get("hostNonce") or meta.get("nonce") or "")
-	    pp = str(meta.get("pairPort") or meta.get("pp") or "")
 	    user = str(meta.get("hostUser") or meta.get("user") or "")
 	    host_name = str(meta.get("hostname") or name).rstrip(".")
-	    return "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s" % (host_name, addr, "tailscale", fp, role, sid, nonce, pp, user)
+	    return "%s\t%s\t%s\t%s\t%s\t%s" % (host_name, addr, "tailscale", fp, role, user)
 	peers = list((d.get("Peer") or {}).values())
 	with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
 	    for rec in pool.map(row, peers):
@@ -1677,13 +1684,12 @@ for ln in lines:
     if not ln.strip():
         continue
     parts = ln.split("\t")
-    while len(parts) < 9:
+    while len(parts) < 6:
         parts.append("")
-    name, addr, source, fp, role, sid, nonce, pp, host_user = parts[:9]
+    name, addr, source, fp, role, host_user = parts[:6]
     key = fp if fp else ("name:" + name)
     if key not in peers:
         peers[key] = {"name": name, "addrs": [], "sources": [], "fp": fp or None, "_role": role,
-                      "serviceInstanceID": sid or "", "hostNonce": nonce or "", "pairPort": pp or "",
                       "hostUser": host_user or ""}
         order.append(key)
     p = peers[key]
@@ -1695,12 +1701,6 @@ for ln in lines:
         p["fp"] = fp
     if (not p["_role"]) and role in ("host", "both", "client"):
         p["_role"] = role
-    if (not p.get("serviceInstanceID")) and sid:
-        p["serviceInstanceID"] = sid
-    if (not p.get("hostNonce")) and nonce:
-        p["hostNonce"] = nonce
-    if (not p.get("pairPort")) and pp:
-        p["pairPort"] = pp
     if (not p.get("hostUser")) and host_user:
         p["hostUser"] = host_user
 
@@ -1744,15 +1744,6 @@ for key in order:
         "fp": p["fp"],
         "status": status_for(name, addr, p["_role"], target),
     }
-    if p.get("serviceInstanceID"):
-        item["serviceInstanceID"] = p["serviceInstanceID"]
-    if p.get("hostNonce"):
-        item["hostNonce"] = p["hostNonce"]
-    if p.get("pairPort"):
-        try:
-            item["pairPort"] = int(p["pairPort"])
-        except Exception:
-            pass
     if p.get("hostUser"):
         item["hostUser"] = p["hostUser"]
     out.append(item)

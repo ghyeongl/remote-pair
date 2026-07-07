@@ -15,9 +15,18 @@ type Props = {
   pct: number;
   setPct: (n: number) => void;
   onBackToDiscover?: () => void;
+  onRepairPairing?: () => void;
 };
 
-export function StepUpdate({ host, state, setState, pct, setPct, onBackToDiscover }: Props) {
+export function StepUpdate({
+  host,
+  state,
+  setState,
+  pct,
+  setPct,
+  onBackToDiscover,
+  onRepairPairing,
+}: Props) {
   const { t } = useT();
   const [error, setError] = useState("");
   const needsUpdate = !!host?.outdated && !host.majorMismatch;
@@ -33,6 +42,12 @@ export function StepUpdate({ host, state, setState, pct, setPct, onBackToDiscove
       const installed = await window.remotepair.installHost({ host: target, force: true });
       setPct(65);
       if (!installed.ok) {
+        if (installed.action === "prompt_password") {
+          setPct(0);
+          setState("idle");
+          onRepairPairing?.();
+          return;
+        }
         setError(installed.err || t("update.error"));
         setPct(0);
         setState("idle");

@@ -7,6 +7,7 @@ import { StepWelcome } from "@/components/onboarding/client/StepWelcome";
 import { StepConsent } from "@/components/onboarding/client/StepConsent";
 import {
   StepDiscover,
+  peerToHost,
   type DiscoveredHost,
 } from "@/components/onboarding/client/StepDiscover";
 import {
@@ -63,7 +64,7 @@ function initialStartReason(): string {
   return new URLSearchParams(window.location.search).get("startStep") || "";
 }
 
-function deriveHostFlags(r: Awaited<ReturnType<typeof window.remotepair.hostAppStatus>>) {
+export function deriveHostFlags(r: Awaited<ReturnType<typeof window.remotepair.hostAppStatus>>) {
   const majorMismatch =
     !!r.installed && !r.compatible && r.incompatibleKind === "major_mismatch";
   const outdated =
@@ -188,11 +189,13 @@ export default function App() {
             version: r.version || current.version,
             outdated: flags.outdated,
             majorMismatch: flags.majorMismatch,
+            probed: true,
           };
           if (
             current.version === next.version &&
             current.outdated === next.outdated &&
-            current.majorMismatch === next.majorMismatch
+            current.majorMismatch === next.majorMismatch &&
+            current.probed === next.probed
           ) {
             return current;
           }
@@ -201,6 +204,15 @@ export default function App() {
       }
       return r;
     } catch {
+      // Probe failed: we could not determine status, but mark it settled so the wizard is not
+      // stuck on Update forever — outdated/majorMismatch stay false, so progression resumes.
+      if (hostProbeId.current === probeId) {
+        setSelectedHost((current) =>
+          current && current.id === host.id && !current.probed
+            ? { ...current, probed: true }
+            : current,
+        );
+      }
       return null;
     }
   }, []);
@@ -208,6 +220,100 @@ export default function App() {
   useEffect(() => {
     if (selectedHost) void probeSelectedHost();
   }, [selectedHost?.id, probeSelectedHost]);
+
+  const mergePairingMeta = useCallback(
+    (
+      selectedId: string,
+      meta: Awaited<ReturnType<typeof window.remotepair.fetchPairingMeta>>,
+      mappedHost?: DiscoveredHost | null,
+    ) => {
+      setSelectedHost((h) => {
+        if (!h || h.id !== selectedId) return h;
+        const base = mappedHost
+          ? {
+              ...h,
+              ...mappedHost,
+              version: h.version,
+              outdated: h.outdated,
+              majorMismatch: h.majorMismatch,
+            }
+          : h;
+        if (!meta.ok) {
+          return {
+            ...base,
+            hostKeyFP: base.hostKeyFP || h.hostKeyFP,
+            // A failed pull INVALIDATES any earlier pairing-window transcript: the window may
+            // have been denied/expired/closed, and stale sid/nonce/port would let WaitPerm
+            // poll a dead window instead of surfacing the real state.
+            serviceInstanceID: undefined,
+            hostNonce: undefined,
+            pairPort: undefined,
+            pairingMetaStatus: "error",
+            pairingMetaError: meta.err || "Host is not broadcasting pairing details.",
+          };
+        }
+        return {
+          ...base,
+          hostKeyFP: meta.fp || base.hostKeyFP || h.hostKeyFP,
+          serviceInstanceID: meta.serviceInstanceID || undefined,
+          hostNonce: meta.hostNonce || undefined,
+          pairPort: meta.pairPort || undefined,
+          hostUser: meta.hostUser || base.hostUser,
+          pairingMetaStatus: "ok",
+          pairingMetaError: "",
+        };
+      });
+    },
+    [],
+  );
+
+  const fetchAndMergePairingMeta = useCallback(
+    async (host: DiscoveredHost, mappedHost?: DiscoveredHost | null) => {
+      const selectedId = host.id;
+      const target =
+        mappedHost?.pairingAddress ?? mappedHost?.address ?? host.pairingAddress ?? host.address;
+      setSelectedHost((h) =>
+        h && h.id === selectedId
+          ? {
+              ...h,
+              ...(mappedHost
+                ? {
+                    ...mappedHost,
+                    id: h.id,
+                    version: h.version,
+                    outdated: h.outdated,
+                    majorMismatch: h.majorMismatch,
+                  }
+                : {}),
+              pairingMetaStatus: "loading",
+              pairingMetaError: "",
+            }
+          : h,
+      );
+      try {
+        const meta = await window.remotepair.fetchPairingMeta(target);
+        mergePairingMeta(selectedId, meta, mappedHost);
+        return meta;
+      } catch (error) {
+        const meta = {
+          ok: false,
+          fp: "",
+          serviceInstanceID: "",
+          hostNonce: "",
+          pairPort: 0,
+          hostUser: "",
+          err: error instanceof Error ? error.message : String(error),
+        };
+        mergePairingMeta(selectedId, meta, mappedHost);
+        return meta;
+      }
+    },
+    [mergePairingMeta],
+  );
+
+  useEffect(() => {
+    if (selectedHost) void fetchAndMergePairingMeta(selectedHost);
+  }, [selectedHost?.id, fetchAndMergePairingMeta]);
 
   const needsUpdate = !!selectedHost?.outdated;
   const majorMismatch = !!selectedHost?.majorMismatch;
@@ -224,34 +330,39 @@ export default function App() {
     w.goTo(3, "prev");
   };
 
+  const goToPairing = () => {
+    setPermAccepted(false);
+    setPermDenied(false);
+    w.goTo(S.WAIT_PERM, "next");
+  };
+
   const retryHostPrompt = async () => {
-    // After a deny the host closed its pairing endpoint; a Broadcast Again re-advertises with a FRESH
-    // serviceInstanceID/hostNonce/pairPort. Resending the stale fields stored on selectedHost can never
-    // succeed, so re-run discovery and refresh the selected host's pairing metadata before retrying. If
-    // the host is no longer broadcasting live metadata, route back to Discover.
     const cur = selectedRef.current;
     setPermDenied(false);
     setPermAccepted(false);
     if (!cur) return;
+    const selectedId = cur.id;
+    let mapped: DiscoveredHost | null = null;
     try {
       const res = await window.remotepair.discover();
       const match = (res.peers || []).find((p) => {
-        const addr = p.pairingAddress ?? p.addrs[0] ?? p.name;
-        const target = p.target ?? (p.hostUser ? `${p.hostUser}@${addr}` : addr);
-        return (cur.hostKeyFP && p.fp === cur.hostKeyFP) || target === cur.sshTarget;
-      });
-      if (match?.serviceInstanceID && match?.hostNonce && match?.pairPort) {
-        setSelectedHost((h) =>
-          h && h.id === cur.id
-            ? { ...h, serviceInstanceID: match.serviceInstanceID, hostNonce: match.hostNonce, pairPort: match.pairPort }
-            : h,
+        const m = peerToHost(p);
+        const currentTarget = cur.sshTarget ?? cur.address;
+        const currentAddress = cur.pairingAddress ?? cur.address;
+        return (
+          (cur.hostKeyFP && p.fp === cur.hostKeyFP) ||
+          m.sshTarget === currentTarget ||
+          m.address === currentAddress ||
+          m.pairingAddress === currentAddress
         );
-      } else {
-        goBackToDiscover(); // host no longer advertising a live pairing window — pick a fresh one
-      }
+      });
+      mapped = match ? peerToHost(match) : null;
     } catch {
-      /* discovery failed — leave the user on WaitPerm; they can Pick Another */
+      mapped = null;
     }
+    const latest = selectedRef.current;
+    if (!latest || latest.id !== selectedId) return;
+    void fetchAndMergePairingMeta(latest, mapped);
   };
 
   useEffect(() => {
@@ -281,6 +392,7 @@ export default function App() {
       return;
     }
     if (majorMismatch || (needsUpdate && updateState !== "done")) {
+      forcedUpdateLanding.current = true; // guard redirect, not a user Back — see the S.UPDATE effect
       w.goTo(S.UPDATE, "prev");
       return;
     }
@@ -303,12 +415,26 @@ export default function App() {
     w.goTo,
   ]);
 
+  const forcedUpdateLanding = useRef(false);
   useEffect(() => {
-    if (w.index === 4 && !needsUpdate && !majorMismatch && updateState !== "done") {
+    if (w.index !== S.UPDATE) return;
+    if (w.direction === "prev") {
+      if (forcedUpdateLanding.current) {
+        // The Done guard forced this landing (below-floor/major-mismatch host) — stay on
+        // Update; only a USER Back should pass through to Discover.
+        forcedUpdateLanding.current = false;
+      } else {
+        w.goTo(S.DISCOVER, "prev");
+        return;
+      }
+    }
+    // Gate on probed: never skip Update until the host status probe has resolved, or a slow
+    // SSH probe lets the timer skip an outdated host on the pre-probe default (both flags false).
+    if (selectedHost?.probed && !needsUpdate && !majorMismatch && updateState !== "done") {
       const tm = setTimeout(() => w.next(), 650);
       return () => clearTimeout(tm);
     }
-  }, [w.index, needsUpdate, majorMismatch, updateState, w]);
+  }, [w.index, w.direction, selectedHost?.probed, needsUpdate, majorMismatch, updateState, w]);
 
   const nextDisabled =
     (w.index === 3 && !selectedHost) ||
@@ -370,6 +496,7 @@ export default function App() {
               pct={updatePct}
               setPct={setUpdatePct}
               onBackToDiscover={goBackToDiscover}
+              onRepairPairing={goToPairing}
             />
           )}
           {w.index === 5 && (
