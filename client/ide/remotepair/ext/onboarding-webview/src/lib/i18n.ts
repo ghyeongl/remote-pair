@@ -1,42 +1,19 @@
-import { useLocale, type Locale } from "@/hooks/use-locale";
+import { createUseT, type Dict } from "@shared/lib/i18n";
 
-type Dict = Record<string, string>;
+export type { Locale, TFn } from "@shared/lib/i18n";
 
 const EN: Dict = {
-  // Wizard shell
-  "shell.back": "Back",
-  "shell.next": "Next",
-  "shell.getStarted": "Get started",
-  "shell.finish": "Finish",
-  "shell.openXpair": "Open Xpair",
-  "shell.close": "Close",
-  "shell.notAvailable": "—",
-
-  // Client Welcome
   "client.welcome.title": "Welcome to Xpair",
   "client.welcome.desc":
     "Run Claude Code on a dedicated Mac. It keeps working after you close your laptop.",
 
-  // Consent (shared)
-  "consent.crash.title": "Help us squash bugs",
-  "consent.crash.desc":
-    "If Xpair ever crashes, we can send an anonymous stack trace so we can fix it fast. No file names, no code, no personal data.",
-  "consent.crash.label": "Send crash reports",
-  "consent.crash.sub": "Anonymous. Only sent when something breaks.",
-  "consent.recommended": "Recommended",
-  "consent.analytics.title": "Shape what we build next",
-  "consent.analytics.desc":
-    "Share aggregate feature usage so we know what to improve. Never your file names, code, or keystrokes.",
-  "consent.analytics.label": "Share usage analytics",
-  "consent.analytics.sub": "Off by default. Change anytime in Settings.",
-
-  // Client Discover
   "discover.title": "Find your host",
   "discover.desc": "Scanning your same network and Tailscale for XpairHost.",
   "discover.installedQ": "Is your host installed?",
   "discover.installedDesc":
     "Xpair needs XpairHost running on the Mac you want to reach. If it's already set up, it'll appear here in a moment. Otherwise, install it first and come back.",
   "discover.openHost": "Open host onboarding",
+  "discover.downloadCli": "Download Xpair CLI",
   "discover.engineRecovery.title": "Finish host engine setup",
   "discover.engineRecovery.desc":
     "Your host is paired, but its coding agent still needs to be installed or signed in. Open host onboarding on that Mac to finish — re-selecting the host here won't fix it.",
@@ -50,7 +27,6 @@ const EN: Dict = {
   "discover.badge.tailscale": "Tailscale",
   "discover.badge.ssh": "SSH",
 
-  // Client Update
   "update.tooNew.title": "This host is too new",
   "update.tooNew.desc":
     "The host is running a newer major version than this client can talk to. Update this Xpair client to continue, or pick a different host.",
@@ -68,7 +44,6 @@ const EN: Dict = {
   "update.updated": "Updated",
   "update.error": "Update failed. Try again.",
 
-  // Client WaitPerm
   "wait.denied.title": "Host denied the request",
   "wait.denied.desc":
     "The person at the host Mac rejected this pairing. If that was you by mistake, try again — otherwise pick a different host.",
@@ -81,8 +56,8 @@ const EN: Dict = {
   "wait.descPre": "A prompt should appear on",
   "wait.descPost": ". Accept it there to continue.",
   "wait.requestingFrom": "Requesting from",
+  "wait.discoveryMissing": "Host is not discoverable on your network or Tailscale yet.",
 
-  // Client Mappings
   "map.title": "Folder mappings",
   "map.desc": "Mount host folders on this Mac, or pair folders for two-way sync.",
   "map.empty": "No mappings yet. Add your first below.",
@@ -110,8 +85,6 @@ const EN: Dict = {
   "map.localTitle": "Choose local folder",
   "map.localUnsupported": "Type an absolute local path starting with / or ~/.",
 
-
-  // Client Done
   "done.client.title": "You're all set",
   "done.client.pairedWith": "Paired with",
   "done.client.yourHost": "your host",
@@ -124,29 +97,9 @@ const EN: Dict = {
 };
 
 const KO: Dict = {
-  "shell.back": "이전",
-  "shell.next": "다음",
-  "shell.getStarted": "시작하기",
-  "shell.finish": "완료",
-  "shell.openXpair": "Xpair 열기",
-  "shell.close": "닫기",
-  "shell.notAvailable": "—",
-
   "client.welcome.title": "Xpair에 오신 것을 환영합니다",
   "client.welcome.desc":
     "전용 Mac에서 Claude Code를 실행하세요. 노트북을 닫아도 계속 작동합니다.",
-
-  "consent.crash.title": "버그 개선을 도와주세요",
-  "consent.crash.desc":
-    "Xpair에 문제가 생기면 익명 스택 트레이스를 보내주세요. 파일명, 코드, 개인정보는 포함되지 않습니다.",
-  "consent.crash.label": "크래시 리포트 전송",
-  "consent.crash.sub": "익명. 오류가 발생했을 때만 전송됩니다.",
-  "consent.recommended": "권장",
-  "consent.analytics.title": "다음에 만들 것을 함께 정해요",
-  "consent.analytics.desc":
-    "어떤 기능이 얼마나 쓰이는지 집계 데이터를 공유해 주세요. 파일명, 코드, 키 입력은 절대 수집하지 않습니다.",
-  "consent.analytics.label": "사용 분석 공유",
-  "consent.analytics.sub": "기본은 꺼짐. 설정에서 언제든 변경할 수 있습니다.",
 
   "discover.title": "호스트 찾기",
   "discover.desc": "같은 네트워크와 Tailscale에서 XpairHost를 검색합니다.",
@@ -154,6 +107,7 @@ const KO: Dict = {
   "discover.installedDesc":
     "연결할 Mac에 XpairHost가 실행되어 있어야 합니다. 이미 설정되어 있다면 곧 목록에 나타납니다. 아직이라면 먼저 설치하고 돌아오세요.",
   "discover.openHost": "호스트 온보딩 열기",
+  "discover.downloadCli": "Xpair CLI 다운로드",
   "discover.engineRecovery.title": "호스트 엔진 설정을 마치세요",
   "discover.engineRecovery.desc":
     "호스트는 페어링되었지만 코딩 에이전트가 아직 설치되지 않았거나 로그인되지 않았습니다. 해당 Mac에서 호스트 온보딩을 열어 마무리하세요. 여기서 호스트를 다시 선택해도 해결되지 않습니다.",
@@ -196,6 +150,7 @@ const KO: Dict = {
   "wait.descPre": "다음 Mac에 프롬프트가 표시됩니다:",
   "wait.descPost": ". 거기서 수락하면 계속됩니다.",
   "wait.requestingFrom": "요청 대상",
+  "wait.discoveryMissing": "호스트가 아직 같은 네트워크나 Tailscale에서 검색되지 않습니다.",
 
   "map.title": "폴더 매핑",
   "map.desc": "호스트 폴더를 이 Mac에 마운트하거나 폴더를 양방향 동기화하세요.",
@@ -224,7 +179,6 @@ const KO: Dict = {
   "map.localTitle": "로컬 폴더 선택",
   "map.localUnsupported": "로컬 절대 경로를 / 또는 ~/로 시작해서 입력하세요.",
 
-
   "done.client.title": "모두 준비되었습니다",
   "done.client.pairedWith": "페어링 완료:",
   "done.client.yourHost": "호스트",
@@ -236,18 +190,4 @@ const KO: Dict = {
   "done.folders": "개 폴더",
 };
 
-const DICTS: Record<Locale, Dict> = { en: EN, ko: KO };
-
-export type TFn = (key: keyof typeof EN | string, vars?: Record<string, string | number>) => string;
-
-function format(str: string, vars?: Record<string, string | number>) {
-  if (!vars) return str;
-  return str.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? `{${k}}`));
-}
-
-export function useT(): { t: TFn; locale: Locale } {
-  const { locale } = useLocale();
-  const dict = DICTS[locale] ?? EN;
-  const t: TFn = (key, vars) => format(dict[key] ?? EN[key] ?? String(key), vars);
-  return { t, locale };
-}
+export const useT = createUseT({ en: EN, ko: KO });

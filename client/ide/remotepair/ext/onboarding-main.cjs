@@ -79,6 +79,7 @@ const RENDERER_METHODS = new Set([
   'getConfig',
   'cliReady',
   'installCli',
+  'openExternal',
   'openHostOnboarding',
   'hostAppStatus',
   'setHost',
@@ -140,6 +141,15 @@ function forcedOnboardingRequested(argv = process.argv) {
   return forceOnboardingSentinelExists()
 }
 
+async function cliProbeReady(probeBridge = bridge) {
+  try {
+    const cli = await probeBridge.cliReady()
+    return !!cli && cli.ready === true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Evaluate the launch guard in wizard order and return the first step that needs attention.
  * Folder mappings are not a launch guard; every other runtime precondition is rechecked per launch.
@@ -154,13 +164,12 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   const host = configuredRemoteHost(clientEnv)
   if (!host) return START_STEP.WELCOME
 
-  try {
-    const cli = await probeBridge.cliReady()
-    // cliReady is false for a missing, broken, OR out-of-date CLI (one too old to convey the host's
-    // serving verdict) — all route to WELCOME, which reinstalls the bundled CLI via installCli.
-    if (!cli || cli.ready !== true) return START_STEP.WELCOME
-  } catch {
-    return START_STEP.WELCOME
+  // cliReady is false for a missing, broken, OR out-of-date CLI (one too old to convey the host's
+  // serving verdict) — all route to WELCOME, which reinstalls the bundled CLI via installCli.
+  if (!(await cliProbeReady(probeBridge))) return START_STEP.WELCOME
+
+  if (process.platform !== 'darwin') {
+    return null
   }
 
   try {

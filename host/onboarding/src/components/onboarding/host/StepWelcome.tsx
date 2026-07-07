@@ -1,7 +1,7 @@
-import { StepHero, StepHeader } from "../StepHero";
-import { LangToggle } from "../LangToggle";
+import { StepHero, StepHeader } from "@shared/components/onboarding/StepHero";
+import { LangToggle } from "@shared/components/onboarding/LangToggle";
 import { useT } from "@/lib/i18n";
-import logoUrl from "@/assets/xpair-logo.png";
+import logoUrl from "@shared/assets/xpair-logo.png";
 
 export function StepWelcome() {
   const { t } = useT();

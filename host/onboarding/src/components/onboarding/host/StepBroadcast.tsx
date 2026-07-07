@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, Fingerprint, Laptop, Loader2, Radio, ShieldAlert, ShieldX } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@shared/components/ui/button";
 import { useT } from "@/lib/i18n";
 
 export type IncomingRequest = {

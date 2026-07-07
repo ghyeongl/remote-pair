@@ -142,8 +142,15 @@ if [[ "${SKIP_BUILD}" == "no" ]]; then
   # vscode/extensions/remotepair here ships it as the builtin 'remotepair' (matches the US-B onboarding
   # hook probe). CWD here is the recipe root ($VENDOR); the ext source is alongside this script.
   _RP_EXT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ext"
+  if [[ ! -f "$_RP_EXT_SRC/onboarding-webview/dist/index.html" ]]; then
+    echo "onboarding-webview/dist/index.html missing — run client/ide/build.sh so the webview builds before extension injection" >&2
+    exit 1
+  fi
   rm -rf vscode/extensions/remotepair
   cp -R "$_RP_EXT_SRC" vscode/extensions/remotepair
+  rm -rf \
+    vscode/extensions/remotepair/onboarding-webview/node_modules \
+    vscode/extensions/remotepair/onboarding-webview/src
   echo "→ injected Xpair builtin extension → vscode/extensions/remotepair"
 
   # Xpair app icon: injection moved to client/ide/build.sh (post-gulp, pre-sign). Overwriting the

@@ -26,7 +26,14 @@ const onboardingBridge = require("./onboarding-bridge.js");
 // the host over SSH so the host can show this client as connected. Self-contained, stdlib-only,
 // fire-and-forget (never crashes/blocks the IDE).
 const heartbeat = require("./heartbeat.js");
-const { listSessionsFromCli, checkSessionAvailableFromCli } = require("./session-list.js");
+const { SESSION_NAME_RE, listSessionsFromCli, checkSessionAvailableFromCli } = require("./session-list.js");
+const {
+  normalizeOpenedSessionNames,
+  claimOpenedSessionsBucket,
+  migrateOpenedSessionsClaim,
+  touchOpenedSessionsClaim,
+  writeOpenedSessionsForBucket,
+} = require("./opened-sessions.js");
 
 // --- constants -------------------------------------------------------------
 
@@ -108,13 +115,18 @@ const RP_HOST_DIR = path.join(os.homedir(), ".xpair/host");
 const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
+const OPENED_SESSIONS_FILE = path.join(RP_CLIENT_DIR, "opened-sessions.json");
+const OPENED_SESSIONS_DEBOUNCE_MS = 1000;
+const OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS = 10 * 60 * 1000;
+const OPENED_SESSIONS_RESTORE_ATTEMPTS = 3;
+const OPENED_SESSIONS_RESTORE_BACKOFF_MS = 600;
 const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
 // Per-WINDOW lock scope: the window's two extension hosts share the same workspace,
 // while different windows (almost always) hold different workspaces — sessionId is NOT
 // documented as per-window, so it cannot key this. Two windows on the SAME folder share
 // one owner: acceptable (same probes, one notifier) and strictly better than per-app
 // starvation. Guarded access: contract tests require this module with a vscode stub.
-const CLIENT_SERVICES_LOCK_FILE = (() => {
+function computeWorkspaceScopeId() {
   let scope = "global";
   try {
     const ws = vscode.workspace || {};
@@ -122,6 +134,18 @@ const CLIENT_SERVICES_LOCK_FILE = (() => {
       (ws.workspaceFolders || []).map((f) => f.uri.fsPath).join("|");
     if (id) scope = crypto.createHash("sha1").update(id).digest("hex").slice(0, 12);
   } catch (_e) { /* stubbed vscode */ }
+  return scope;
+}
+const CLIENT_SERVICES_SCOPE_ID = (() => {
+  let scope = "global";
+  try {
+    scope = computeWorkspaceScopeId();
+  } catch (_e) { /* stubbed vscode */ }
+  return scope;
+})();
+let currentSnapshotScopeId = CLIENT_SERVICES_SCOPE_ID;
+const CLIENT_SERVICES_LOCK_FILE = (() => {
+  const scope = CLIENT_SERVICES_SCOPE_ID;
   return path.join(RP_CLIENT_DIR, `extension-services.${scope}.lock`);
 })();
 // Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
@@ -156,6 +180,18 @@ const LOG_THRESHOLD = resolveLogThreshold();
 
 function sshControlPath() {
   return "/tmp/rp-cm-" + (process.env.RP_SSH_CM_TAG || "x") + "-%C";
+}
+
+function sshControlMasterArgs() {
+  if (process.platform === "win32") return [];
+  return [
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    `ControlPath=${sshControlPath()}`,
+    "-o",
+    "ControlPersist=300",
+  ];
 }
 
 // Local-tz ISO-8601 with offset, second precision (e.g. 2026-06-15T10:45:16+0900).
@@ -433,12 +469,7 @@ function sshRun(host, remoteCmd, opts = {}) {
     // and a single SSH-agent (1Password) authorization instead of one per probe. The path lives
     // under this GUI session's temp dir and %C keys it by host/port/user, so the electron-main
     // onboarding guard and extension-host workbench share it without a pid split.
-    "-o",
-    "ControlMaster=auto",
-    "-o",
-    `ControlPath=${sshControlPath()}`,
-    "-o",
-    "ControlPersist=300",
+    ...sshControlMasterArgs(),
     host, // validated against HOST_RE; passed as its own argv element
     remoteCmd,
   ];
@@ -627,9 +658,7 @@ function spawnTunnel(host, localPort, remotePort) {
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "ControlMaster=auto",
-    "-o", `ControlPath=${sshControlPath()}`,
-    "-o", "ControlPersist=300",
+    ...sshControlMasterArgs(),
     "-o", "ExitOnForwardFailure=yes",
     "-N",
     "-L", `${localPort}:127.0.0.1:${rport}`,
@@ -1709,20 +1738,19 @@ function reconcileBrowserRoots() {
 
 /**
  * C1.D3 — Run the client `xpair` CLI and capture its stdout/stderr. Spawned through
- * the user's login shell so PATH resolution finds `xpair` wherever it was installed
- * (~/.local/bin, /opt/homebrew/bin, /usr/local/bin, …) — the extension host does not inherit
- * an interactive PATH. argv is passed as a single POSIX-quoted command string to `sh -lc`.
+ * argv directly so local arguments are never shell-joined. The bridge resolver picks the
+ * platform install path first, then falls back to PATH through spawnEnv()'s enrichment.
  *
  * Returns { code, stdout, stderr }. Never throws (spawn errors resolve as code -1).
  */
 function runXpairCli(args, opts = {}) {
   const timeoutMs = opts.timeoutMs || 120000;
-  const quoted = ["xpair", ...args].map(shSingleQuote).join(" ");
-  const shell = process.env.SHELL || "/bin/sh";
+  const bin = onboardingBridge.rpBin();
+  const argv = (Array.isArray(args) ? args : []).map((arg) => String(arg));
   return new Promise((resolve) => {
     let child;
     try {
-      child = cp.spawn(shell, ["-lc", quoted], { windowsHide: true });
+      child = cp.spawn(bin, argv, { windowsHide: true, env: spawnEnv() });
     } catch (e) {
       resolve({ code: -1, stdout: "", stderr: String(e) });
       return;
@@ -1745,6 +1773,206 @@ function runXpairCli(args, opts = {}) {
     child.on("error", (e) => { err.push(String(e)); finish(-1); });
     child.on("close", (code) => finish(code == null ? 0 : code));
   });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let openedSessionsWriteTimer = null;
+let openedSessionsClaimTouchTimer = null;
+let openedSessionsPendingNames = null;
+let openedSessionsWritesEnabled = false;
+let openedSessionsClaimedBucketKey = null;
+
+function touchOpenedSessionsClaimNow() {
+  const bucketKey = openedSessionsClaimedBucketKey;
+  if (!bucketKey) return false;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during claim heartbeat: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+  if (!host) return false;
+  try {
+    if (!touchOpenedSessionsClaim(OPENED_SESSIONS_FILE, host, bucketKey, { now: Date.now(), pid: process.pid })) {
+      log("opened sessions: claim heartbeat skipped; lock unavailable or bucket no longer owned", "debug");
+      return false;
+    }
+    log(`opened sessions: touched claim heartbeat for bucket ${bucketKey}`, "debug");
+    return true;
+  } catch (e) {
+    log(`opened sessions: claim heartbeat failed: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+}
+
+function startOpenedSessionsClaimHeartbeat() {
+  if (openedSessionsClaimTouchTimer || !openedSessionsClaimedBucketKey) return;
+  openedSessionsClaimTouchTimer = setInterval(() => {
+    touchOpenedSessionsClaimNow();
+  }, OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS);
+}
+
+function stopOpenedSessionsClaimHeartbeat() {
+  if (!openedSessionsClaimTouchTimer) return;
+  clearInterval(openedSessionsClaimTouchTimer);
+  openedSessionsClaimTouchTimer = null;
+}
+
+function writeOpenedSessionsNow(host, names) {
+  const clean = normalizeOpenedSessionNames(names);
+  const bucketKey = openedSessionsClaimedBucketKey;
+  if (!bucketKey) {
+    log("opened sessions: write skipped; no claimed snapshot bucket", "debug");
+    return false;
+  }
+  try {
+    if (!writeOpenedSessionsForBucket(OPENED_SESSIONS_FILE, host, bucketKey, clean, { now: Date.now(), pid: process.pid })) {
+      log("opened sessions: write skipped; lock unavailable or invalid claimed bucket", "debug");
+      return false;
+    }
+    log(`opened sessions: wrote ${clean.length} session(s) for bucket ${bucketKey}`, "debug");
+    return true;
+  } catch (e) {
+    log(`opened sessions: write failed: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+}
+
+function migrateOpenedSessionsSnapshotScope() {
+  const oldBucketKey = openedSessionsClaimedBucketKey;
+  if (!oldBucketKey) return;
+  const nextScope = computeWorkspaceScopeId();
+  if (currentSnapshotScopeId === nextScope) return;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during snapshot scope migration: ${e && e.message ? e.message : e}`, "warn");
+  }
+  if (host) {
+    const migratedBucketKey = migrateOpenedSessionsClaim(OPENED_SESSIONS_FILE, host, oldBucketKey, nextScope, { now: Date.now(), pid: process.pid });
+    if (migratedBucketKey) {
+      openedSessionsClaimedBucketKey = migratedBucketKey;
+      currentSnapshotScopeId = nextScope;
+      log(`opened sessions: migrated snapshot bucket ${oldBucketKey} -> ${migratedBucketKey}`, "debug");
+    } else {
+      log(`opened sessions: snapshot bucket migration skipped ${oldBucketKey} -> ${nextScope}`, "debug");
+    }
+  }
+}
+
+function scheduleOpenedSessionsWrite(names) {
+  if (!openedSessionsClaimedBucketKey) {
+    log("opened sessions: ignored write before snapshot bucket claim", "debug");
+    return;
+  }
+  const host = getValidHost();
+  if (!host) return;
+  const clean = normalizeOpenedSessionNames(names);
+  if (!openedSessionsWritesEnabled) {
+    log(`opened sessions: ignored pre-restore write of ${clean.length} session(s)`, "debug");
+    return;
+  }
+  openedSessionsPendingNames = clean;
+  if (openedSessionsWriteTimer) return;
+  openedSessionsWriteTimer = setTimeout(() => {
+    openedSessionsWriteTimer = null;
+    const pending = openedSessionsPendingNames || [];
+    openedSessionsPendingNames = null;
+    writeOpenedSessionsNow(host, pending);
+  }, OPENED_SESSIONS_DEBOUNCE_MS);
+}
+
+function flushOpenedSessionsWriteOnDeactivate() {
+  if (!openedSessionsClaimedBucketKey) return;
+  if (!openedSessionsWriteTimer) return;
+  clearTimeout(openedSessionsWriteTimer);
+  openedSessionsWriteTimer = null;
+  const pending = openedSessionsPendingNames || [];
+  openedSessionsPendingNames = null;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during deactivate flush: ${e && e.message ? e.message : e}`, "warn");
+    return;
+  }
+  if (!host) return;
+  writeOpenedSessionsNow(host, pending);
+}
+
+function enableOpenedSessionWrites() {
+  openedSessionsWritesEnabled = true;
+}
+
+async function waitForAvailableSessionList() {
+  for (let attempt = 1; attempt <= OPENED_SESSIONS_RESTORE_ATTEMPTS; attempt += 1) {
+    const result = await listSessionsFromCli(runXpairCli, { log, timeoutMs: 5000 });
+    if (!result.unavailable) return result;
+    if (attempt < OPENED_SESSIONS_RESTORE_ATTEMPTS) {
+      await delay(OPENED_SESSIONS_RESTORE_BACKOFF_MS);
+    }
+  }
+  return null;
+}
+
+async function restoreOpenedSessionsOnActivation() {
+  const host = getValidHost();
+  const claimScope = computeWorkspaceScopeId();
+  currentSnapshotScopeId = claimScope;
+  const claim = host ? claimOpenedSessionsBucket(OPENED_SESSIONS_FILE, host, claimScope, { log, pid: process.pid }) : null;
+  openedSessionsClaimedBucketKey = claim ? claim.bucketKey : null;
+  startOpenedSessionsClaimHeartbeat();
+  const openedNames = claim ? claim.sessions : [];
+  let restored = 0;
+  let sessionListCanSyncSnapshot = false;
+
+  try {
+    if (!host || openedNames.length === 0) {
+      return 0;
+    }
+
+    const list = await waitForAvailableSessionList();
+    if (!list) {
+      log("opened sessions: session list unavailable during restore; keeping snapshot", "debug");
+      return 0;
+    }
+    if (list.sessions.length === 0) {
+      log("opened sessions: live session list empty during restore; keeping snapshot", "debug");
+      return 0;
+    }
+    sessionListCanSyncSnapshot = true;
+
+    const live = new Map(list.sessions.map((entry) => [entry.name, entry.attached]));
+    for (const name of openedNames) {
+      const attached = live.get(name);
+      if (!SESSION_NAME_RE.test(name) || attached === undefined) continue;
+      if (attached !== 0) {
+        log(`opened sessions: skipped restore for ${name}; attached elsewhere (${attached})`, "debug");
+        continue;
+      }
+      try {
+        await vscode.commands.executeCommand("remotepair.terminalSidebar.reattachSession", name);
+        restored += 1;
+      } catch (e) {
+        log(`opened sessions: restore ${name} failed: ${e && e.message ? e.message : e}`, "debug");
+      }
+    }
+    return restored;
+  } finally {
+    enableOpenedSessionWrites();
+    if (sessionListCanSyncSnapshot && restored === 0) {
+      try {
+        await vscode.commands.executeCommand("remotepair.terminalSidebar.syncOpenedSessions");
+      } catch (e) {
+        log(`opened sessions: post-restore sync failed: ${e && e.message ? e.message : e}`, "debug");
+      }
+    }
+  }
 }
 
 /**
@@ -1959,6 +2187,11 @@ function activate(context) {
   );
   const clientServiceDisposables = [];
   const clientServicesLock = claimClientServicesLock();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      migrateOpenedSessionsSnapshotScope();
+    })
+  );
   if (clientServicesLock) {
     clientServiceDisposables.push(clientServicesLock);
     context.subscriptions.push({
@@ -1997,14 +2230,12 @@ function activate(context) {
     // Stamp the install creation time at FIRST RUN, INDEPENDENT of consent. A bare epoch-ms with
     // no id is not PII, so this is safe pre-consent and gives time_to_wow_ms a real elapsed base
     // (first launch → first session) instead of ~0. Idempotent across activations.
-    if (clientServicesLock) {
-      telemetry.firstRunStamp();
-      // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
-      // (window closed before Done) whose event never sent — the claim persists until
-      // a consented launch/completion actually emits it, exactly once per install.
-      if (telemetry.claimFirstLaunchOnce()) {
-        telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
-      }
+    telemetry.firstRunStamp();
+    // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
+    // (window closed before Done) whose event never sent — the claim persists until
+    // a consented launch/completion actually emits it, exactly once per install.
+    if (telemetry.claimFirstLaunchOnce()) {
+      telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
     }
   } catch (e) {
     log(`telemetry first-launch: ${e && e.message ? e.message : e}`, "warn");
@@ -2190,6 +2421,9 @@ function activate(context) {
     vscode.commands.registerCommand("remotepair.sessions.checkAttach", (name) =>
       checkSessionAvailableFromCli(runXpairCli, name, { log })
     ),
+    vscode.commands.registerCommand("remotepair.sessions.writeOpened", (names) =>
+      scheduleOpenedSessionsWrite(names)
+    ),
     vscode.commands.registerCommand("remotepair.ensureExtensions", () => ensureExtensions(true)),
     vscode.commands.registerCommand("remotepair.setupFileAccess", () => setupFileAccess()),
     vscode.commands.registerCommand("remotepair.setupLayout", () => setupLayout(context, true)),
@@ -2240,19 +2474,19 @@ function activate(context) {
     clientServiceDisposables.push({ dispose: () => notifier.stop() });
   }
 
-  // 5a) Warm the Sessions sidebar, THEN default the visible sidebar to the Browser. Constructing the
-  //     Sessions view runs its constructor side effects — wiring the session reattacher and the
-  //     attached-sessions provider, and scheduling the embedded EditorPart — which the bottom
-  //     Detached/History reattach cards and the per-folder "New Session Here" depend on; without this
-  //     warm-up a Browser-first launch leaves reattach unwired until the user opens Sessions manually.
-  //     We then switch to the Browser: a fresh launch never has attached terminal tabs (they are live
-  //     editor instances, not restored), so "no terminal tabs → Browser" holds unconditionally, and
-  //     this runs for existing profiles too (unlike the one-time setupLayout gate). Closing the last
-  //     terminal tab later returns here via RemotePairEmptySessionsBrowserFallback (workbench source).
-  vscode.commands
-    .executeCommand("remotepair.terminalSidebar")
-    .then(() => vscode.commands.executeCommand("workbench.view.explorer"))
-    .then(undefined, (e) => log(`startup Browser default: ${e && e.message ? e.message : e}`, "warn"));
+  // 5a) Warm the Sessions sidebar in every window so the frontend reattacher/provider hooks are
+  //     wired. Snapshot restore/write ownership is claimed per opened-session bucket.
+  vscode.commands.executeCommand("remotepair.terminalSidebar")
+    .then(() => {
+      return restoreOpenedSessionsOnActivation();
+    })
+    .then((restored) => {
+      if (restored === 0) {
+        return vscode.commands.executeCommand("workbench.view.explorer");
+      }
+      return undefined;
+    })
+    .then(undefined, (e) => log(`startup session restore / Browser default: ${e && e.message ? e.message : e}`, "warn"));
 
   // 5) Open the RD editor tab on startup (Remote Desktop is this client's
   //    primary surface), then apply the one-time workbench layout. Chained so
@@ -2277,6 +2511,8 @@ function activate(context) {
 function deactivate() {
   // Stop the heartbeat and best-effort remove the host file so the host expires this client promptly.
   try { heartbeat.stopHeartbeat(); } catch { /* never let teardown throw */ }
+  try { stopOpenedSessionsClaimHeartbeat(); } catch { /* never let teardown throw */ }
+  try { flushOpenedSessionsWriteOnDeactivate(); } catch { /* never let teardown throw */ }
 }
 
 module.exports = { activate, deactivate, RemoteDesktopPanel };

@@ -31,12 +31,27 @@ else
   miss "generated/contracts.json missing — run generate-contracts.mjs"
 fi
 
-# 3) self-containment: only the generator may reference the parent shared/ (relative parent paths)
+# 3) self-containment: only the generator may reference the parent shared/ (relative parent paths).
+#    onboarding-webview/ is a BUILD ROOT, not shipped source: dev-build.sh injects only its dist/
+#    (src/ and node_modules/ are excluded), so its tsconfig/vite aliases may point at
+#    shared/onboarding-ui at build time (WS12/D1). The shipped invariant moves to check 3b.
 viol=$(grep -rnE '\.\./\.\./shared|\.\./shared' "$EXT" --include='*.js' --include='*.json' 2>/dev/null \
        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
-       | grep -v 'generate-contracts' || true)
-[[ -z "$viol" ]] && ok "no client/ide/ → parent shared/ deps (generator excepted)" \
+       | grep -v 'generate-contracts' \
+       | grep -v '/onboarding-webview/' || true)
+[[ -z "$viol" ]] && ok "no client/ide/ → parent shared/ deps (generator + webview build root excepted)" \
                   || { miss "client/ide/ reaches parent shared/:"; echo "$viol"; }
+
+# 3b) the SHIPPED webview bundle must be self-contained: the dist (build-time generated per
+#     WS12/D1) may not reference parent paths at runtime.
+WVDIST="$EXT/onboarding-webview/dist"
+if [[ -d "$WVDIST" ]]; then
+  dviol=$(grep -rnE '\.\./\.\./shared|\.\./shared' "$WVDIST" 2>/dev/null || true)
+  [[ -z "$dviol" ]] && ok "webview dist self-contained" \
+                     || { miss "webview dist reaches parent shared/:"; echo "$dviol"; }
+else
+  ok "webview dist absent (built at build time per D1)"
+fi
 
 # 4) generated identity/version fields are covered by the SoT (no silent drift surface)
 command -v jq >/dev/null || { echo "jq required"; exit 2; }
