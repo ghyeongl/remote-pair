@@ -485,15 +485,23 @@
     }
     pc2 = pc;
     pc.addTransceiver("video", { direction: "recvonly" });
-    // Remote input: create the rp-ctl/rp-move DataChannels (host also creates
-    // them, so whichever side wins, `ondatachannel` wires the survivor).
-    if (typeof pc.createDataChannel === "function") {
-      wireInputChannel(pc.createDataChannel("rp-ctl"));
-      wireInputChannel(pc.createDataChannel("rp-move"));
-    }
 
     let sock = null;
     const isCurrent = () => v2Mode && generation === v2Generation && pc2 === pc && ws === sock;
+    let negotiatedInputChannelsCreated = false;
+
+    const createNegotiatedInputChannels = () => {
+      if (
+        negotiatedInputChannelsCreated ||
+        !isCurrent() ||
+        typeof pc.createDataChannel !== "function"
+      ) {
+        return;
+      }
+      negotiatedInputChannelsCreated = true;
+      wireInputChannel(pc.createDataChannel("rp-ctl", { negotiated: true, id: 0 }));
+      wireInputChannel(pc.createDataChannel("rp-move", { negotiated: true, id: 1, ordered: false, maxRetransmits: 0 }));
+    };
 
     const cancelCurrent = () => {
       if (!isCurrent()) return;
@@ -609,6 +617,7 @@
       }
     };
 
+    // Legacy fallback: old hosts still create in-band rp-ctl/rp-move channels.
     pc.ondatachannel = function (ev) {
       if (!isCurrent()) return;
       wireInputChannel(ev.channel);
@@ -657,6 +666,7 @@
 
     sock.addEventListener("open", function () {
       if (!isCurrent()) return;
+      sock.send(JSON.stringify({ type: "hello", proto: 1, caps: { negotiatedInput: true } }));
       showOverlay("v2: signaling connected, negotiating…");
     });
     sock.addEventListener("message", async function (ev) {
@@ -679,6 +689,10 @@
         const detail = parts.join("\n");
         showFailureOverlay(kind, detail);
         reportCurrentError(detail || "remote desktop status: " + kind, kind);
+        return;
+      }
+      if (m.type === "hello-ack") {
+        if (m.negotiatedInput === true) createNegotiatedInputChannels();
         return;
       }
       if (m.type === "offer") {

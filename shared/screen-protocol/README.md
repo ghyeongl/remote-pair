@@ -19,6 +19,19 @@ the active WebRTC session. Input is gated by the host helper readiness signal:
 `rp-ctl` carries reliable ordered control input and `rp-move` carries lossy
 pointer motion.
 
+For v2 WebRTC signaling, new clients send this first WebSocket message before
+SDP/ICE:
+
+```json
+{"type":"hello","proto":1,"caps":{"negotiatedInput":true}}
+```
+
+New hosts reply with `{"type":"hello-ack","negotiatedInput":true}` before the
+offer and both peers create negotiated input DataChannels with fixed stream IDs:
+`rp-ctl` is `0`, `rp-move` is `1`. If the hello is absent, times out, or is not
+recognized, the session remains in legacy in-band DataChannel mode for version
+skew compatibility.
+
 ## Contract (`constants.json`)
 | Area | Value |
 |------|-----|
@@ -27,7 +40,8 @@ pointer motion.
 | v0 fallback | ssh screenshot polling, switches in auto after ~4s with no frame |
 | Capture parameters | fps 1–120 · quality 1–100 · scale 0.1–1.0 |
 | Remote input | supported; pointer/wheel/keyboard/text forwarding inside the RD webview |
-| WebRTC DataChannels | `rp-ctl` reliable ordered input; `rp-move` unreliable pointer motion |
+| WebRTC hello | client `hello` proto 1 with `negotiatedInput`; host `hello-ack` |
+| WebRTC DataChannels | negotiated `rp-ctl` id 0 reliable ordered input; negotiated `rp-move` id 1 unreliable pointer motion; legacy in-band fallback |
 | webview→ext message | ready·v2Error·v2FirstFrame |
 
 ## Consumers

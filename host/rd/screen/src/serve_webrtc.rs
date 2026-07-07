@@ -60,6 +60,11 @@ const MAX_AU_FRAME_LEN: usize = 64 * 1024 * 1024;
 const MAX_CONTROL_FRAME_LEN: usize = 1024 * 1024;
 const ABR_NO_RR_CUT_AFTER: Duration = Duration::from_secs(2);
 const ABR_WRITE_HYSTERESIS: f32 = 0.05;
+const DEFAULT_HELLO_WAIT_MS: u64 = 400;
+const RP_HELLO_WAIT_ENV: &str = "RP_HELLO_WAIT_MS";
+const RD_HELLO_PROTO: u64 = 1;
+const RP_CTL_DATA_CHANNEL_ID: u16 = 0;
+const RP_MOVE_DATA_CHANNEL_ID: u16 = 1;
 
 type SignalingWs = WebSocketStream<tokio::net::TcpStream>;
 type WsTx = SplitSink<SignalingWs, Message>;
@@ -284,6 +289,8 @@ struct SignalingIo {
     ws_tx: WsTx,
     ws_rx: WsRx,
     sig_rx: mpsc::UnboundedReceiver<String>,
+    pending: Vec<String>,
+    closed: bool,
 }
 
 struct PeerResources {
@@ -347,6 +354,16 @@ struct ConnectedSession {
     abr_cancel: CancellationToken,
 }
 
+impl SignalingIo {
+    fn take_pending(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(self.pending.remove(0))
+        }
+    }
+}
+
 fn pli_should_force(last: Option<Instant>, now: Instant, cooldown: Duration) -> bool {
     if cooldown == Duration::from_millis(0) {
         return true;
@@ -404,6 +421,14 @@ fn env_duration_ms(name: &str, default_ms: u64) -> Duration {
         .filter(|value| *value > 0)
         .map(Duration::from_millis)
         .unwrap_or_else(|| Duration::from_millis(default_ms))
+}
+
+fn hello_wait() -> Duration {
+    std::env::var(RP_HELLO_WAIT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_HELLO_WAIT_MS))
 }
 
 fn env_f32(name: &str, default: f32) -> f32 {
@@ -1171,8 +1196,55 @@ fn should_forward_input_message(json: &[u8], last_applied_seq: &mut u64) -> bool
     true
 }
 
+fn hello_negotiated(text: &str) -> bool {
+    let parsed: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    parsed.get("type").and_then(serde_json::Value::as_str) == Some("hello")
+        && parsed.get("proto").and_then(serde_json::Value::as_u64) == Some(RD_HELLO_PROTO)
+        && parsed
+            .get("caps")
+            .and_then(|caps| caps.get("negotiatedInput"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+fn hello_ack_text() -> String {
+    serde_json::json!({
+        "type": "hello-ack",
+        "negotiatedInput": true,
+    })
+    .to_string()
+}
+
+async fn negotiate_input_mode(
+    ws_tx: &mut WsTx,
+    ws_rx: &mut WsRx,
+) -> Result<(bool, Vec<String>, bool), SessionError> {
+    match tokio::time::timeout(hello_wait(), ws_rx.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => {
+            let text = text.to_string();
+            if hello_negotiated(&text) {
+                ws_tx
+                    .send(Message::Text(hello_ack_text().into()))
+                    .await
+                    .map_err(|e| SessionError::WsHandshake(format!("send hello-ack: {e}")))?;
+                Ok((true, Vec::new(), false))
+            } else {
+                Ok((false, vec![text], false))
+            }
+        }
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => Ok((false, Vec::new(), true)),
+        Err(_) => Ok((false, Vec::new(), false)),
+        Ok(Some(Ok(_))) => Ok((false, Vec::new(), false)),
+        Ok(Some(Err(e))) => Err(SessionError::WsHandshake(e.to_string())),
+    }
+}
+
 async fn configure_input_data_channels(
     pc: &Arc<webrtc::peer_connection::RTCPeerConnection>,
+    negotiated: bool,
 ) -> Result<(Vec<Arc<RTCDataChannel>>, InputRx), SessionError> {
     let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let incoming_tx = in_tx.clone();
@@ -1180,7 +1252,7 @@ async fn configure_input_data_channels(
         let tx = incoming_tx.clone();
         Box::pin(async move {
             let label = dc.label().to_string();
-            if label == "rp-ctl" || label == "rp-move" {
+            if !negotiated && (label == "rp-ctl" || label == "rp-move") {
                 wire_input_data_channel(&dc, tx);
             } else {
                 tracing::debug!("serve-webrtc: ignoring unexpected input DataChannel '{label}'");
@@ -1188,13 +1260,18 @@ async fn configure_input_data_channels(
         })
     }));
 
+    let ctl_init = negotiated.then_some(RTCDataChannelInit {
+        negotiated: Some(RP_CTL_DATA_CHANNEL_ID),
+        ..Default::default()
+    });
     let ctl = pc
-        .create_data_channel("rp-ctl", None)
+        .create_data_channel("rp-ctl", ctl_init)
         .await
         .map_err(SessionError::from)?;
     let mv_init = RTCDataChannelInit {
         ordered: Some(false),
         max_retransmits: Some(0),
+        negotiated: negotiated.then_some(RP_MOVE_DATA_CHANNEL_ID),
         ..Default::default()
     };
     let mv = pc
@@ -1323,7 +1400,9 @@ async fn serve_session(
     let token = accepted.token;
     let capture_config = accepted.capture_config;
     let ws = accepted.ws;
-    let (mut ws_tx, ws_rx) = ws.split();
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    let (negotiated_input, pending_signaling, signaling_closed) =
+        negotiate_input_mode(&mut ws_tx, &mut ws_rx).await?;
     let control = app_capture_control_client();
 
     // --- build webrtc API with H264 ---
@@ -1565,15 +1644,16 @@ async fn serve_session(
     });
 
     // --- remote input: create TWO DataChannels BEFORE the offer ---
-    // Host-created channels put the m=application (SCTP) section in the first
-    // offer (no renegotiation). Client-created channels are also accepted here;
-    // the channel-ownership redesign is tracked separately.
+    // New clients send a bounded hello capability handshake and receive negotiated
+    // rp-ctl/rp-move channels with fixed SCTP stream IDs. Clients without the hello
+    // stay on the legacy in-band channels, which are still accepted by on_data_channel.
     // rp-ctl = reliable/ordered (text/keys/clicks); rp-move = unreliable/unordered
     // (mousemove — stale positions are worthless, dropping is correct) (B4).
-    let (_input_dcs, input_rx) = match configure_input_data_channels(&peer_setup.pc).await {
-        Ok(channels) => channels,
-        Err(error) => return peer_setup.close_with(error).await,
-    };
+    let (_input_dcs, input_rx) =
+        match configure_input_data_channels(&peer_setup.pc, negotiated_input).await {
+            Ok(channels) => channels,
+            Err(error) => return peer_setup.close_with(error).await,
+        };
 
     // --- create offer, send to browser ---
     let offer = match peer_setup
@@ -1606,6 +1686,8 @@ async fn serve_session(
         ws_tx,
         ws_rx,
         sig_rx,
+        pending: pending_signaling,
+        closed: signaling_closed,
     };
     let peer = peer_setup.into_resources(_input_dcs, input_rx);
     NegotiatingSession {
@@ -1634,6 +1716,17 @@ impl NegotiatingSession {
         let deadline = tokio::time::sleep(CONNECT_DEADLINE);
         tokio::pin!(deadline);
         loop {
+            if let Some(text) = self.io.take_pending() {
+                if let Err(error) = apply_signaling_message(&self.peer.pc, &text).await {
+                    let _ = self.peer.pc.close().await;
+                    return Err(error);
+                }
+                continue;
+            }
+            if self.io.closed {
+                let _ = self.peer.pc.close().await;
+                return Err(SessionError::SignalingClosed);
+            }
             tokio::select! {
                 _ = self.cancel.cancelled() => {
                     let _ = self
@@ -1797,6 +1890,13 @@ impl ConnectedSession {
 
     async fn run_inner(&mut self) -> Result<(), SessionError> {
         loop {
+            if let Some(text) = self.io.take_pending() {
+                apply_signaling_message(&self.peer.pc, &text).await?;
+                continue;
+            }
+            if self.io.closed {
+                return Ok(());
+            }
             tokio::select! {
                 _ = self.cancel.cancelled() => {
                     let _ = self
@@ -2442,6 +2542,33 @@ mod tests {
             now + Duration::from_millis(200),
             cooldown
         ));
+    }
+
+    #[test]
+    fn hello_negotiated_accepts_valid_capability_hello() {
+        assert!(hello_negotiated(
+            r#"{"type":"hello","proto":1,"caps":{"negotiatedInput":true}}"#
+        ));
+    }
+
+    #[test]
+    fn hello_negotiated_rejects_missing_caps_wrong_type_proto_and_invalid_json() {
+        assert!(!hello_negotiated(r#"{"type":"hello","proto":1}"#));
+        assert!(!hello_negotiated(
+            r#"{"type":"offer","proto":1,"caps":{"negotiatedInput":true}}"#
+        ));
+        assert!(!hello_negotiated(
+            r#"{"type":"hello","proto":2,"caps":{"negotiatedInput":true}}"#
+        ));
+        assert!(!hello_negotiated("{not json"));
+    }
+
+    #[test]
+    fn hello_ack_shape_advertises_negotiated_input() {
+        let value: serde_json::Value =
+            serde_json::from_str(&hello_ack_text()).expect("hello ack should be valid json");
+        assert_eq!(value["type"], "hello-ack");
+        assert_eq!(value["negotiatedInput"], true);
     }
 
     fn test_abr_cfg() -> AbrCfg {

@@ -9,6 +9,7 @@ C="$HERE/constants.json"
 command -v jq >/dev/null || { echo "jq required"; exit 2; }
 
 MAIN="$ROOT/host/rd/screen/src/main.rs"
+WEBRTC_RS="$ROOT/host/rd/screen/src/serve_webrtc.rs"
 EXT="$ROOT/client/ide/remotepair/ext/extension.js"
 RDJS="$ROOT/client/ide/remotepair/ext/media/remote-desktop.js"
 
@@ -25,6 +26,12 @@ eq() { # desc expected actual
 PORT_V1A=$(jq -r .transport.v1a_jpeg.defaultPort "$C")
 PORT_V2=$(jq -r .transport.v2_webrtc.defaultSignalPort "$C")
 REMOTE_INPUT=$(jq -r .remoteInput.supported "$C")
+HELLO_PROTO=$(jq -r .remoteInput.webrtcHello.proto "$C")
+HELLO_TYPE=$(jq -r .remoteInput.webrtcHello.type "$C")
+HELLO_ACK=$(jq -r .remoteInput.webrtcHello.ack "$C")
+HELLO_CAP=$(jq -r .remoteInput.webrtcHello.cap "$C")
+CTL_ID=$(jq -r '.remoteInput.negotiatedChannelIds["rp-ctl"]' "$C")
+MOVE_ID=$(jq -r '.remoteInput.negotiatedChannelIds["rp-move"]' "$C")
 
 # --- rs main.rs: default ports (clap args) ---
 have "rs main.rs v1a port = $PORT_V1A" "$MAIN" "default_value_t = $PORT_V1A"
@@ -44,8 +51,12 @@ fi
 # --- ide webview: Remote Desktop supports authenticated remote input ---
 have "remote-desktop.js recvonly video" "$RDJS" 'addTransceiver\("video", \{ direction: "recvonly" \}\)'
 have "remote-desktop.js receives DataChannels" "$RDJS" 'ondatachannel = function'
-have "remote-desktop.js creates rp-ctl" "$RDJS" 'createDataChannel\("rp-ctl"\)'
-have "remote-desktop.js creates rp-move" "$RDJS" 'createDataChannel\("rp-move"\)'
+have "remote-desktop.js sends hello" "$RDJS" "type:[[:space:]]*\"$HELLO_TYPE\""
+have "remote-desktop.js hello proto = $HELLO_PROTO" "$RDJS" "proto:[[:space:]]*$HELLO_PROTO"
+have "remote-desktop.js handles hello-ack" "$RDJS" "\"$HELLO_ACK\""
+have "remote-desktop.js hello cap '$HELLO_CAP'" "$RDJS" "$HELLO_CAP"
+have "remote-desktop.js creates negotiated rp-ctl id $CTL_ID" "$RDJS" "createDataChannel\\(\"rp-ctl\",[[:space:]]*\\{[[:space:]]*negotiated:[[:space:]]*true,[[:space:]]*id:[[:space:]]*$CTL_ID[[:space:]]*\\}\\)"
+have "remote-desktop.js creates negotiated rp-move id $MOVE_ID" "$RDJS" "createDataChannel\\(\"rp-move\",[[:space:]]*\\{[[:space:]]*negotiated:[[:space:]]*true,[[:space:]]*id:[[:space:]]*$MOVE_ID,[[:space:]]*ordered:[[:space:]]*false,[[:space:]]*maxRetransmits:[[:space:]]*0[[:space:]]*\\}\\)"
 have "remote-desktop.js captures pointerdown" "$RDJS" 'addEventListener\("pointerdown"'
 have "remote-desktop.js captures pointermove" "$RDJS" 'addEventListener\("pointermove"'
 have "remote-desktop.js captures pointerup" "$RDJS" 'addEventListener\("pointerup"'
@@ -61,6 +72,13 @@ have "remote-desktop.js sends wheel" "$RDJS" 't:[[:space:]]*["'\'']w["'\'']'
 have "remote-desktop.js sends key" "$RDJS" 't:[[:space:]]*["'\'']k["'\'']'
 have "remote-desktop.js sends text" "$RDJS" 't:[[:space:]]*["'\'']x["'\'']'
 have "remote-desktop.js gates badge on input-ready" "$RDJS" 'input-ready'
+
+# --- host webrtc: hello negotiation and fixed SCTP stream IDs ---
+have "serve_webrtc.rs parses hello" "$WEBRTC_RS" "\"$HELLO_TYPE\""
+have "serve_webrtc.rs emits hello-ack" "$WEBRTC_RS" "\"$HELLO_ACK\""
+have "serve_webrtc.rs checks hello cap" "$WEBRTC_RS" "$HELLO_CAP"
+have "serve_webrtc.rs rp-ctl id = $CTL_ID" "$WEBRTC_RS" "RP_CTL_DATA_CHANNEL_ID:[^=]*=[[:space:]]*$CTL_ID"
+have "serve_webrtc.rs rp-move id = $MOVE_ID" "$WEBRTC_RS" "RP_MOVE_DATA_CHANNEL_ID:[^=]*=[[:space:]]*$MOVE_ID"
 
 # --- ide webview: message vocabulary ---
 for m in $(jq -r '.webviewToExtMessages[]' "$C"); do
