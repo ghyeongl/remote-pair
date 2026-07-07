@@ -89,8 +89,8 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     sessionManager,
-    /const ATTACHED_SESSION_NAME_FREEZE_GRACE_MS = 30000;[\s\S]*function localAttachedSessionsHaveYoungUnfrozenName\(now = Date\.now\(\)\): boolean \{[\s\S]*a name we never learned[\s\S]*for \(const session of attachedProvider\?\.getAttached\(\) \?\? \[\]\)[\s\S]*if \(!normalizedSessionName\(session\.sessionName\) && now - session\.createdAt < ATTACHED_SESSION_NAME_FREEZE_GRACE_MS\) \{[\s\S]*return true;[\s\S]*function writeOpenedSessions\(commandService: ICommandService\): void \{[\s\S]*if \(localAttachedSessionsHaveYoungUnfrozenName\(\)\) \{[\s\S]*opened sessions write deferred until young attached session names freeze[\s\S]*return;[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.writeOpened', localAttachedSessionNameList\(\)\)/,
-    "Attached snapshot writes must defer only while an unfrozen attached terminal is still young",
+    /let openedSessionsWriteRetryTimer: ReturnType<typeof setTimeout> \| undefined;[\s\S]*const ATTACHED_SESSION_NAME_FREEZE_GRACE_MS = 30000;[\s\S]*function openedSessionsYoungUnfrozenRetryDelayMs\(now = Date\.now\(\)\): number \| undefined \{[\s\S]*a name we never learned[\s\S]*const remainingMs = session\.createdAt \+ ATTACHED_SESSION_NAME_FREEZE_GRACE_MS - now;[\s\S]*Math\.min\(retryDelayMs, remainingMs\)[\s\S]*function scheduleDeferredOpenedSessionsWrite\(commandService: ICommandService, delayMs: number\): void \{[\s\S]*if \(openedSessionsWriteRetryTimer !== undefined\) \{[\s\S]*writeOpenedSessions\(commandService\);[\s\S]*function writeOpenedSessions\(commandService: ICommandService\): void \{[\s\S]*const retryDelayMs = openedSessionsYoungUnfrozenRetryDelayMs\(\);[\s\S]*opened sessions write deferred until young attached session names freeze[\s\S]*scheduleDeferredOpenedSessionsWrite\(commandService, retryDelayMs\);[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.writeOpened', localAttachedSessionNameList\(\)\)/,
+    "Attached snapshot writes must defer only while an unfrozen attached terminal is still young and retry when the grace expires",
   );
   assert.match(
     terminalSidebar,
@@ -154,7 +154,7 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     extension,
-    /let openedSessionsClaimedBucketKey = null;[\s\S]*claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, currentSnapshotScopeId, \{ log, pid: process\.pid \}\)[\s\S]*openedSessionsClaimedBucketKey = claim \? claim\.bucketKey : null;[\s\S]*const openedNames = claim \? claim\.sessions : \[\];/,
+    /let openedSessionsClaimedBucketKey = null;[\s\S]*const claimScope = computeWorkspaceScopeId\(\);[\s\S]*currentSnapshotScopeId = claimScope;[\s\S]*claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, claimScope, \{ log, pid: process\.pid \}\)[\s\S]*openedSessionsClaimedBucketKey = claim \? claim\.bucketKey : null;[\s\S]*const openedNames = claim \? claim\.sessions : \[\];/,
     "opened-session restore/write ownership must come from the per-bucket claim",
   );
   assert.match(
@@ -164,8 +164,8 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     extension,
-    /restoreOpenedSessionsOnActivation\(\)[\s\S]*claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, currentSnapshotScopeId, \{ log, pid: process\.pid \}\)[\s\S]*const openedNames = claim \? claim\.sessions : \[\];[\s\S]*let sessionListWasAvailable = false;[\s\S]*const list = await waitForAvailableSessionList\(\);[\s\S]*if \(!list\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*sessionListWasAvailable = true;[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*if \(sessionListWasAvailable && restored === 0\) \{[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
-    "restore must use exactly the claimed bucket's sessions and sync immediately only when nothing was restored",
+    /restoreOpenedSessionsOnActivation\(\)[\s\S]*const claimScope = computeWorkspaceScopeId\(\);[\s\S]*claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, claimScope, \{ log, pid: process\.pid \}\)[\s\S]*const openedNames = claim \? claim\.sessions : \[\];[\s\S]*let sessionListCanSyncSnapshot = false;[\s\S]*const list = await waitForAvailableSessionList\(\);[\s\S]*if \(!list\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*if \(list\.sessions\.length === 0\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*sessionListCanSyncSnapshot = true;[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*if \(sessionListCanSyncSnapshot && restored === 0\) \{[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
+    "restore must use exactly the claimed bucket's sessions and sync immediately only when a non-empty live list restored nothing",
   );
   assert.doesNotMatch(
     extension,

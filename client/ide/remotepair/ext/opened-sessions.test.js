@@ -15,6 +15,7 @@ const {
   normalizeOpenedSessionNames,
   parseOpenedSessions,
   serializeOpenedSessions,
+  touchOpenedSessionsClaim,
   writeOpenedSessionsForBucket,
   writeOpenedSessionsForScope,
   readOpenedSessions,
@@ -224,6 +225,25 @@ test("claimed bucket writes target only the claimed key", () => {
   assert.deepStrictEqual(written.windows["scope-a#2"], { sessions: ["updated"], ts: 2000, pid: 102 });
 });
 
+test("claim heartbeat touch refreshes only this claimed bucket timestamp", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
+  const file = path.join(dir, "opened-sessions.json");
+  fs.writeFileSync(file, JSON.stringify({
+    v: OPENED_SESSIONS_VERSION,
+    host: "host-a",
+    windows: {
+      "scope-a": { sessions: ["one"], ts: 1000, pid: 101 },
+      "scope-a#2": { sessions: ["two"], ts: 1001, pid: 102 },
+    },
+  }) + "\n");
+
+  assert.equal(touchOpenedSessionsClaim(file, "host-a", "scope-a", { now: 2000, pid: 101 }), true);
+  assert.equal(touchOpenedSessionsClaim(file, "host-a", "scope-a#2", { now: 3000, pid: 101 }), false);
+  const written = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepStrictEqual(written.windows["scope-a"], { sessions: ["one"], ts: 2000, pid: 101 });
+  assert.deepStrictEqual(written.windows["scope-a#2"], { sessions: ["two"], ts: 1001, pid: 102 });
+});
+
 test("migration moves this claimed bucket, keeps its pid, and avoids live target collisions", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
   const file = path.join(dir, "opened-sessions.json");
@@ -346,9 +366,14 @@ test("opened-session restore and writes are owned by per-bucket claims, not the 
   assert.match(extension, /const CLIENT_SERVICES_SCOPE_ID = \(\(\) => \{[\s\S]*return scope;[\s\S]*const CLIENT_SERVICES_LOCK_FILE = \(\(\) => \{[\s\S]*const scope = CLIENT_SERVICES_SCOPE_ID;[\s\S]*extension-services\.\$\{scope\}\.lock/);
   assert.match(extension, /let currentSnapshotScopeId = CLIENT_SERVICES_SCOPE_ID;/);
   assert.match(extension, /writeOpenedSessionsForBucket\(OPENED_SESSIONS_FILE, host, bucketKey, clean, \{ now: Date\.now\(\), pid: process\.pid \}\)/);
+  assert.match(extension, /const OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS = 10 \* 60 \* 1000;/);
+  assert.match(extension, /function touchOpenedSessionsClaimNow\(\) \{[\s\S]*touchOpenedSessionsClaim\(OPENED_SESSIONS_FILE, host, bucketKey, \{ now: Date\.now\(\), pid: process\.pid \}\)/);
+  assert.match(extension, /function startOpenedSessionsClaimHeartbeat\(\) \{[\s\S]*setInterval\(\(\) => \{[\s\S]*touchOpenedSessionsClaimNow\(\);[\s\S]*OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS/);
+  assert.match(extension, /function deactivate\(\) \{[\s\S]*stopOpenedSessionsClaimHeartbeat\(\)[\s\S]*flushOpenedSessionsWriteOnDeactivate\(\)/);
   assert.match(extension, /function migrateOpenedSessionsSnapshotScope\(\) \{[\s\S]*const oldBucketKey = openedSessionsClaimedBucketKey;[\s\S]*const nextScope = computeWorkspaceScopeId\(\);[\s\S]*migrateOpenedSessionsClaim\(OPENED_SESSIONS_FILE, host, oldBucketKey, nextScope, \{ now: Date\.now\(\), pid: process\.pid \}\)[\s\S]*openedSessionsClaimedBucketKey = migratedBucketKey;[\s\S]*currentSnapshotScopeId = nextScope;/);
   assert.match(extension, /vscode\.workspace\.onDidChangeWorkspaceFolders\(\(\) => \{[\s\S]*migrateOpenedSessionsSnapshotScope\(\);[\s\S]*\}\)/);
-  assert.match(extension, /claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, currentSnapshotScopeId, \{ log, pid: process\.pid \}\)/);
+  assert.match(extension, /const claimScope = computeWorkspaceScopeId\(\);[\s\S]*currentSnapshotScopeId = claimScope;[\s\S]*claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, claimScope, \{ log, pid: process\.pid \}\)/);
+  assert.match(extension, /if \(list\.sessions\.length === 0\) \{[\s\S]*opened sessions: live session list empty during restore; keeping snapshot[\s\S]*return 0;[\s\S]*sessionListCanSyncSnapshot = true;/);
   assert.match(extension, /openedSessionsClaimedBucketKey = claim \? claim\.bucketKey : null;[\s\S]*const openedNames = claim \? claim\.sessions : \[\];/);
   assert.match(extension, /\/\/ 5a\) Warm the Sessions sidebar in every window[\s\S]*Snapshot restore\/write ownership is claimed per opened-session bucket[\s\S]*return restoreOpenedSessionsOnActivation\(\);/);
   assert.doesNotMatch(extension, /if \(clientServicesLock\) \{\n\s*return restoreOpenedSessionsOnActivation\(\);/);

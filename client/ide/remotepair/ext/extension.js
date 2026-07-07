@@ -31,6 +31,7 @@ const {
   normalizeOpenedSessionNames,
   claimOpenedSessionsBucket,
   migrateOpenedSessionsClaim,
+  touchOpenedSessionsClaim,
   writeOpenedSessionsForBucket,
 } = require("./opened-sessions.js");
 
@@ -116,6 +117,7 @@ const LOG_FILE = path.join(LOG_DIR, "ide.log");
 const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
 const OPENED_SESSIONS_FILE = path.join(RP_CLIENT_DIR, "opened-sessions.json");
 const OPENED_SESSIONS_DEBOUNCE_MS = 1000;
+const OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS = 10 * 60 * 1000;
 const OPENED_SESSIONS_RESTORE_ATTEMPTS = 3;
 const OPENED_SESSIONS_RESTORE_BACKOFF_MS = 600;
 const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
@@ -1774,9 +1776,47 @@ function delay(ms) {
 }
 
 let openedSessionsWriteTimer = null;
+let openedSessionsClaimTouchTimer = null;
 let openedSessionsPendingNames = null;
 let openedSessionsWritesEnabled = false;
 let openedSessionsClaimedBucketKey = null;
+
+function touchOpenedSessionsClaimNow() {
+  const bucketKey = openedSessionsClaimedBucketKey;
+  if (!bucketKey) return false;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during claim heartbeat: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+  if (!host) return false;
+  try {
+    if (!touchOpenedSessionsClaim(OPENED_SESSIONS_FILE, host, bucketKey, { now: Date.now(), pid: process.pid })) {
+      log("opened sessions: claim heartbeat skipped; lock unavailable or bucket no longer owned", "debug");
+      return false;
+    }
+    log(`opened sessions: touched claim heartbeat for bucket ${bucketKey}`, "debug");
+    return true;
+  } catch (e) {
+    log(`opened sessions: claim heartbeat failed: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+}
+
+function startOpenedSessionsClaimHeartbeat() {
+  if (openedSessionsClaimTouchTimer || !openedSessionsClaimedBucketKey) return;
+  openedSessionsClaimTouchTimer = setInterval(() => {
+    touchOpenedSessionsClaimNow();
+  }, OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS);
+}
+
+function stopOpenedSessionsClaimHeartbeat() {
+  if (!openedSessionsClaimTouchTimer) return;
+  clearInterval(openedSessionsClaimTouchTimer);
+  openedSessionsClaimTouchTimer = null;
+}
 
 function writeOpenedSessionsNow(host, names) {
   const clean = normalizeOpenedSessionNames(names);
@@ -1878,11 +1918,14 @@ async function waitForAvailableSessionList() {
 
 async function restoreOpenedSessionsOnActivation() {
   const host = getValidHost();
-  const claim = host ? claimOpenedSessionsBucket(OPENED_SESSIONS_FILE, host, currentSnapshotScopeId, { log, pid: process.pid }) : null;
+  const claimScope = computeWorkspaceScopeId();
+  currentSnapshotScopeId = claimScope;
+  const claim = host ? claimOpenedSessionsBucket(OPENED_SESSIONS_FILE, host, claimScope, { log, pid: process.pid }) : null;
   openedSessionsClaimedBucketKey = claim ? claim.bucketKey : null;
+  startOpenedSessionsClaimHeartbeat();
   const openedNames = claim ? claim.sessions : [];
   let restored = 0;
-  let sessionListWasAvailable = false;
+  let sessionListCanSyncSnapshot = false;
 
   try {
     if (!host || openedNames.length === 0) {
@@ -1894,7 +1937,11 @@ async function restoreOpenedSessionsOnActivation() {
       log("opened sessions: session list unavailable during restore; keeping snapshot", "debug");
       return 0;
     }
-    sessionListWasAvailable = true;
+    if (list.sessions.length === 0) {
+      log("opened sessions: live session list empty during restore; keeping snapshot", "debug");
+      return 0;
+    }
+    sessionListCanSyncSnapshot = true;
 
     const live = new Map(list.sessions.map((entry) => [entry.name, entry.attached]));
     for (const name of openedNames) {
@@ -1914,7 +1961,7 @@ async function restoreOpenedSessionsOnActivation() {
     return restored;
   } finally {
     enableOpenedSessionWrites();
-    if (sessionListWasAvailable && restored === 0) {
+    if (sessionListCanSyncSnapshot && restored === 0) {
       try {
         await vscode.commands.executeCommand("remotepair.terminalSidebar.syncOpenedSessions");
       } catch (e) {
@@ -2460,6 +2507,7 @@ function activate(context) {
 function deactivate() {
   // Stop the heartbeat and best-effort remove the host file so the host expires this client promptly.
   try { heartbeat.stopHeartbeat(); } catch { /* never let teardown throw */ }
+  try { stopOpenedSessionsClaimHeartbeat(); } catch { /* never let teardown throw */ }
   try { flushOpenedSessionsWriteOnDeactivate(); } catch { /* never let teardown throw */ }
 }
 

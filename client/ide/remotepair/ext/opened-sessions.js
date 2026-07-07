@@ -388,6 +388,32 @@ function writeOpenedSessionsForBucket(filePath, host, bucketKey, names, opts = {
   }
 }
 
+function touchOpenedSessionsClaim(filePath, host, bucketKey, opts = {}) {
+  const clean = cleanHost(host);
+  const key = cleanBucketKey(bucketKey);
+  const scope = baseScopeFromBucketKey(key);
+  if (!clean || !key || !scope) return false;
+  const dir = path.dirname(filePath);
+  const lockFile = path.join(dir, OPENED_SESSIONS_LOCK_FILE);
+  if (!claimOpenedSessionsLock(lockFile, opts)) return false;
+  try {
+    const now = nowFromOpts(opts);
+    const pid = pidFromOpts(opts);
+    const snapshot = readSnapshotForWrite(filePath, clean, scope, now, opts);
+    if (!snapshot) return false;
+    const existing = snapshot.windows[key];
+    if (!existing || existing.pid !== pid) return false;
+    snapshot.windows[key] = {
+      sessions: existing.sessions,
+      ts: now,
+      pid,
+    };
+    return writeSnapshotAtomic(filePath, snapshot);
+  } finally {
+    releaseOpenedSessionsLock(lockFile, opts);
+  }
+}
+
 function writeOpenedSessionsForScope(filePath, host, scopeId, names, opts = {}) {
   const clean = cleanHost(host);
   const scope = cleanScopeId(scopeId);
@@ -443,6 +469,7 @@ module.exports = {
   parseOpenedSessions,
   readOpenedSessions,
   claimOpenedSessionsBucket,
+  touchOpenedSessionsClaim,
   writeOpenedSessionsForBucket,
   writeOpenedSessionsForScope,
   migrateOpenedSessionsClaim,
