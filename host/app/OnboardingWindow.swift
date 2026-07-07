@@ -11,8 +11,8 @@
 // setEngineAuth/setEngine execute locally via EngineGuard (login-shell Process). The chosen engine is
 // persisted to ~/.xpair/host/host.env (the host-side counterpart of the client's client.env ENGINE).
 //
-// This window is shown by AppDelegate ONLY while Screen Recording is not granted (the hard run-gate).
-// onComplete fires when the React Done → complete() posts; closing it before SR is granted quits the app.
+// This window is shown by AppDelegate while required host permissions are not granted (the hard run-gate).
+// onComplete fires when the React Done → complete() posts; closing it before they are granted quits the app.
 
 import Cocoa
 import WebKit
@@ -33,6 +33,15 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
     // Set true once the React side calls complete() (Screen Recording granted). Distinguishes a
     // legitimate finish from the user dismissing the window while still ungranted (→ hard gate quit).
     private var completed = false
+    private static let onboardingStepPath = "\(RP_DIR)/onboarding-step.json"
+    private static let onboardingStepMax = 10
+
+    private var modeName: String {
+        switch mode {
+        case .runGate: return "runGate"
+        case .grantOnly: return "grantOnly"
+        }
+    }
 
     /// onComplete is invoked on the main thread when the React onboarding signals completion.
     /// `initialStep` deep-links the flow (e.g. "permissions"); nil starts at Welcome.
@@ -52,17 +61,22 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
       window.xpair = {
         openPermissionPane: (key) => post('openPermissionPane', [key]),
         requestPermission: (key) => post('requestPermission', [key]),
-        startInstall: () => post('startInstall', []),
-        getInstallStatus: () => post('getInstallStatus', []),
         getHostInfo: () => post('getHostInfo', []),
         getStatus: () => post('getStatus', []),
+        getOnboardingStep: () => post('getOnboardingStep', []),
+        setOnboardingStep: (n) => post('setOnboardingStep', [n]),
         getConsent: () => post('getConsent', []),
         setConsent: (c) => post('setConsent', [c]),
-        connectedClients: () => post('connectedClients', []),
+        beginPairing: (force = false) => post('beginPairing', [force]),
+        pairingStatus: () => post('pairingStatus', []),
+        acceptPairing: (request) => post('acceptPairing', [request]),
+        denyPairing: () => post('denyPairing', []),
+        endPairing: () => post('endPairing', []),
         engineStatus: (engine) => post('engineStatus', [engine]),
         installEngine: (engine) => post('installEngine', [engine]),
         setEngineAuth: (engine, key) => post('setEngineAuth', [engine, key]),
         setEngine: (engine) => post('setEngine', [engine]),
+        persistEngineIfUnset: (engine) => post('persistEngineIfUnset', [engine]),
         complete: () => post('complete', []),
       };
     })();
@@ -78,6 +92,10 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
                                   injectionTime: .atDocumentStart,
                                   forMainFrameOnly: true)
         controller.addUserScript(script)
+        let modeScript = WKUserScript(source: "window.__rp_mode = '\(modeName)';",
+                                      injectionTime: .atDocumentStart,
+                                      forMainFrameOnly: true)
+        controller.addUserScript(modeScript)
         // Deep-link the React onboarding straight to a specific step (e.g. "permissions" / "connect").
         // Injected atDocumentStart (before the app bundle runs) so App.tsx reads it on first render.
         // nil = start at Welcome (the whole flow from scratch), so inject nothing.
@@ -90,10 +108,10 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         controller.addScriptMessageHandler(self, contentWorld: .page, name: "rpbridge")
         config.userContentController = controller
 
-        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 720, height: 560), configuration: config)
+        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 720, height: 524), configuration: config)
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 524),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false)
@@ -144,10 +162,24 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         case "getStatus":
             replyHandler([
                 "alive": true,
+                "login": Permissions.loginGranted(),
                 "ax": Permissions.axTrusted(),
                 "sr": Permissions.srGranted(),
                 "fda": Permissions.fdaGranted(),
+                "sharing": Permissions.sharingGranted(),
             ], nil)
+
+        case "getOnboardingStep":
+            replyHandler(Self.readOnboardingStep(), nil)
+
+        case "setOnboardingStep":
+            let n = Self.intArg(args.first) ?? 0
+            do {
+                try Self.writeOnboardingStep(n)
+                replyHandler(nil, nil)
+            } catch {
+                replyHandler(nil, "onboarding-step write failed: \(error)")
+            }
 
         case "requestPermission":
             if let key = args.first as? String { Permissions.request(key) }
@@ -162,14 +194,6 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
                 "hostname": Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
                 "user": NSUserName(),
             ], nil)
-
-        case "getInstallStatus":
-            // Already installed (the app self-launched this onboarding), so report ready.
-            replyHandler(["appAlive": true, "launchAgentPresent": true, "serverUp": true], nil)
-
-        case "startInstall":
-            // No-op: installation already happened before onboarding is shown.
-            replyHandler(nil, nil)
 
         case "getConsent":
             // Both flags are opt-in (default OFF via AppDelegate's UserDefaults.register). The
@@ -191,13 +215,37 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
             }
             replyHandler(nil, nil)
 
-        case "connectedClients":
-            // Read-only: the connected-client list (ts within the freshness window). Reuses the same
-            // helper the menu bar uses. Never throws to the renderer — list() returns [] on any error.
-            let clients = ConnectedClients.list().map {
-                ["name": $0.name, "user": $0.user, "ageSec": $0.ageSec] as [String: Any]
+        case "beginPairing":
+            let force = args.first as? Bool ?? false
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    replyHandler(try PairingManager.shared.beginWindow(force: force), nil)
+                } catch {
+                    replyHandler(nil, "beginPairing failed: \(error)")
+                }
             }
-            replyHandler(clients, nil)
+
+        case "pairingStatus":
+            replyHandler(PairingManager.shared.status(), nil)
+
+        case "acceptPairing":
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let request = args.first as? [String: Any]
+                    let requestID = (request?["id"] as? String) ?? (args.first as? String) ?? ""
+                    let fingerprint = (request?["keyFingerprint"] as? String) ?? ""
+                    replyHandler(try PairingManager.shared.acceptIncoming(requestID: requestID,
+                                                                         fingerprint: fingerprint), nil)
+                } catch {
+                    replyHandler(nil, "acceptPairing failed: \(error)")
+                }
+            }
+
+        case "denyPairing":
+            replyHandler(PairingManager.shared.denyIncoming(), nil)
+
+        case "endPairing":
+            replyHandler(PairingManager.shared.endWindow(), nil)
 
         case "engineStatus":
             guard let engine = args.first as? String, EngineGuard.isKnown(engine) else {
@@ -243,10 +291,23 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
             let r = EngineGuard.persist(engine)
             replyHandler(["ok": r.ok, "err": r.err], nil)
 
+        case "persistEngineIfUnset":
+            guard let engine = args.first as? String, EngineGuard.isKnown(engine) else {
+                replyHandler(["ok": false, "err": "unknown engine"], nil)
+                return
+            }
+            let r = EngineGuard.persistIfUnset(engine)
+            replyHandler(["ok": r.ok, "err": r.err], nil)
+
         case "complete":
             guard Permissions.allGranted() else {
-                log(.warn, "onboarding complete ignored — Accessibility/Screen Recording still not granted")
+                log(.warn, "onboarding complete ignored — required host permissions still not granted")
                 replyHandler(["ok": false, "err": "permissions not granted"], nil)
+                return
+            }
+            guard PairingManager.shared.hasPairedClient() else {
+                log(.warn, "onboarding complete ignored — no proven paired client")
+                replyHandler(["ok": false, "err": "client not paired"], nil)
                 return
             }
             replyHandler(["ok": true], nil)
@@ -261,12 +322,50 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
 
     private func openPane(_ key: String) {
         let urls = [
+            "login": "x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin",
             "ax": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
             "sr": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
             "fda": "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+            "sharing": "x-apple.systempreferences:com.apple.preferences.sharing?Services_PersonalFileSharing",
         ]
         guard let s = urls[key], let url = URL(string: s) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    private static func intArg(_ value: Any?) -> Int? {
+        if let i = value as? Int { return i }
+        if let d = value as? Double { return Int(d) }
+        if let n = value as? NSNumber { return n.intValue }
+        return nil
+    }
+
+    private static func clampOnboardingStep(_ n: Int) -> Int {
+        min(max(n, 0), onboardingStepMax)
+    }
+
+    private static func readOnboardingStep() -> Int {
+        let url = URL(fileURLWithPath: onboardingStepPath)
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = intArg(obj["step"]) else {
+            return 0
+        }
+        return clampOnboardingStep(raw)
+    }
+
+    private static func writeOnboardingStep(_ n: Int) throws {
+        try FileManager.default.createDirectory(atPath: RP_DIR, withIntermediateDirectories: true)
+        let step = clampOnboardingStep(n)
+        let data = try JSONSerialization.data(withJSONObject: ["step": step], options: [])
+        try data.write(to: URL(fileURLWithPath: onboardingStepPath), options: [.atomic])
+    }
+
+    private func tearDownWebViewBridge() {
+        guard let webView else { return }
+        let controller = webView.configuration.userContentController
+        controller.removeScriptMessageHandler(forName: "rpbridge")
+        controller.removeAllUserScripts()
+        self.webView = nil
     }
 
     /// React Done → complete(): close the window and start serving.
@@ -277,6 +376,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         // consent OFF (Noop backend), so this is the first real init when crash consent is now ON.
         SentryBridge.setupIfConsented()
         log(.info, "onboarding complete → starting serving")
+        tearDownWebViewBridge()
         window.close()
         // Revert to menu-bar-only (LSUIElement) now that onboarding is done.
         NSApp.setActivationPolicy(.accessory)
@@ -286,12 +386,22 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
     // MARK: - NSWindowDelegate (hard gate)
 
     func windowWillClose(_ notification: Notification) {
+        _ = PairingManager.shared.endWindow()
+        tearDownWebViewBridge()
         switch mode {
         case .runGate:
-            // Launch gate: dismissing while AX/SR are still ungranted (and not completed) quits the
-            // app. (allGranted = axTrusted && srGranted.)
-            if !completed && !Permissions.allGranted() {
-                log(.warn, "onboarding dismissed without Accessibility+Screen Recording — quitting (hard gate)")
+            // Launch gate: required permissions are the hard serving gate. If they are granted, closing
+            // the window before pairing must still start serving so the host becomes pairable; pairing
+            // can finish later from the Connect flow/menu. If any required permission is missing, keep
+            // failing closed.
+            if !completed && Permissions.allGranted() {
+                completed = true
+                SentryBridge.setupIfConsented()
+                log(.info, "onboarding dismissed after required permissions — starting serving")
+                NSApp.setActivationPolicy(.accessory)
+                onComplete()
+            } else if !completed {
+                log(.warn, "onboarding dismissed without required host permissions — quitting (hard gate)")
                 NSApp.terminate(nil)
             }
         case .grantOnly:

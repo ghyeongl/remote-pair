@@ -152,17 +152,18 @@ this section is the logging-contract summary.
 
 | Service | Purpose | Consent flag (default `false`) | Client storage | Host storage |
 |---------|---------|-------------------------------|----------------|--------------|
-| **PostHog** | anonymous activation-funnel product analytics | `telemetry_consent` | `TELEMETRY_CONSENT` in `~/.remote-pair/client.env` | `UserDefaults RPTelemetryConsent` |
-| **Sentry** | crash/error reporting (additive to §10's local dumps) | `crash_report_consent` | `CRASH_REPORT_CONSENT` in `~/.remote-pair/client.env` | `UserDefaults RPCrashReportConsent` |
+| **PostHog** | anonymous activation-funnel product analytics | `telemetry_consent` | `TELEMETRY_CONSENT` in `~/.xpair/client/telemetry.env` | `UserDefaults RPTelemetryConsent` |
+| **Sentry** | crash/error reporting (additive to §10's local dumps) | `crash_report_consent` | `CRASH_REPORT_CONSENT` in `~/.xpair/client/telemetry.env` | `UserDefaults RPCrashReportConsent` |
 
 Each flag is independent — either can be on without the other. Consent is surfaced at first run
-(two unchecked checkboxes) and re-toggleable in settings.
+(two unchecked checkboxes). The `xpair.telemetry.enabled` setting mirrors `TELEMETRY_CONSENT`
+only; `CRASH_REPORT_CONSENT` remains owned by the onboarding consent flow.
 
 ### 11.2 Anonymous identity
 
 - `distinct_id` = `install_id` = an anonymous **UUID v4** generated once on first run and
   disk-persisted. No account linkage, no PII, ever.
-- Client: `TELEMETRY_ANON_ID` in `~/.remote-pair/client.env`. Host: `UserDefaults RPTelemetryAnonId`,
+- Client: `TELEMETRY_ANON_ID` in `~/.xpair/client/telemetry.env`. Host: `UserDefaults RPTelemetryAnonId`,
   mirrored to `~/.remote-pair/host.env` for reinstall continuity.
 - **Super properties** attached to every PostHog event: `app_version`, `os_version`,
   `device_arch`, `install_id`, `telemetry_consent`.
@@ -184,7 +185,7 @@ Gated on `telemetry_consent`. Property values for `reason` are the controlled en
 ### 11.4 Reserved Phase-2 event names (NOT fired yet)
 
 The names are frozen now so nothing is renamed later, but these are **not emitted** until the
-golden-path features (Bonjour LAN discovery, Tailscale-as-fallback, hosted waitlist) land:
+golden-path features (direct host discovery, Tailscale-as-fallback, hosted waitlist) land:
 `host_discovery_started`, `host_discovered`, `host_discovery_empty`, `tailscale_fallback_started`,
 `tailscale_auth_completed`, `tailscale_host_reachable`, `hosted_cta_shown`,
 `hosted_waitlist_submitted`.

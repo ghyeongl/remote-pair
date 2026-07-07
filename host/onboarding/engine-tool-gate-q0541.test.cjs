@@ -19,46 +19,46 @@ function test(name, fn) {
   try {
     fn();
     passed++;
-    console.log(`PASS ${name} - selected engine is gated on installed+authed`);
+    console.log(`PASS ${name} - selected engines are gated on installed+authed`);
   } catch (error) {
     failed++;
     console.error(`FAIL ${name} - ${error.message.split("\n")[0]}`);
   }
 }
 
-test("Q0541 host onboarding checks, installs, authenticates, and rechecks selected engines", () => {
+test("Q0541 US-003 host onboarding checks, installs, authenticates, and rechecks ready engines", () => {
   assert.match(
     app,
-    /w\.index === 2 && !engineReady/,
-    "Engine step Next must remain disabled until the selected engine reports ready",
+    /w\.index === ENGINE_IDX && engines\.size === 0/,
+    "Engine step Next must remain disabled until at least one selected engine reports ready",
   );
   assert.match(
     stepEngine,
-    /onReady\(r\.installed && r\.authed\)/,
-    "Engine probe must mark ready only when installed and authenticated are both true",
+    /const ready = new Set\(ORDER\.filter\(\(id\) => isReady\(nextStatuses\[id\]\)\)\)/,
+    "Engine selection set must be derived only from installed+authenticated statuses",
   );
   assert.match(
     stepEngine,
-    /catch \(err\) \{[\s\S]*onReady\(false\);[\s\S]*\}/,
-    "Probe errors must keep engine ready false and surface a reason",
+    /const nextSelected = new Set\(\[...selected\]\.filter\(\(id\) => ready\.has\(id\)\)\)/,
+    "Previously selected engines must stop counting if a fresh probe says they are not ready",
   );
   assert.match(
     stepEngine,
     /window\.xpair\.installEngine\(engine\)[\s\S]*await probe\(engine\)/,
-    "Install action must re-check the same selected engine after installation",
+    "Install action must re-check the same focused engine after installation",
   );
   assert.match(
     stepEngine,
     /window\.xpair\.setEngineAuth\(engine, apiKey\.trim\(\)\)[\s\S]*await probe\(engine\)/,
-    "API key sign-in must re-check the same selected engine after auth setup",
+    "API key sign-in must re-check the same focused engine after auth setup",
   );
   assert.ok(
-    stepEngine.includes('re-check') && stepEngine.includes("onClick={() => void probe(engine)}"),
-    "External login path must offer a re-check action for the same selected engine",
+    stepEngine.includes("re-check") && stepEngine.includes("onClick={() => void probe(engine)}"),
+    "External login path must offer a re-check action for the same focused engine",
   );
 
   for (const engine of ["claude", "codex", "opencode"]) {
-    assert.ok(stepEngine.includes(`id: "${engine}"`), `${engine} must be selectable in host onboarding`);
+    assert.ok(stepEngine.includes(`"${engine}"`), `${engine} must be selectable in host onboarding`);
     assert.ok(engineGuard.includes(`engine == "${engine}"`), `${engine} must be accepted by the host guard`);
     assert.ok(engineGuard.includes(`command -v ${engine}`), `${engine} install probe must check the real binary`);
   }
@@ -80,6 +80,11 @@ test("Q0541 host onboarding checks, installs, authenticates, and rechecks select
     onboardingWindow,
     /case "setEngineAuth":[\s\S]*EngineGuard\.setAuth\(engine, key: key\)/,
     "WK bridge must wire setEngineAuth to the real host guard",
+  );
+  assert.match(
+    onboardingWindow,
+    /case "setEngine":[\s\S]*EngineGuard\.persist\(engine\)/,
+    "WK bridge must persist ready engine choices to the host env",
   );
 });
 

@@ -6,14 +6,16 @@ const root = path.resolve(__dirname, "../..");
 const main = fs.readFileSync(path.join(root, "host/app/main.swift"), "utf8");
 const appDelegate = fs.readFileSync(path.join(root, "host/app/AppDelegate.swift"), "utf8");
 const onboardingWindow = fs.readFileSync(path.join(root, "host/app/OnboardingWindow.swift"), "utf8");
-const stepWaiting = fs.readFileSync(
-  path.join(root, "host/onboarding/src/components/onboarding/host/StepWaiting.tsx"),
+const hostApp = fs.readFileSync(path.join(root, "host/onboarding/src/App.tsx"), "utf8");
+const stepBroadcast = fs.readFileSync(
+  path.join(root, "host/onboarding/src/components/onboarding/host/StepBroadcast.tsx"),
   "utf8",
 );
 const stepDone = fs.readFileSync(
   path.join(root, "host/onboarding/src/components/onboarding/host/StepDone.tsx"),
   "utf8",
 );
+const i18n = fs.readFileSync(path.join(root, "host/onboarding/src/lib/i18n.ts"), "utf8");
 
 let passed = 0;
 let failed = 0;
@@ -69,33 +71,33 @@ test("Q0441 Host onboarding is a Host app/menu-bar product flow that waits for a
   );
   assert.match(
     onboardingWindow,
-    /connectedClients: \(\) => post\('connectedClients'/,
-    "Onboarding bridge must expose connected client status",
+    /beginPairing: \(force = false\) => post\('beginPairing', \[force\]\)/,
+    "Onboarding bridge must expose the host Broadcast/pairing start",
   );
   assert.match(
     onboardingWindow,
-    /case "connectedClients":[\s\S]*ConnectedClients\.list\(\)/,
-    "Connected client status must come from the real Host app/menu-bar state",
+    /case "pairingStatus":[\s\S]*PairingManager\.shared\.status\(\)/,
+    "Broadcast status must come from the real Host app/menu-bar pairing state",
   );
   assert.match(
-    stepWaiting,
-    /window\.xpair[\s\S]*\.connectedClients\(\)/,
-    "Host connect step must poll for client heartbeats",
+    hostApp,
+    /window\.xpair[\s\S]*\.pairingStatus\(\)/,
+    "Host connect step must poll the pairing lifecycle",
   );
   assert.match(
-    stepWaiting,
-    /On your other Mac, open Xpair/,
+    i18n,
+    /Open Xpair on your client/,
     "Host connect step must guide the user to start the Client",
   );
   assert.match(
-    stepWaiting,
-    /Waiting for a client/,
-    "Host connect step must remain in a waiting state when no client is connected",
+    stepBroadcast,
+    /state !== "waiting"/,
+    "Host connect step must remain in a waiting/broadcast state until a client is paired",
   );
   assert.match(
     stepDone,
-    /Pair a client anytime/,
-    "Completed host setup must still route client pairing back to the Host menu-bar flow",
+    /t\("done\.host\.menubar"\)/,
+    "Completed host setup must still route ongoing control back to the Host menu-bar flow",
   );
 });
 

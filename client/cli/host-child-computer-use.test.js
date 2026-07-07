@@ -25,20 +25,19 @@ test("Q0025 Q0101 Q0245 child sessions use the host tmux-aqua subtree for comput
   assert.match(hostManager, /TMUX, "-S", SOCKET, "new-session", "-s", "_keeper"/);
   assert.match(hostManager, /posix_spawn\(&pid, "\/usr\/bin\/script"/);
 
-  assert.match(launcher, /ensure_local_host\(\) \{/);
-  assert.match(launcher, /case "\$_role" in[\s\S]*host\|both\)[\s\S]*client\)[\s\S]*return 1/);
-  assert.match(launcher, /if ensure_local_host; then[\s\S]*exec "\$LOCAL_BIN\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$SESS"/);
-  assert.match(launcher, /Fallback: plain tmux \(no computer-use/);
+  assert.match(launcher, /Single uniform target: the configured host \(may be localhost\)\. No local\/remote branch\./);
+  assert.match(launcher, /\[ -n "\$REMOTE_HOST" \] \|\| die "no host configured/);
+  assert.doesNotMatch(launcher, /\bensure_local_host\b|\btm_local\b|\bLOCAL_PROJ\b/);
 
   assert.match(launcher, /TMUXB="\$\{REMOTE_BIN\}\/tmux-aqua"/);
   assert.match(launcher, /tm\(\) \{ "\\\$TMUXB" -S "\\\$SOCK" "\\\$@"; \}/);
   assert.match(launcher, /tm new-session -d -x \$\{COLS\} -y \$\{LINES\} -s "\\\$SESSION" -c \$\{HOST_DIR_Q\} "bash \\\$T"/);
-  assert.match(launcher, /mosh --server="\$MOSH_SERVER" "\$REMOTE_HOST" -- "\$REMOTE_HOME\/\.local\/bin\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$ACTUAL_SESSION"/);
+  assert.match(launcher, /mosh --ssh="ssh \$SSH_ID" --server="\$MOSH_SERVER" "\$REMOTE_HOST" -- "\$REMOTE_HOME\/\.local\/bin\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$ACTUAL_SESSION"/);
   // non-exec by design: ssh-fallback failure must return to choose_attach_recovery
-  assert.match(launcher, /\n  ssh -t "\$REMOTE_HOST" "\$REMOTE_BIN\/tmux-aqua -S \$\{AQUA_SOCK_Q\} attach -d -t/);
+  assert.match(launcher, /\n  ssh \$SSH_ID -t "\$REMOTE_HOST" "\$REMOTE_BIN\/tmux-aqua -S \$\{AQUA_SOCK_Q\} attach -d -t/);
 
   assert.match(cli, /in_host_session\(\) \{ case "\$\{TMUX:-\}" in \*aqua-tmux\.sock\*\) return 0/);
-  assert.match(cli, /computer-use gated: AX\+SR must both be/);
+  assert.match(cli, /not serving: Accessibility, Screen Recording, Full Disk Access .* Remote Login and File Sharing/);
   assert.match(cli, /INSIDE Xpair host.*computer-use available here/);
 });
 

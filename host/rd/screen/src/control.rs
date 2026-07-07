@@ -48,6 +48,11 @@ pub enum ControlOp {
         gen: u64,
         rid: String,
     },
+    Bitrate {
+        gen: u64,
+        rid: String,
+        bitrate: u32,
+    },
 }
 
 impl ControlOp {
@@ -69,23 +74,34 @@ impl ControlOp {
         Self::Keyframe { gen, rid }
     }
 
+    pub fn bitrate(gen: u64, rid: String, bitrate: u32) -> Self {
+        Self::Bitrate { gen, rid, bitrate }
+    }
+
     fn op(&self) -> AckOp {
         match self {
             Self::Start { .. } => AckOp::Start,
             Self::Stop { .. } => AckOp::Stop,
             Self::Keyframe { .. } => AckOp::Keyframe,
+            Self::Bitrate { .. } => AckOp::Bitrate,
         }
     }
 
     fn gen(&self) -> u64 {
         match self {
-            Self::Start { gen, .. } | Self::Stop { gen, .. } | Self::Keyframe { gen, .. } => *gen,
+            Self::Start { gen, .. }
+            | Self::Stop { gen, .. }
+            | Self::Keyframe { gen, .. }
+            | Self::Bitrate { gen, .. } => *gen,
         }
     }
 
     fn rid(&self) -> &str {
         match self {
-            Self::Start { rid, .. } | Self::Stop { rid, .. } | Self::Keyframe { rid, .. } => rid,
+            Self::Start { rid, .. }
+            | Self::Stop { rid, .. }
+            | Self::Keyframe { rid, .. }
+            | Self::Bitrate { rid, .. } => rid,
         }
     }
 }
@@ -129,6 +145,15 @@ impl Serialize for ControlOp {
                 state.serialize_field("rid", rid)?;
                 state.end()
             }
+            Self::Bitrate { gen, rid, bitrate } => {
+                let mut state = serializer.serialize_struct("ControlOp", 5)?;
+                state.serialize_field("v", &CONTROL_PROTOCOL_VERSION)?;
+                state.serialize_field("op", "bitrate")?;
+                state.serialize_field("gen", gen)?;
+                state.serialize_field("rid", rid)?;
+                state.serialize_field("bitrate", bitrate)?;
+                state.end()
+            }
         }
     }
 }
@@ -139,6 +164,7 @@ pub enum AckOp {
     Start,
     Stop,
     Keyframe,
+    Bitrate,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -294,6 +320,13 @@ impl ControlClient {
         }
     }
 
+    pub fn bitrate_noack(&self, gen: u64, bitrate: u32) {
+        let rid = self.next_rid(gen);
+        if let Err(e) = self.write_op(&ControlOp::bitrate(gen, rid, bitrate)) {
+            tracing::warn!("serve-webrtc: failed to write bitrate control op: {e}");
+        }
+    }
+
     pub fn deliver_ack(&self, ack: ControlAck) {
         let rid = ack.rid.clone();
         let mut pending = self.pending.blocking_lock();
@@ -424,6 +457,13 @@ mod tests {
             json,
             r#"{"v":1,"op":"start","gen":42,"rid":"42-1","fps":30,"bitrate":4000000,"scale":1.0}"#
         );
+
+        let op = ControlOp::bitrate(42, "42-2".to_string(), 1_500_000);
+        let json = serde_json::to_string(&op).expect("op serializes");
+        assert_eq!(
+            json,
+            r#"{"v":1,"op":"bitrate","gen":42,"rid":"42-2","bitrate":1500000}"#
+        );
     }
 
     #[test]
@@ -434,6 +474,7 @@ mod tests {
             r#"{"v":1,"ack":"start","gen":42,"rid":"42-3","result":{"status":"superseded","activeGen":43}}"#,
             r#"{"v":1,"ack":"start","gen":42,"rid":"42-4","result":{"status":"error","kind":"start-failed","reason":"no grant"}}"#,
             r#"{"v":1,"ack":"keyframe","gen":42,"rid":"42-5","result":{"status":"accepted"}}"#,
+            r#"{"v":1,"ack":"bitrate","gen":42,"rid":"42-6","result":{"status":"accepted"}}"#,
         ];
         for case in cases {
             let ack: ControlAck = serde_json::from_str(case).expect("ack variant deserializes");

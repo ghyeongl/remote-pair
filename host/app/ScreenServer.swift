@@ -244,8 +244,13 @@ final class ScreenServer {
         let cRead = pipeC[0], cWrite = pipeC[1]
 
         let argv = [bin, "serve-webrtc", "--token", "@\(RD_SESSION_TOKEN_FILE)"]
-        let env = ["PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        var env = ["PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
                    "HOME=\(HOME)", "LANG=en_US.UTF-8", "RP_AU_STDIN=1", "RP_AU_CONTROL_FD=3"]
+        // Forward RP_ABR* from the host app's env: the sidecar's abr_enabled() reads RP_ABR,
+        // so without this ABR is always off in the product path (fixed env doesn't inherit it).
+        for (key, value) in ProcessInfo.processInfo.environment where key.hasPrefix("RP_ABR") {
+            env.append("\(key)=\(value)")
+        }
         var cargs = argv.map { strdup($0) }; cargs.append(nil)
         var cenv = env.map { strdup($0) }; cenv.append(nil)
         defer { cargs.forEach { free($0) }; cenv.forEach { free($0) } }
@@ -328,6 +333,8 @@ final class ScreenServer {
             applyStop(gen: gen, rid: rid)
         case let .keyframeOp(gen, rid):
             applyKeyframe(gen: gen, rid: rid)
+        case let .bitrateOp(gen, _, bitrate):
+            applyBitrate(gen: gen, bitrate: bitrate)
         case let .startCompleted(gen, info):
             applyStartCompleted(gen: gen, info: info)
         case let .startFailed(gen, kind, reason):
@@ -437,6 +444,17 @@ final class ScreenServer {
         } else {
             writeAck(gen: gen, rid: rid, op: .keyframe, result: .accepted)
         }
+    }
+
+    private func applyBitrate(gen: Generation, bitrate: Int) {
+        // No-ack runtime ABR actuation: only retarget the live encoder for the active
+        // generation; a stale/non-running gen is ignored best-effort (like keyframe).
+        guard case let .running(active) = state, active == gen else {
+            log("SCREEN: ignoring bitrate op for non-active generation=\(gen.raw) active=\(String(describing: state.activeGen?.raw))")
+            return
+        }
+        log("SCREEN: control bitrate -> retarget encoder generation=\(gen.raw) bitrate=\(bitrate)")
+        captureEngine.setBitrate(bitrate)
     }
 
     private func applyStartCompleted(gen: Generation, info: StartedInfo) {
@@ -570,6 +588,9 @@ final class ScreenServer {
             return .stopOp(gen: gen, rid: message.rid)
         case "keyframe":
             return .keyframeOp(gen: gen, rid: message.rid)
+        case "bitrate":
+            guard let bitrate = message.bitrate else { return nil }
+            return .bitrateOp(gen: gen, rid: message.rid, bitrate: bitrate)
         default:
             return nil
         }

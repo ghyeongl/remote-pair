@@ -13,6 +13,24 @@ enum Permissions {
     static func axTrusted() -> Bool { AXIsProcessTrusted() }
     static func srGranted() -> Bool { CGPreflightScreenCaptureAccess() }
 
+    static func loginGranted() -> Bool { serviceEnabled("com.openssh.sshd") }
+
+    static func sharingGranted() -> Bool { serviceEnabled("com.apple.smbd") }
+
+    /// A launchd system service is "on" only if it is not disabled AND its target is loaded. The
+    /// target can exist while Remote Login / File Sharing is toggled OFF, so presence alone is not
+    /// proof: `launchctl print-disabled system` exposes the enable/disable override (`"<label>" =>
+    /// true` means disabled). Explicit override wins; otherwise fall back to target presence.
+    private static func serviceEnabled(_ label: String) -> Bool {
+        let disabled = runProbeOutput("/bin/launchctl", ["print-disabled", "system"])
+        if let line = disabled.split(separator: "\n").first(where: { $0.contains(label) }) {
+            let v = line.lowercased().replacingOccurrences(of: " ", with: "")
+            if v.contains("=>true") { return false }    // explicitly disabled
+            if v.contains("=>false") { return true }     // explicitly enabled
+        }
+        return runProbeStatus("/bin/launchctl", ["print", "system/\(label)"]) == 0
+    }
+
     /// FDA has no public preflight API → infer it by actually reading a TCC-protected file (TCC.db) that can only be opened with FDA.
     static func fdaGranted() -> Bool {
         let probe = (NSHomeDirectory() as NSString)
@@ -37,8 +55,11 @@ enum Permissions {
         "Permissions: Accessibility \(axTrusted() ? "✓" : "✗")  Screen Recording \(srGranted() ? "✓" : "✗")  Full Disk \(fdaGranted() ? "✓" : "✗")"
     }
 
-    /// Only checks computer-use's required gates (FDA is recommended, so it's not a gate).
-    static func allGranted() -> Bool { axTrusted() && srGranted() }
+    /// The required gates. AX + SR are computer-use's input/capture gates; Remote Login (sshd) is the
+    /// transport every client session rides on, and File Sharing (SMB) is required for /Volumes mount
+    /// mappings, so completion/launch must reflect all four.
+    /// (FDA is recommended, not a gate.)
+    static func allGranted() -> Bool { axTrusted() && srGranted() && loginGranted() && fdaGranted() && sharingGranted() }
 
     /// Onboarding-triggered single-permission request (the onboarding owns the surrounding UI, so no alert/panes here).
     /// AX → AXIsProcessTrustedWithOptions(prompt) shows the system prompt AND registers the app in the Accessibility list.
@@ -53,6 +74,40 @@ enum Permissions {
             if !srGranted() { CGRequestScreenCaptureAccess() }
         default:
             break   // fda: no programmatic request API — the user adds the app via the Full Disk Access pane
+        }
+    }
+
+    private static func runProbeStatus(_ path: String, _ args: [String]) -> Int32 {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus
+        } catch {
+            log(.debug, "permission status probe failed: \(path) \(args.joined(separator: " ")) — \(error)")
+            return -1
+        }
+    }
+
+    private static func runProbeOutput(_ path: String, _ args: [String]) -> String {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: path)
+        task.arguments = args
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            log(.debug, "permission output probe failed: \(path) \(args.joined(separator: " ")) — \(error)")
+            return ""
         }
     }
 }

@@ -8,7 +8,7 @@ cd "$(dirname "$0")"; . ./lib.sh
 new_sandbox
 make_all_mocks
 MOCK_DIRCHECK=__YES__ MOCK_REACH=ok \
-  run_launcher --remote "$SBX"
+  run_launcher "$SBX"
 
 it "ssh-capture/RESPAWN_B64-present"
 assert_contains "$(cat "$SSH_CAPTURE")" "RESPAWN_B64=" "setup script contains RESPAWN_B64="
@@ -39,7 +39,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks
 MOCK_DIRCHECK=__YES__ MOCK_REACH=ok MOCK_COLS=123 MOCK_LINES=45 \
-  run_launcher --remote "$SBX"
+  run_launcher "$SBX"
 
 it "presize/cols-in-new-session"
 assert_contains "$(cat "$SSH_CAPTURE")" "-x 123" "new-session contains -x 123"
@@ -55,7 +55,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks
 MOCK_DIRCHECK=__YES__ MOCK_REACH=ok \
-  run_launcher --remote "$SBX"
+  run_launcher "$SBX"
 
 it "base64-roundtrip/claude-remote-control"
 # extract the value from the RESPAWN_B64='...' line → base64 decode
@@ -74,7 +74,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks
 MOCK_DIRCHECK=__YES__ MOCK_REACH=ok \
-  run_launcher --remote "$SBX"
+  run_launcher "$SBX"
 
 it "mosh-line/present-in-mlog"
 mline="$(printf '%s\n' "$MLOG" | grep '^mosh|')"
@@ -108,7 +108,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks
 MOCK_DIRCHECK=__YES__ MOCK_REACH=ok \
-  run_launcher --remote "$SBX"
+  run_launcher "$SBX"
 
 it "session-name/default-rp_remote_1"
 mline="$(printf '%s\n' "$MLOG" | grep '^mosh|')"
@@ -122,7 +122,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks
 MOCK_DIRCHECK=__YES__ MOCK_REACH=ok MOCK_REMOTE_SESSION=foo_2 \
-  run_launcher --remote "$SBX"
+  run_launcher "$SBX"
 
 it "session-name/custom-foo_2"
 mline="$(printf '%s\n' "$MLOG" | grep '^mosh|')"
@@ -136,7 +136,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks
 MOCK_DIRCHECK=__YES__ MOCK_REACH=ok \
-  run_launcher --remote "$SBX"
+  run_launcher "$SBX"
 
 it "server-ensure/has-session-block"
 assert_contains "$(cat "$SSH_CAPTURE")" "tm has-session" "setup script contains tm has-session block"

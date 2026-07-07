@@ -26,7 +26,7 @@ make_all_mocks ssh mosh tmux tmux-aqua claude hangul-romanize launchctl open tpu
 _install_sleep_mock
 mkdir -p "$SBX/myproject"
 MOCK_REACH=fail MOCK_HASSESSION=0 \
-  run_launcher --remote "$SBX/myproject"
+  run_launcher "$SBX/myproject"
 
 it "s1/reach-fail: connect-required message on stderr"
 assert_contains "$RP_ERR" "please connect" "stderr asks the user to (re)connect"
@@ -58,7 +58,7 @@ MOCK_TS_JSON='{"Peer":{"k":{"ExitNodeOption":true,"Online":true,"DNSName":"exit.
 mkdir -p "$SBX/myproject"
 
 MOCK_REACH=fail MOCK_HASSESSION=0 \
-  run_launcher --remote "$SBX/myproject"
+  run_launcher "$SBX/myproject"
 
 it "s2/reach-fail-with-tailscale: NO 'tailscale set --exit-node' mutation"
 assert_absent "$MLOG" "tailscale|set" "exit-node is never configured"
@@ -86,7 +86,7 @@ _install_sleep_mock
 mkdir -p "$SBX/myproject"
 
 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ \
-  run_launcher --remote "$SBX/myproject"
+  run_launcher "$SBX/myproject"
 
 it "s3/reach-ok: proceeds remotely (mosh call)"
 assert_contains "$MLOG" "mosh|" "confirm mosh call (remote attach)"
@@ -111,7 +111,7 @@ _install_sleep_mock
 mkdir -p "$SBX/myproject"
 
 MOCK_REACH=ok MOCK_DIRCHECK=ssherr MOCK_HASSESSION=0 \
-  run_launcher --remote "$SBX/myproject"
+  run_launcher "$SBX/myproject"
 
 it "s4/dir-ssherr: NO silent local fallback (no new-session)"
 assert_absent "$MLOG" "new-session" "no local session created"
@@ -142,7 +142,7 @@ _install_sleep_mock
 mkdir -p "$SBX/myproject"
 
 MOCK_REACH=ok MOCK_DIRCHECK=__NO__ RP_YES=1 \
-  run_launcher --remote "$SBX/myproject"
+  run_launcher "$SBX/myproject"
 
 it "s5/dir-missing-yes: ssh mkdir call"
 assert_contains "$MLOG" "mkdir" "confirm ssh mkdir call"
@@ -158,7 +158,7 @@ _install_sleep_mock
 mkdir -p "$SBX/myproject"
 
 MOCK_REACH=ok MOCK_DIRCHECK=__NO__ \
-  run_launcher --remote "$SBX/myproject"
+  run_launcher "$SBX/myproject"
 
 it "s6/dir-missing-decline: rc=5 (directory creation declined)"
 assert_rc "$RP_RC" 5 "decline → exit 5"

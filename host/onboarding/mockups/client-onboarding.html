@@ -212,7 +212,7 @@
   <div class="page-sub">discovery → pair → connect · embedded Electron client (mockup for review)</div>
 
   <div class="legend">
-    <i><span class="sw" style="background:color-mix(in oklab, var(--accent-blue) 60%, transparent)"></span> LAN (Bonjour) — zero-config, 옆자리</i>
+    <i><span class="sw" style="background:color-mix(in oklab, var(--accent-blue) 60%, transparent)"></span> LAN beacon — zero-config, 옆자리</i>
     <i><span class="sw" style="background:color-mix(in oklab, var(--accent-violet) 60%, transparent)"></span> Tailscale — 이미 깔려있으면 동급 발견</i>
     <i><span class="sw" style="background:color-mix(in oklab, var(--destructive) 60%, transparent)"></span> 빈 상태 / 진단 / 폴백</i>
   </div>
@@ -284,7 +284,7 @@ const scanning = win({ sub:'Finding your host', step:1, nextLabel:'',
       <div class="core"><div>${I.wifi}</div></div></div>
     <h2 class="title sm">Looking for your host…</h2>
     <p class="lead">Scanning this network for Macs running XpairHost.</p>
-    <div class="scanline" style="margin-top:18px"><span class="spinner"></span> Bonjour · same Wi-Fi</div>
+    <div class="scanline" style="margin-top:18px"><span class="spinner"></span> LAN beacon · same Wi-Fi</div>
     <div class="scanline"><span class="spinner"></span> Tailscale · your tailnet</div>
   </div>`});
 
@@ -435,7 +435,7 @@ const done = win({ sub:'Done', step:4, prev:false, nextLabel:'Open Xpair', nextK
 
 const items = [
   frame('1 · Welcome', 'component ⑤ shell', welcome),
-  frame('2 · Discover — scanning (Bonjour + Tailscale)', 'component ①②', scanning),
+  frame('2 · Discover — scanning (LAN beacon + Tailscale)', 'component ①②', scanning),
   frame('3 · Discover — found · deduped, per-peer status', 'component ①② · reconnect/connect/setup', found),
   frame('4 · Discover — empty → diagnose + fallback', 'component ②⑤ · T3/T4', empty),
   frame('5 · Connect — PIN (host running, NO password)', 'component ③ · wow path', connectPin),

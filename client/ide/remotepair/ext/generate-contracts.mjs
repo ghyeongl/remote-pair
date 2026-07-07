@@ -34,6 +34,9 @@ const out = {
   version: vers.ide,
 };
 
-mkdirSync(join(here, "generated"), { recursive: true });
-writeFileSync(join(here, "generated", "contracts.json"), JSON.stringify(out, null, 2) + "\n");
-console.log("✓ generated/contracts.json written from shared/ SoT");
+// OUT overrides the destination so drift checks can regenerate to a temp file
+// without touching the committed copy (see shared/check-ide-selfcontained.sh).
+const dest = process.env.OUT || join(here, "generated", "contracts.json");
+if (!process.env.OUT) mkdirSync(join(here, "generated"), { recursive: true });
+writeFileSync(dest, JSON.stringify(out, null, 2) + "\n");
+console.log(`✓ ${dest} written from shared/ SoT`);

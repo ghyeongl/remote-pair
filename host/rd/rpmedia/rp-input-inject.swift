@@ -14,6 +14,7 @@
 // Echoes one line per command to stderr: RPIN seq=<N> t=<t> ...  (for the B5 cross-check).
 // Needs Accessibility (TCC). Korean text uses keyboardSetUnicodeString (layout-independent).
 import Foundation
+import Dispatch
 import CoreGraphics
 import ApplicationServices
 
@@ -137,6 +138,9 @@ func injectWheel(dx: Double, dy: Double, mode: Int, flags: UInt64 = 0) {
   }
 }
 let modifierKeyCodes: Set<Int> = [54, 55, 56, 58, 59, 60, 61, 62]
+// System Events shortcut delivery is serialized here; ordering against direct
+// CGEvent/AX injection paths remains best-effort.
+let systemEventsQueue = DispatchQueue(label: "com.xpair.rp-input-inject.system-events")
 var heldButtons = Set<String>()
 var heldKeys: [Int: UInt64] = [:]
 var lastPointerPoint: CGPoint?
@@ -171,6 +175,12 @@ func systemEventsKey(_ code: Int, _ flags: UInt64) {
   p.waitUntilExit()
 }
 
+func enqueueSystemEventsKey(_ code: Int, _ flags: UInt64) {
+  systemEventsQueue.async {
+    systemEventsKey(code, flags)
+  }
+}
+
 func injectKey(_ code: Int, _ flags: UInt64, _ action: String) {
   if action == "up" {
     postKeyEvent(code, down: false, flags: flags)
@@ -199,7 +209,7 @@ func injectKey(_ code: Int, _ flags: UInt64, _ action: String) {
   // CGEvent keyboard does NOT reach apps (verified); System Events does. Targets
   // the FRONTMOST app (a real host's focused app); layout-independent.
   if action == "down" {
-    systemEventsKey(code, flags)
+    enqueueSystemEventsKey(code, flags)
   }
 }
 // Find a focused/text element: production = system-wide focused element (whatever
@@ -389,4 +399,5 @@ while true {
   }
   handle(obj)
 }
+systemEventsQueue.sync {}
 releaseHeldInputs(reason: exitReason)

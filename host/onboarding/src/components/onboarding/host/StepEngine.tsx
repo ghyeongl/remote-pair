@@ -1,29 +1,52 @@
+import type { ComponentType } from "react";
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, Check, Download, KeyRound, Loader2, RotateCw } from "lucide-react";
+import {
+  AlertCircle,
+  Bot,
+  Check,
+  Download,
+  KeyRound,
+  Loader2,
+  RotateCw,
+  Sparkles,
+  SquareTerminal,
+  Terminal,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { EngineId } from "@/global";
+import { useT } from "@/lib/i18n";
+
+export type EngineKey = EngineId;
 
 type Props = {
-  engine: EngineId;
-  setEngine: (e: EngineId) => void;
-  // Lifted to the wizard so Next stays HARD-GATED until the chosen engine is installed AND
-  // authenticated on THIS host (or block with the reason).
-  onReady: (ready: boolean) => void;
+  selected: Set<EngineKey>;
+  setSelected: (s: Set<EngineKey>) => void;
 };
 
-type EngineStatus =
-  { installed: boolean; authed: boolean; version: string; err: string };
+type EngineStatus = {
+  installed: boolean;
+  authed: boolean;
+  version: string;
+  err: string;
+};
 
-type EngineStatuses = Record<EngineId, EngineStatus>;
+type EngineStatuses = Record<EngineKey, EngineStatus>;
 
-const ENGINES: { id: EngineId; label: string; blurb: string }[] = [
-  { id: "claude", label: "Claude Code", blurb: "Anthropic — the default." },
-  { id: "codex", label: "Codex", blurb: "OpenAI — GPT models." },
-  { id: "opencode", label: "opencode", blurb: "Open-source, multi-provider." },
-];
+const ORDER: EngineKey[] = ["claude", "codex", "opencode", "shell"];
+const ICONS: Record<EngineKey, ComponentType<{ className?: string }>> = {
+  claude: Sparkles,
+  codex: Bot,
+  opencode: Terminal,
+  shell: SquareTerminal,
+};
+const BADGE: Partial<Record<EngineKey, "recommended">> = { claude: "recommended" };
 
 const isReady = (s: EngineStatus | null | undefined) => !!s && s.installed && s.authed;
+const primaryEngine = (selected: Set<EngineKey>, preferred?: EngineKey | null) => {
+  if (preferred && selected.has(preferred)) return preferred;
+  return ORDER.find((id) => selected.has(id)) ?? null;
+};
 
 const missingText = (s: EngineStatus | null | undefined) => {
   if (!s) return "Not checked";
@@ -32,98 +55,101 @@ const missingText = (s: EngineStatus | null | undefined) => {
   return s.version ? `Ready (${s.version})` : "Ready";
 };
 
-/**
- * Engine step (host): the user picks the agent engine (claude | codex | opencode) and we HARD-GATE on
- * that engine being installed AND authenticated ON THIS MACHINE (the host runs it under `xpair launch`).
- * Unlike the client — which drives the same checks on the host OVER SSH — everything here runs locally.
- *   !installed         → "Install" (brew, non-interactive) → re-probe.
- *   installed, !authed → API key field → setEngineAuth (key handed to the host over stdin) → re-probe.
- * Browser-OAuth (codex ChatGPT login, opencode `auth login`) is easy here — this is the host's own
- * screen — so the user can just sign in in a terminal/browser and re-check; we only automate the API key.
- */
-export function StepEngine({ engine, setEngine, onReady }: Props) {
+export function StepEngine({ selected, setSelected }: Props) {
+  const { t } = useT();
+  const [engine, setEngine] = useState<EngineKey>("claude");
   const [statuses, setStatuses] = useState<EngineStatuses | null>(null);
   const [probing, setProbing] = useState(false);
-  const [installing, setInstalling] = useState<EngineId | null>(null);
+  const [installing, setInstalling] = useState<EngineKey | null>(null);
   const [authing, setAuthing] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [actionErr, setActionErr] = useState("");
-  const [showOther, setShowOther] = useState(false);
 
-  const probeOne = useCallback(async (e: EngineId): Promise<EngineStatus> => {
+  const probeOne = useCallback(async (e: EngineKey): Promise<EngineStatus> => {
+    // The shell engine (login shell) is always available — no install/auth, and no backend probe
+    // (engineStatus has no shell branch). Report it ready so a shell-only host can still advance.
+    if (e === "shell") return { installed: true, authed: true, version: "shell", err: "" };
     try {
-      const r = await window.xpair.engineStatus(e);
-      return r;
+      return await window.xpair.engineStatus(e);
     } catch (err) {
-      onReady(false);
       return { installed: false, authed: false, version: "", err: String(err) };
-    }
-  }, [onReady]);
-
-  const persistEngine = useCallback(async (e: EngineId) => {
-    try {
-      await window.xpair.setEngine(e);
-    } catch {
-      /* persist failure shouldn't block the probe */
     }
   }, []);
 
-  const probe = useCallback(async (preferred: EngineId = engine, allowReadyFallback = false) => {
-    setProbing(true);
-    setActionErr("");
-    onReady(false);
+  const persistEngine = useCallback(async (e: EngineKey) => {
     try {
-      const entries = await Promise.all(
-        ENGINES.map(async ({ id: e }) => [e, await probeOne(e)] as const),
-      );
-      const nextStatuses = Object.fromEntries(entries) as EngineStatuses;
-      setStatuses(nextStatuses);
-
-      const preferredReady = isReady(nextStatuses[preferred]);
-      const currentReady = isReady(nextStatuses[engine]);
-      const firstReady = ENGINES.find(({ id }) => isReady(nextStatuses[id]))?.id;
-      const nextEngine = preferredReady
-        ? preferred
-        : allowReadyFallback && currentReady
-        ? engine
-        : allowReadyFallback && firstReady
-        ? firstReady
-        : preferred;
-      const r = nextStatuses[nextEngine];
-
-      if (nextEngine !== engine) setEngine(nextEngine);
-      setApiKey("");
-      setShowOther(!isReady(r));
-      await persistEngine(nextEngine);
-      onReady(r.installed && r.authed);
-    } finally {
-      setProbing(false);
+      // xpair-launch reads this host.env ENGINE over SSH; host onboarding is the write site.
+      await window.xpair.setEngine(e);
+    } catch {
+      /* Persist failure should not make a ready local engine look unready. */
     }
-  }, [engine, onReady, persistEngine, probeOne, setEngine]);
+  }, []);
 
-  // Probe every supported engine on this host before rendering primary choices.
+  const probe = useCallback(
+    async (preferred: EngineKey = engine) => {
+      setProbing(true);
+      setActionErr("");
+      try {
+        const entries = await Promise.all(
+          ORDER.map(async (id) => [id, await probeOne(id)] as const),
+        );
+        const nextStatuses = Object.fromEntries(entries) as EngineStatuses;
+        setStatuses(nextStatuses);
+
+        const ready = new Set(ORDER.filter((id) => isReady(nextStatuses[id])));
+        const nextSelected = new Set([...selected].filter((id) => ready.has(id)));
+        if (ready.has(preferred)) nextSelected.add(preferred);
+        if (nextSelected.size === 0) {
+          const firstReady = ready.values().next().value as EngineKey | undefined;
+          if (firstReady) nextSelected.add(firstReady);
+        }
+
+        setSelected(nextSelected);
+        const focused = primaryEngine(nextSelected, preferred) ?? preferred;
+        setEngine(focused);
+        setApiKey("");
+
+        const primary = primaryEngine(nextSelected, focused);
+        if (primary) await persistEngine(primary);
+      } finally {
+        setProbing(false);
+      }
+    },
+    [engine, persistEngine, probeOne, selected, setSelected],
+  );
+
   useEffect(() => {
-    void probe(engine, true);
+    void probe(engine);
+    // Probe once on entry; explicit re-checks and install/auth actions call probe again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const chooseReadyEngine = useCallback(async (e: EngineId) => {
-    setEngine(e);
-    setApiKey("");
-    setActionErr("");
-    await persistEngine(e);
-    const r = statuses?.[e];
-    onReady(!!r && r.installed && r.authed);
-  }, [onReady, persistEngine, setEngine, statuses]);
+  const toggle = useCallback(
+    async (id: EngineKey) => {
+      setApiKey("");
+      setActionErr("");
+      const status = statuses?.[id];
+      if (!isReady(status)) {
+        setEngine(id);
+        return;
+      }
 
-  const chooseOtherEngine = useCallback(async (e: EngineId) => {
-    setEngine(e);
-    setApiKey("");
-    setActionErr("");
-    setShowOther(true);
-    await persistEngine(e);
-    onReady(false);
-  }, [onReady, persistEngine, setEngine]);
+      const next = new Set(selected);
+      if (next.has(id)) {
+        next.delete(id);
+        const primary = primaryEngine(next, engine === id ? null : engine);
+        setSelected(next);
+        setEngine(primary ?? id);
+        if (primary) await persistEngine(primary);
+      } else {
+        next.add(id);
+        setSelected(next);
+        setEngine(id);
+        await persistEngine(id);
+      }
+    },
+    [engine, persistEngine, selected, setSelected, statuses],
+  );
 
   const onInstall = useCallback(async () => {
     setInstalling(engine);
@@ -148,7 +174,7 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
     setActionErr("");
     try {
       const r = await window.xpair.setEngineAuth(engine, apiKey.trim());
-      setApiKey(""); // drop the key from renderer state immediately.
+      setApiKey("");
       if (!r.ok) {
         setActionErr(r.err || "could not set API key");
         return;
@@ -163,18 +189,15 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
 
   const status = statuses?.[engine] || null;
   const ready = isReady(status);
-  const readyEngines = statuses ? ENGINES.filter((e) => isReady(statuses[e.id])) : [];
-  const missingEngines = statuses ? ENGINES.filter((e) => !isReady(statuses[e.id])) : [];
   const busy = probing || !!installing || authing;
   const catalogReady = statuses !== null;
 
   return (
     <div>
-      <h2 className="text-xl font-semibold tracking-tight text-foreground">Choose your engine</h2>
-      <p className="mt-1.5 text-sm text-muted-foreground">
-        The agent that runs on this Mac. We check this host first and only show engines already
-        installed and signed in here.
-      </p>
+      <h2 className="text-xl font-semibold tracking-tight text-foreground">
+        {t("engine.title")}
+      </h2>
+      <p className="mt-1.5 text-sm text-muted-foreground">{t("engine.desc")}</p>
 
       {!catalogReady ? (
         <div className="mt-5 flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-sm text-muted-foreground">
@@ -182,83 +205,18 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
           Checking this Mac for supported engines...
         </div>
       ) : (
-        <>
-          {readyEngines.length > 0 ? (
-            <div className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {readyEngines.map((e) => {
-                const selected = engine === e.id;
-                const s = statuses[e.id];
-                return (
-                  <button
-                    key={e.id}
-                    type="button"
-                    onClick={() => void chooseReadyEngine(e.id)}
-                    className={
-                      "flex flex-col rounded-lg border px-3 py-2.5 text-left transition-colors " +
-                      (selected
-                        ? "border-primary bg-primary/10"
-                        : "border-border bg-muted/30 hover:bg-muted/50")
-                    }
-                  >
-                    <span className="text-sm font-semibold text-foreground">{e.label}</span>
-                    <span className="mt-0.5 text-[11px] leading-tight text-muted-foreground">
-                      {s.version || e.blurb}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="mt-5 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-sm text-muted-foreground">
-              No installed and signed-in engine was found on this Mac.
-            </div>
-          )}
-
-          <div className="mt-3">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5"
-              onClick={() => setShowOther((v) => !v)}
-            >
-              <Download className="h-3.5 w-3.5" />
-              Other / install
-            </Button>
-          </div>
-
-          {(showOther || readyEngines.length === 0) && (
-            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {missingEngines.map((e) => {
-                const selected = engine === e.id;
-                const s = statuses[e.id];
-                return (
-                  <button
-                    key={e.id}
-                    type="button"
-                    onClick={() => void chooseOtherEngine(e.id)}
-                    className={
-                      "flex flex-col rounded-lg border px-3 py-2.5 text-left transition-colors " +
-                      (selected
-                        ? "border-primary bg-primary/10"
-                        : "border-border bg-muted/20 hover:bg-muted/40")
-                    }
-                  >
-                    <span className="text-sm font-semibold text-foreground">{e.label}</span>
-                    <span className="mt-0.5 text-[11px] leading-tight text-muted-foreground">
-                      {missingText(s)}
-                    </span>
-                  </button>
-                );
-              })}
-              {missingEngines.length === 0 && (
-                <p className="text-xs text-muted-foreground">
-                  All supported engines are already available on this Mac.
-                </p>
-              )}
-            </div>
-          )}
-        </>
+        <div className="mt-6 space-y-2">
+          {ORDER.map((id) => (
+            <EngineRow
+              key={id}
+              k={id}
+              active={selected.has(id)}
+              focused={engine === id}
+              status={statuses[id]}
+              onToggle={() => void toggle(id)}
+            />
+          ))}
+        </div>
       )}
 
       <div className="mt-5 min-h-6 text-xs">
@@ -272,11 +230,10 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
         {!probing && status && ready && (
           <span className="flex items-center gap-2 text-primary">
             <Check className="h-3.5 w-3.5" />
-            {engine} is installed{status.version ? ` (${status.version})` : ""} and signed in. Continue.
+            {engine} is installed{status.version ? ` (${status.version})` : ""} and signed in.
           </span>
         )}
 
-        {/* Not installed → install action. */}
         {!probing && status && !status.installed && (
           <div className="flex flex-col gap-2">
             <span className="flex items-center gap-2 text-destructive">
@@ -289,12 +246,11 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
               ) : (
                 <Download className="h-3.5 w-3.5" />
               )}
-              {installing ? "Installing…" : "Install"}
+              {installing ? "Installing..." : "Install"}
             </Button>
           </div>
         )}
 
-        {/* Installed but not authed → API key action. */}
         {!probing && status && status.installed && !status.authed && (
           <div className="flex flex-col gap-2">
             <span className="flex items-center gap-2 text-destructive">
@@ -306,7 +262,7 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
                 type="password"
                 value={apiKey}
                 onChange={(ev) => setApiKey(ev.target.value)}
-                placeholder={engine === "codex" ? "sk-… (OpenAI API key)" : "sk-ant-… (Anthropic API key)"}
+                placeholder={engine === "codex" ? "sk-... (OpenAI API key)" : "sk-ant-... (Anthropic API key)"}
                 autoComplete="off"
                 className="h-8 flex-1 rounded-lg border-border bg-muted/30 font-mono text-sm"
               />
@@ -317,11 +273,11 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
                 onClick={() => void onSetAuth()}
               >
                 {authing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                {authing ? "Setting…" : "Sign in"}
+                {authing ? "Setting..." : "Sign in"}
               </Button>
             </div>
             <p className="text-[11px] leading-snug text-muted-foreground">
-              Stored only on this Mac — never logged. Prefer a browser login? Run{" "}
+              Stored only on this Mac. Prefer a browser login? Run{" "}
               <code className="rounded bg-muted/60 px-1 font-mono">{engine === "claude" ? "claude" : engine === "codex" ? "codex login" : "opencode auth login"}</code>{" "}
               in a terminal here, then{" "}
               <button
@@ -336,7 +292,6 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
           </div>
         )}
 
-        {/* Probe failure — offer a retry. */}
         {!probing && status && !status.installed && status.err && (
           <button
             type="button"
@@ -356,5 +311,70 @@ export function StepEngine({ engine, setEngine, onReady }: Props) {
         )}
       </div>
     </div>
+  );
+}
+
+function EngineRow({
+  k,
+  active,
+  focused,
+  status,
+  onToggle,
+}: {
+  k: EngineKey;
+  active: boolean;
+  focused: boolean;
+  status: EngineStatus;
+  onToggle: () => void;
+}) {
+  const { t } = useT();
+  const Icon = ICONS[k];
+  const badge = BADGE[k];
+  const ready = isReady(status);
+  return (
+    <button
+      onClick={onToggle}
+      className={
+        "flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors " +
+        (active
+          ? "border-primary/40 bg-primary/5"
+          : focused
+            ? "border-primary/25 bg-card"
+            : "border-border bg-card hover:border-foreground/20")
+      }
+    >
+      <div
+        className={
+          "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg " +
+          (active ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground")
+        }
+      >
+        <Icon className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-foreground">{t(`engine.${k}.name`)}</span>
+          {badge && (
+            <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+              {t("consent.recommended")}
+            </span>
+          )}
+        </div>
+        <div className="text-xs text-muted-foreground">{t(`engine.${k}.desc`)}</div>
+        <div className={ready ? "mt-0.5 text-[11px] text-primary" : "mt-0.5 text-[11px] text-muted-foreground"}>
+          {missingText(status)}
+        </div>
+      </div>
+      <div
+        className={
+          "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border " +
+          (active
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-border bg-background")
+        }
+      >
+        {active && <Check className="h-3.5 w-3.5" />}
+      </div>
+    </button>
   );
 }

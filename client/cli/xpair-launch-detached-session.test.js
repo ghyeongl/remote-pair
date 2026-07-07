@@ -20,27 +20,17 @@ function test(name, fn) {
 test("launcher leaves host tmux sessions detached and reattachable (Q0061/Q0062/Q0063)", () => {
   assert.match(
     launcher,
-    /tm_local new-session -d -s "\$SESS" -c "\$PROJECT_DIR" "bash \$T"/,
-    "local host sessions must be created detached before attach",
-  );
-  assert.match(
-    launcher,
     /tm new-session -d -x \$\{COLS\} -y \$\{LINES\} -s "\\\$SESSION" -c \$\{HOST_DIR_Q\} "bash \\\$T"/,
-    "remote host sessions must be created detached before attach",
-  );
-  assert.match(
-    launcher,
-    /tm_local has-session -t "=\$SESS" 2>\/dev\/null && NEED_CREATE=0\s+# detached .* re-attach/,
-    "existing local host sessions should be reattached rather than recreated",
+    "host sessions must be created detached before attach",
   );
   assert.match(
     launcher,
     /if tm has-session -t "=\\\$SESSION" 2>\/dev\/null; then NEED_CREATE=0; fi/,
-    "existing remote host sessions should be reattached rather than recreated",
+    "existing host sessions should be reattached rather than recreated",
   );
   assert.match(
     launcher,
-    /attach -d -t "=\$SESS"/,
+    /attach -d -t "=\$ACTUAL_SESSION"/,
     "reattach must use tmux attach -d so stale clients are dropped but the session remains",
   );
   assert.match(

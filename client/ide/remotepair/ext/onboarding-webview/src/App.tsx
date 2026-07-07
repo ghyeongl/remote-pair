@@ -3,915 +3,540 @@ import { WizardShell } from "@/components/onboarding/WizardShell";
 import { AnimatedStep } from "@/components/onboarding/AnimatedStep";
 import { useWizard } from "@/components/onboarding/useWizard";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, AlertTriangle } from "lucide-react";
 import { StepWelcome } from "@/components/onboarding/client/StepWelcome";
 import { StepConsent } from "@/components/onboarding/client/StepConsent";
 import {
-  StepConnect,
-  type ConnState,
-} from "@/components/onboarding/client/StepConnect";
+  StepDiscover,
+  peerToHost,
+  type DiscoveredHost,
+} from "@/components/onboarding/client/StepDiscover";
 import {
-  StepFileAccess,
+  StepUpdate,
+  type UpdateState,
+} from "@/components/onboarding/client/StepUpdate";
+import { StepWaitPerm } from "@/components/onboarding/client/StepWaitPerm";
+import {
+  parseFolderMaps,
+  isPersistedRealMapping,
+  StepMappings,
   type Mapping,
-} from "@/components/onboarding/client/StepFileAccess";
+} from "@/components/onboarding/client/StepMappings";
 import { StepDone } from "@/components/onboarding/client/StepDone";
-import { StepDiscover } from "@/components/onboarding/client/StepDiscover";
-import { StepReconnect } from "@/components/onboarding/client/StepReconnect";
-import { StepSetupPassword } from "@/components/onboarding/client/StepSetupPassword";
-import { StepGrantPermissions } from "@/components/onboarding/client/StepGrantPermissions";
-import {
-  StepInstalling,
-  type InstallState,
-} from "@/components/onboarding/client/StepInstalling";
-import { StepEngine } from "@/components/onboarding/client/StepEngine";
-import type { EngineId, Peer } from "@/global";
+import { useT } from "@/lib/i18n";
 import { capture, EVENTS } from "@/lib/telemetry";
 
-// Step indices for the discovery flow:
-//   0 Welcome → 1 Before you start (consent) → 2 Discover → 3 Connect/Setup (auto-branch)
-//   → 4 Installing (setup path only, auto-advances on success) → 5 Grant permissions (setup path only)
-//   → 6 Choose engine (host engine install/auth hard guard) → 7 File access & mapping
-//   → 8 Done (liveness-gated on every path).
-const STEP_TITLES = [
-  "Welcome",
-  "Before you start",
-  "Find your host",
-  "Connect",
-  "Set up host",
-  "Grant permissions",
-  "Choose engine",
-  "File access & mapping",
-  "Done",
-];
-
-// Warning copy only. Keep in sync with onboarding-bridge.js MIN_COMPATIBLE_HOST.
-const MIN_COMPATIBLE_HOST = "0.5.0a51";
+// 0 Welcome, 1 Consent(crash), 2 Consent(analytics),
+// 3 Discover, 4 Update, 5 WaitPerm, 6 Mappings, 7 Done
+const TOTAL = 8;
 
 const S = {
   WELCOME: 0,
-  CONSENT: 1,
-  DISCOVER: 2,
-  CONNECT: 3,
-  INSTALL: 4,
-  GRANT: 5,
-  ENGINE: 6,
-  MAPPINGS: 7,
-  DONE: 8,
+  CONSENT_CRASH: 1,
+  CONSENT_ANALYTICS: 2,
+  DISCOVER: 3,
+  UPDATE: 4,
+  WAIT_PERM: 5,
+  MAPPINGS: 6,
+  DONE: 7,
 } as const;
 
 const START_STEPS: Record<string, number> = {
   welcome: S.WELCOME,
-  consent: S.CONSENT,
-  discover: S.DISCOVER,
-  connect: S.CONNECT,
-  install: S.INSTALL,
-  grant: S.GRANT,
-  engine: S.ENGINE,
-  mappings: S.MAPPINGS,
-  done: S.DONE,
+  connect: S.DISCOVER,
+  // Client cannot repair host AX/SR; re-discovery surfaces fresh pairing metadata plus the host-onboarding recovery CTA.
+  grant: S.DISCOVER,
+  engine: S.DISCOVER,
 };
-
-const ENGINE_IDS = new Set<EngineId>(["claude", "shell", "codex", "opencode"]);
-
-function isEngineId(value: string): value is EngineId {
-  return ENGINE_IDS.has(value as EngineId);
-}
 
 function initialStepFromLocation() {
   if (typeof window === "undefined") return S.WELCOME;
   const raw = new URLSearchParams(window.location.search).get("startStep") || "";
   if (Object.prototype.hasOwnProperty.call(START_STEPS, raw)) return START_STEPS[raw];
-  const numeric = Number(raw);
-  if (Number.isInteger(numeric) && numeric >= S.WELCOME && numeric <= S.DONE) return numeric;
   return S.WELCOME;
 }
 
-function engineFromLocation(): EngineId {
-  if (typeof window === "undefined") return "claude";
-  const raw = new URLSearchParams(window.location.search).get("engine") || "";
-  return isEngineId(raw) ? raw : "claude";
+// The native launch guard opens onboarding with `?startStep=engine` when the HOST's agent engine is
+// missing/unauthenticated. initialStepFromLocation() collapses that to S.DISCOVER (the client has no
+// engine step — engine setup lives in the host app), which would lose WHY we landed here. Read the raw
+// reason so Discover can surface the host-engine-repair CTA instead of behaving like a normal scan.
+function initialStartReason(): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("startStep") || "";
 }
 
-type LiveState =
-  | "idle"
-  | "checking"
-  | "reachable"
-  | "rekeyed"
-  | "offline"
-  | "setup"
-  | "host-app"
-  | "permissions";
-
-// CLI readiness — needed only by the CLI-dependent steps (Discover/Connect/Mappings), which shell
-// out to the `xpair` CLI. The CLI-free steps (Welcome/Consent/Installing/Grant) run regardless;
-// while the user is on those we install the bundled CLI in the BACKGROUND (status bar feedback),
-// and a hard gate only kicks in when the user reaches a step that actually needs it. null = not
-// yet checked.
-type CliState = { ready: boolean; err: string } | null;
-// CLI-dependent steps (gate Next only on these): Discover (`xpair discover`), Connect
-// (`config set host` / host-app SSH probe), Engine (`config set engine` + host SSH probes),
-// Mappings (`map add`/`mount`/`map list`).
-const CLI_DEPENDENT_STEPS: ReadonlySet<number> = new Set([
-  S.DISCOVER,
-  S.CONNECT,
-  S.ENGINE,
-  S.MAPPINGS,
-]);
-// Per-host app readiness, checked on the Connect/Reconnect step. null = not yet checked.
-type HostAppState =
-  | {
-      target: string;
-      installed: boolean;
-      version: string;
-      compatible: boolean;
-      // WHY incompatible — below_floor is a safe same-major update; major_mismatch stays blocked.
-      incompatibleKind: "below_floor" | "major_mismatch" | "";
-      err: string;
-    }
-  | null;
-type HostPermState =
-  | { target: string; alive: boolean; ax: boolean; sr: boolean; fda: boolean; err: string }
-  | null;
+export function deriveHostFlags(r: Awaited<ReturnType<typeof window.remotepair.hostAppStatus>>) {
+  const majorMismatch =
+    !!r.installed && !r.compatible && r.incompatibleKind === "major_mismatch";
+  const outdated =
+    !majorMismatch && !!r.installed && !r.compatible && r.incompatibleKind === "below_floor";
+  return { majorMismatch, outdated };
+}
 
 export default function App() {
+  const { t } = useT();
   const [initialStep] = useState(() => initialStepFromLocation());
-  const w = useWizard(9, initialStep);
-  const startsFromSavedHost = initialStep >= S.CONNECT && initialStep <= S.ENGINE;
-  const lockConfiguredEngine = startsFromSavedHost;
+  // Sticky for the window's lifetime: if the engine is fixed on the host, the next launch's native guard
+  // won't return `engine`, so the window simply won't reopen in this mode.
+  const [engineRecovery] = useState(() => initialStartReason() === "engine");
+  const w = useWizard(TOTAL, initialStep);
 
-  // onboarding_started — fired once when the onboarding webview mounts (consent-gated no-op
-  // otherwise). StrictMode double-invokes effects in dev, but the production build mounts once.
   useEffect(() => {
     capture(EVENTS.ONBOARDING_STARTED);
   }, []);
 
-  // CLI readiness — re-checked on mount, on window focus, and every 10s while the wizard is open.
-  // No longer a global wall: ready===false only gates the CLI-dependent steps (see nextDisabled).
-  const [cli, setCli] = useState<CliState>(null);
+  const [crashReports, setCrashReports] = useState(false);
+  const [analytics, setAnalytics] = useState(false);
+  const [consentLoaded, setConsentLoaded] = useState(false);
+  const [consentDirty, setConsentDirty] = useState(false);
+
   useEffect(() => {
     let alive = true;
-    const probe = async () => {
-      try {
-        const r = await window.remotepair.cliReady();
-        if (alive) setCli({ ready: !!r.ready, err: r.err || "" });
-      } catch (e) {
-        if (alive) setCli({ ready: false, err: String(e) });
-      }
-    };
-    void probe();
-    const onFocus = () => void probe();
-    window.addEventListener("focus", onFocus);
-    const id = window.setInterval(probe, 10000);
+    void window.remotepair
+      .tGetConsent()
+      .then((r) => {
+        if (!alive) return;
+        setAnalytics(!!r.telemetry);
+        setCrashReports(!!r.crashReport);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setConsentLoaded(true);
+      });
     return () => {
       alive = false;
-      window.removeEventListener("focus", onFocus);
-      window.clearInterval(id);
     };
   }, []);
-  // cliReady: the CLI probe has returned and reports runnable. cliMissing gates the CLI-dependent
-  // steps whenever the CLI isn't proven ready (including the not-yet-checked null state, so Next
-  // can't slip through before the first probe). cliNeedsInstall is the narrower "probed AND not
-  // ready" edge that arms the background install.
-  const cliReady = cli?.ready === true;
-  const cliMissing = !cliReady;
-  const cliNeedsInstall = cli !== null && !cli.ready;
 
-  // No dead end: when the CLI is missing we install the BUNDLED CLI (install.sh --role client) in the
-  // BACKGROUND while the user proceeds through the CLI-free intro steps. Progress is surfaced in a
-  // bottom status bar — onboarding is NEVER blocked by the install itself; only the CLI-dependent
-  // steps gate their Next until the CLI is ready (or show the install-failure reason).
-  type InstallCliState = "idle" | "installing" | "ready" | "failed";
-  const [cliInstall, setCliInstall] = useState<InstallCliState>("idle");
-  const [cliInstallErr, setCliInstallErr] = useState("");
-  const installCliNow = useCallback(async () => {
-    setCliInstall("installing");
-    setCliInstallErr("");
-    try {
-      const r = await window.remotepair.installCli();
-      if (!r.ok) {
-        setCliInstallErr(r.err || "install failed");
-        setCliInstall("failed");
-        return;
-      }
-      // Re-confirm via the real liveness probe — never trust the installer's exit code alone.
-      const probe = await window.remotepair.cliReady();
-      setCli({ ready: !!probe.ready, err: probe.err || "" });
-      if (probe.ready) {
-        setCliInstall("ready");
-      } else {
-        setCliInstallErr(probe.err || "xpair still not runnable after install");
-        setCliInstall("failed");
-      }
-    } catch (e) {
-      setCliInstallErr(String(e));
-      setCliInstall("failed");
-    }
-  }, []);
-
-  // Kick off the background install the moment the probe reports the CLI missing (once per missing
-  // edge). If a later probe flips the CLI back to missing after a "ready"/"failed", re-arm.
   useEffect(() => {
-    if (cliNeedsInstall && cliInstall === "idle") void installCliNow();
-  }, [cliNeedsInstall, cliInstall, installCliNow]);
-  useEffect(() => {
-    // CLI became ready by some other means (already installed / installed out-of-band) → clear any
-    // stale failed/ready status so the bar disappears.
-    if (!cliNeedsInstall && cliInstall !== "idle") setCliInstall("idle");
-  }, [cliNeedsInstall, cliInstall]);
+    if (!consentLoaded || !consentDirty) return;
+    void window.remotepair.tSetConsent(analytics, crashReports).catch(() => {});
+  }, [analytics, crashReports, consentDirty, consentLoaded]);
 
-  // Per-host app guard (Connect/Reconnect): reachable is not enough — the host needs the host app
-  // installed AND version-compatible. Only the non-setup paths (manual + reconnect) check this; the
-  // setup path INSTALLS the app on the Installing step, so it must not be blocked for "not installed".
-  const [hostApp, setHostApp] = useState<HostAppState>(null);
-  const [hostAppChecking, setHostAppChecking] = useState(false);
-  const hostAppProbeId = useRef(0);
-  const [hostPerms, setHostPerms] = useState<HostPermState>(null);
-  const [hostPermChecking, setHostPermChecking] = useState(false);
-  const checkHostApp = useCallback(async (target: string) => {
-    const probeId = ++hostAppProbeId.current;
-    if (!target) {
-      setHostAppChecking(false);
-      setHostApp({ target, installed: false, version: "", compatible: false, incompatibleKind: "", err: "no host" });
-      return;
-    }
-    setHostAppChecking(true);
-    try {
-      const r = await window.remotepair.hostAppStatus(target);
-      if (hostAppProbeId.current === probeId) setHostApp({ target, ...r });
-    } catch (e) {
-      if (hostAppProbeId.current === probeId) {
-        setHostApp({ target, installed: false, version: "", compatible: false, incompatibleKind: "", err: String(e) });
-      }
-    } finally {
-      if (hostAppProbeId.current === probeId) setHostAppChecking(false);
-    }
-  }, []);
-
-  // Discovery / connect state.
-  const [peer, setPeer] = useState<Peer | null>(null);
-  const [account, setAccount] = useState("");
-  // Setup path readiness: the fingerprint-confirm step must prepare/reuse the client SSH key and
-  // fetch the host fingerprint before Next starts the key-auth install.
-  const [setupReady, setSetupReady] = useState(false);
-  const [installState, setInstallState] = useState<InstallState>("idle");
-  // Host TCC grant readiness, lifted from the Grant step so Next stays gated until AX + SR are on.
-  const [grantReady, setGrantReady] = useState(false);
-  // Reconnect reachability, lifted from the Reconnect step so Next gates until the host answers.
-  const [reconnectReady, setReconnectReady] = useState(false);
-  const [live, setLive] = useState<LiveState>("idle");
-  const [liveErr, setLiveErr] = useState("");
-  const stepRef = useRef(w.index);
-  stepRef.current = w.index;
-  const livenessCheckId = useRef(0);
-  const cancelLivenessCheck = useCallback(() => {
-    livenessCheckId.current += 1;
-  }, []);
-  useEffect(() => {
-    if (w.index !== S.MAPPINGS) cancelLivenessCheck();
-  }, [w.index, cancelLivenessCheck]);
-
-  // Manual-entry fallback reuses the existing StepConnect machine.
-  const [savedHost, setSavedHost] = useState("");
-  const [manual, setManual] = useState(initialStep === S.CONNECT);
-  const [host, setHost] = useState("");
-  const [connState, setConnState] = useState<ConnState>("idle");
-
-  // Engine selection + host-engine readiness, lifted from the Engine step so Next stays HARD-GATED
-  // until the chosen engine is installed AND authenticated on the host.
-  const [engine, setEngine] = useState<EngineId>(() => engineFromLocation());
-  const [engineReady, setEngineReady] = useState(false);
-
-  // File access & mapping (unchanged step component).
+  const [selectedHost, setSelectedHost] = useState<DiscoveredHost | null>(null);
+  const [updateState, setUpdateState] = useState<UpdateState>("idle");
+  const [updatePct, setUpdatePct] = useState(0);
+  const [permAccepted, setPermAccepted] = useState(false);
+  const [permDenied, setPermDenied] = useState(false);
   const [mappings, setMappings] = useState<Mapping[]>([]);
+  // True while the post-pairing hostAppStatus re-probe is in flight. On the first-pair path the host
+  // could not be SSH-probed before pairing, so this is the ONLY chance to learn it is below the
+  // compatibility floor / a major mismatch — block progression past WaitPerm until it resolves, or a
+  // user (esp. one with preloaded mappings) could click through to Done against an incompatible host.
+  const [postPairProbePending, setPostPairProbePending] = useState(false);
 
-  // Default the install account to this machine's username.
-  useEffect(() => {
-    void window.remotepair
-      .hostInfo()
-      .then((i) => setAccount((a) => a || i.user))
-      .catch(() => {});
+  const selectedRef = useRef<DiscoveredHost | null>(null);
+  selectedRef.current = selectedHost;
+
+  // The ssh target the CURRENT mappings belong to. Compared by target (not host id) because a discovered
+  // host's id is its key fingerprint while a config-restored host's id is REMOTE_HOST — the target is the
+  // stable identity across both. null until we know which host the mappings are for.
+  const mappingsHostRef = useRef<string | null>(null);
+  const hostTarget = (h: DiscoveredHost | null) => h?.sshTarget ?? h?.address ?? null;
+
+  const setSelected = useCallback((host: DiscoveredHost | null) => {
+    // Mappings belong to exactly one host (client↔host FOLDER_MAPS paths). Keep them when the user
+    // (re-)selects the SAME host — e.g. a returning user whose saved mappings were preloaded — but clear
+    // them when switching to a DIFFERENT host, so its Mappings/Done gates never pass against another
+    // host's paths (which don't exist on it). Clear ONLY when the new target is NON-NULL and differs:
+    // deselecting (setSelected(null) from Discover's Rescan / going back) must NOT drop mappings the user
+    // still owns, or reselecting the same host would trap them at the empty Mappings gate.
+    const target = hostTarget(host);
+    if (target !== null && target !== mappingsHostRef.current) {
+      setMappings([]);
+      mappingsHostRef.current = target;
+    }
+    setSelectedHost(host);
+    setUpdateState("idle");
+    setUpdatePct(0);
+    setPermAccepted(false);
+    setPermDenied(false);
   }, []);
 
-  // Parachuted launches start from saved client.env state rather than a freshly discovered peer.
-  // Hydrate the smallest peer shape needed by the existing Grant/Engine back-navigation paths.
   useEffect(() => {
-    if (!startsFromSavedHost) return;
-    let active = true;
+    let alive = true;
     void window.remotepair
       .getConfig()
       .then((cfg) => {
-        const hydratedHost = cfg.remoteHost.trim();
-        if (!active || !hydratedHost) return;
-        setSavedHost((current) => current || hydratedHost);
-        setHost((current) => current || hydratedHost);
-        if (initialStep === S.GRANT || initialStep === S.ENGINE) {
-          setPeer((current) =>
-            current || {
-              name: hydratedHost,
-              addrs: [hydratedHost],
-              target: hydratedHost,
-              source: "ssh",
-              sources: ["ssh"],
-              fp: null,
-              status: "reconnect",
-            },
-          );
+        if (!alive) return;
+        const remoteHost = cfg.remoteHost.trim();
+        // Preload saved FOLDER_MAPS on EVERY entry path (not just resume): a returning user re-running
+        // setup from Welcome must see their existing mappings, or the Mappings step (which hard-blocks
+        // Next until hasRealMapping) traps them with an empty list they'd have to recreate.
+        const parsedMappings = parseFolderMaps(cfg.folderMaps, cfg.folderMapModes);
+        if (parsedMappings.length) {
+          setMappings((current) => (current.length ? current : parsedMappings));
+          if (!mappingsHostRef.current) mappingsHostRef.current = remoteHost || null;
         }
       })
       .catch(() => {});
     return () => {
-      active = false;
+      alive = false;
     };
-  }, [initialStep, startsFromSavedHost]);
+  }, []);
 
-  // Reconnect: this client already authorized with the host (ssh-config entry) and the app is
-  // installed, so there's nothing to install — just re-persist REMOTE_HOST and confirm reachability.
-  const isReconnect = peer?.status === "reconnect";
-  const isConnect = peer?.status === "connect";
-  const isSetup = !!peer && !isReconnect && !isConnect;
-  const currentTarget = manual ? host.trim() : peer?.target || peer?.addrs?.[0] || peer?.name || "";
-  const currentTargetRef = useRef(currentTarget);
-  currentTargetRef.current = currentTarget;
+  const hostProbeId = useRef(0);
+  const probeSelectedHost = useCallback(async () => {
+    const host = selectedRef.current;
+    if (!host) return null;
+    const probeId = ++hostProbeId.current;
+    try {
+      const r = await window.remotepair.hostAppStatus(host.sshTarget ?? host.address);
+      const flags = deriveHostFlags(r);
+      if (hostProbeId.current === probeId) {
+        setSelectedHost((current) => {
+          if (!current || current.id !== host.id) return current;
+          const next = {
+            ...current,
+            version: r.version || current.version,
+            outdated: flags.outdated,
+            majorMismatch: flags.majorMismatch,
+            probed: true,
+          };
+          if (
+            current.version === next.version &&
+            current.outdated === next.outdated &&
+            current.majorMismatch === next.majorMismatch &&
+            current.probed === next.probed
+          ) {
+            return current;
+          }
+          return next;
+        });
+      }
+      return r;
+    } catch {
+      // Probe failed: we could not determine status, but mark it settled so the wizard is not
+      // stuck on Update forever — outdated/majorMismatch stay false, so progression resumes.
+      if (hostProbeId.current === probeId) {
+        setSelectedHost((current) =>
+          current && current.id === host.id && !current.probed
+            ? { ...current, probed: true }
+            : current,
+        );
+      }
+      return null;
+    }
+  }, []);
 
-  // Peer chosen on the Discover step → reset per-path state and advance to Connect/Setup.
-  const onSelectPeer = useCallback(
-    (p: Peer) => {
-      if (!cliReady) return;
-      setManual(false);
-      setPeer(p);
-      setHost(p.status === "connect" ? p.target || p.addrs?.[0] || p.name || "" : "");
-      setSetupReady(false);
-      setConnState("idle");
-      hostAppProbeId.current += 1;
-      setHostApp(null);
-      setHostAppChecking(false);
-      setHostPerms(null);
-      setInstallState("idle");
-      setReconnectReady(false);
-      setLive("idle");
-      setLiveErr("");
-      stepRef.current = S.CONNECT;
-      w.goTo(S.CONNECT, "next");
+  useEffect(() => {
+    if (selectedHost) void probeSelectedHost();
+  }, [selectedHost?.id, probeSelectedHost]);
+
+  const mergePairingMeta = useCallback(
+    (
+      selectedId: string,
+      meta: Awaited<ReturnType<typeof window.remotepair.fetchPairingMeta>>,
+      mappedHost?: DiscoveredHost | null,
+    ) => {
+      setSelectedHost((h) => {
+        if (!h || h.id !== selectedId) return h;
+        const base = mappedHost
+          ? {
+              ...h,
+              ...mappedHost,
+              version: h.version,
+              outdated: h.outdated,
+              majorMismatch: h.majorMismatch,
+            }
+          : h;
+        if (!meta.ok) {
+          return {
+            ...base,
+            hostKeyFP: base.hostKeyFP || h.hostKeyFP,
+            // A failed pull INVALIDATES any earlier pairing-window transcript: the window may
+            // have been denied/expired/closed, and stale sid/nonce/port would let WaitPerm
+            // poll a dead window instead of surfacing the real state.
+            serviceInstanceID: undefined,
+            hostNonce: undefined,
+            pairPort: undefined,
+            pairingMetaStatus: "error",
+            pairingMetaError: meta.err || "Host is not broadcasting pairing details.",
+          };
+        }
+        return {
+          ...base,
+          hostKeyFP: meta.fp || base.hostKeyFP || h.hostKeyFP,
+          serviceInstanceID: meta.serviceInstanceID || undefined,
+          hostNonce: meta.hostNonce || undefined,
+          pairPort: meta.pairPort || undefined,
+          hostUser: meta.hostUser || base.hostUser,
+          pairingMetaStatus: "ok",
+          pairingMetaError: "",
+        };
+      });
     },
-    [cliReady, w],
+    [],
   );
 
-  const onManual = useCallback(() => {
-    setManual(true);
-    setPeer(null);
-    setSetupReady(false);
-    hostAppProbeId.current += 1;
-    setHostApp(null);
-    setHostAppChecking(false);
-    setHostPerms(null);
-    setInstallState("idle");
-    setLive("idle");
-    setLiveErr("");
-    stepRef.current = S.CONNECT;
-    w.goTo(S.CONNECT, "next");
-  }, [w]);
-
-  // Final gate before Done: the earlier steps keep the user moving, but Done only opens after fresh
-  // setup, host-app, permission, and SSH liveness probes all pass.
-  const runLivenessCheck = useCallback(async () => {
-    const target = currentTargetRef.current;
-    const checkId = ++livenessCheckId.current;
-    const stillCurrent = () =>
-      livenessCheckId.current === checkId &&
-      stepRef.current === S.MAPPINGS &&
-      currentTargetRef.current === target;
-    if (stepRef.current !== S.MAPPINGS) return;
-    if (!target) {
-      setLiveErr("No host selected.");
-      setLive("offline");
-      return;
-    }
-    setLive("checking");
-    setLiveErr("");
-
-    if (isSetup && installState !== "done") {
-      setLiveErr("Host setup has not finished. Go back and retry setup.");
-      setLive("setup");
-      return;
-    }
-
-    try {
-      const app = await window.remotepair.hostAppStatus(target);
-      if (!stillCurrent()) return;
-      setHostApp({ target, ...app });
-      if (app.installed && !app.compatible) {
-        setLiveErr(app.err || "Host version is incompatible with this client.");
-        setLive("host-app");
-        return;
-      }
-      if (!app.installed) {
-        setLiveErr("Host has no Xpair host app. Install it on the host before finishing.");
-        setLive("host-app");
-        return;
-      }
-    } catch (e) {
-      if (!stillCurrent()) return;
-      setLiveErr(`Host app check failed: ${String(e)}`);
-      setLive("host-app");
-      return;
-    }
-
-    try {
-      const perms = await window.remotepair.hostPermissions({ host: target });
-      if (!stillCurrent()) return;
-      const ready = perms.alive && perms.ax && perms.sr;
-      setGrantReady(ready);
-      if (!ready) {
-        setLiveErr(
-          perms.err ||
-            (!perms.alive
-              ? "Host app is not reporting permission status."
-              : "Grant Accessibility and Screen Recording on the host before finishing."),
-        );
-        setLive("permissions");
-        return;
-      }
-    } catch (e) {
-      if (!stillCurrent()) return;
-      setGrantReady(false);
-      setLiveErr(`Permission check failed: ${String(e)}`);
-      setLive("permissions");
-      return;
-    }
-
-    try {
-      const r = await window.remotepair.sshReachable(target);
-      if (!stillCurrent()) return;
-      if (r.reachable) {
-        setLive("reachable");
-        stepRef.current = S.DONE;
-        w.goTo(S.DONE, "next");
-        return;
-      }
-      // A host-key mismatch surfaces as an ssh failure mentioning the host key; treat that as a
-      // re-key (TOFU mismatch) so the user re-pairs instead of silently failing.
-      setLiveErr(r.err || "Host did not respond.");
-      setLive(/host key|REMOTE HOST IDENTIFICATION/i.test(r.err || "") ? "rekeyed" : "offline");
-    } catch (e) {
-      if (!stillCurrent()) return;
-      setLiveErr(`Liveness check failed: ${String(e)}`);
-      setLive("offline");
-    }
-  }, [isSetup, installState, w]);
-
-  // Per-step Next gating (mirror of the existing readyToProceed idiom).
-  const manualReady = connState === "reachable";
-  // Reachability (SSH) for the non-setup paths. The setup path installs the app later, so it gates
-  // on the fingerprint-confirm/key-prep step before Installing, not on host-app here.
-  const reachReady = manual
-    ? manualReady
-    : isReconnect
-    ? reconnectReady
-    : isConnect
-    ? manualReady
-    : true;
-  // The SSH target for the host-app probe on the non-setup paths.
-  const connectTarget = manual || isConnect
-    ? host.trim()
-    : peer?.target || peer?.addrs?.[0] || peer?.name || "";
-  const previousConnectTarget = useRef(connectTarget);
-  useEffect(() => {
-    if (previousConnectTarget.current === connectTarget) return;
-    previousConnectTarget.current = connectTarget;
-    cancelLivenessCheck();
-    setSetupReady(false);
-    setInstallState("idle");
-  }, [connectTarget, cancelLivenessCheck]);
-  // The setup (install) path doesn't require the app to already exist — it installs it. For manual +
-  // reconnect, the host app must be installed AND compatible before Next.
-  const requiresHostApp = w.index === S.CONNECT && !isSetup;
-  const hostAppReady =
-    !requiresHostApp ||
-    (!!hostApp &&
-      hostApp.target === connectTarget &&
-      hostApp.installed &&
-      hostApp.compatible);
-  const requiresHostPerms = w.index === S.CONNECT && !isSetup;
-  const hostPermReady =
-    !requiresHostPerms ||
-    (!!hostPerms &&
-      hostPerms.target === connectTarget &&
-      hostPerms.alive &&
-      hostPerms.ax &&
-      hostPerms.sr);
-  const hostAppLiveFalse =
-    requiresHostPerms &&
-    !!hostApp &&
-    hostApp.target === connectTarget &&
-    hostApp.installed === true &&
-    hostApp.compatible === true &&
-    !!hostPerms &&
-    hostPerms.target === connectTarget &&
-    hostPerms.alive === false;
-
-  // Once reachable on a non-setup path, probe the host app exactly once per (target, reachable) edge.
-  useEffect(() => {
-    if (requiresHostApp && reachReady && connectTarget) {
-      void checkHostApp(connectTarget);
-    } else if (!requiresHostApp || !reachReady) {
-      // Leaving the gate (path change / no longer reachable) clears stale host-app state.
-      hostAppProbeId.current += 1;
-      setHostApp(null);
-      setHostAppChecking(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requiresHostApp, reachReady, connectTarget]);
-
-  // Only safe host states can use a forced bundled host install: missing, same-major below-floor,
-  // or compatible-but-not-live. Major mismatches stay blocked to avoid downgrading a newer host.
-  const canUpdateHost =
-    requiresHostApp &&
-    !hostAppChecking &&
-    !!hostApp &&
-    hostApp.target === connectTarget &&
-    hostApp.installed &&
-    !hostApp.compatible &&
-    hostApp.incompatibleKind === "below_floor";
-  const canRepairHost =
-    requiresHostApp &&
-    reachReady &&
-    (manual || startsFromSavedHost || isReconnect || isConnect) &&
-    !hostAppChecking &&
-    !!hostApp &&
-    hostApp.target === connectTarget &&
-    (hostApp.installed !== true ||
-      (hostApp.installed === true &&
-        hostApp.compatible !== true &&
-        hostApp.incompatibleKind === "below_floor") ||
-      hostAppLiveFalse);
-  const hostRepairKind =
-    !hostApp || hostApp.installed !== true
-      ? "missing"
-      : hostApp.compatible !== true
-      ? canUpdateHost
-        ? "update"
-        : "incompatible"
-      : "restart";
-  const manualTargetIsSavedHost = !!savedHost && connectTarget === savedHost;
-  const manualMissingNeedsFingerprint =
-    manual && !manualTargetIsSavedHost && hostRepairKind === "missing";
-  const manualMissingRepairPeer: Peer | null = connectTarget
-    ? {
-        name: connectTarget,
-        addrs: [connectTarget],
-        target: connectTarget,
-        source: "ssh",
-        sources: ["ssh"],
-        fp: null,
-        status: "setup",
-      }
-    : null;
-
-  const handleHostRepairDone = useCallback(() => {
-    if (!connectTarget) return;
-    setInstallState("idle");
-    setHostApp(null);
-    setHostPerms(null);
-    setHostPermChecking(false);
-    void checkHostApp(connectTarget);
-  }, [checkHostApp, connectTarget]);
-
-  // Non-setup connect/reconnect must prove the Host is currently grant-bearing too. SSH and app
-  // presence alone are not enough: hostPermissions must be live and report AX + SR granted.
-  useEffect(() => {
-    if (!requiresHostPerms || !reachReady || !hostAppReady || !connectTarget) {
-      setHostPerms(null);
-      setHostPermChecking(false);
-      return;
-    }
-
-    let alive = true;
-    const poll = async () => {
-      setHostPermChecking(true);
+  const fetchAndMergePairingMeta = useCallback(
+    async (host: DiscoveredHost, mappedHost?: DiscoveredHost | null) => {
+      const selectedId = host.id;
+      const target =
+        mappedHost?.pairingAddress ?? mappedHost?.address ?? host.pairingAddress ?? host.address;
+      setSelectedHost((h) =>
+        h && h.id === selectedId
+          ? {
+              ...h,
+              ...(mappedHost
+                ? {
+                    ...mappedHost,
+                    id: h.id,
+                    version: h.version,
+                    outdated: h.outdated,
+                    majorMismatch: h.majorMismatch,
+                  }
+                : {}),
+              pairingMetaStatus: "loading",
+              pairingMetaError: "",
+            }
+          : h,
+      );
       try {
-        const r = await window.remotepair.hostPermissions({ host: connectTarget });
-        if (alive) setHostPerms({ target: connectTarget, ...r });
-      } catch (e) {
-        if (alive) {
-          setHostPerms({
-            target: connectTarget,
-            alive: false,
-            ax: false,
-            sr: false,
-            fda: false,
-            err: String(e),
-          });
-        }
-      } finally {
-        if (alive) setHostPermChecking(false);
+        const meta = await window.remotepair.fetchPairingMeta(target);
+        mergePairingMeta(selectedId, meta, mappedHost);
+        return meta;
+      } catch (error) {
+        const meta = {
+          ok: false,
+          fp: "",
+          serviceInstanceID: "",
+          hostNonce: "",
+          pairPort: 0,
+          hostUser: "",
+          err: error instanceof Error ? error.message : String(error),
+        };
+        mergePairingMeta(selectedId, meta, mappedHost);
+        return meta;
       }
-    };
+    },
+    [mergePairingMeta],
+  );
 
-    void poll();
-    const id = window.setInterval(poll, 2000);
-    return () => {
-      alive = false;
-      window.clearInterval(id);
-    };
-  }, [requiresHostPerms, reachReady, hostAppReady, connectTarget]);
+  useEffect(() => {
+    if (selectedHost) void fetchAndMergePairingMeta(selectedHost);
+  }, [selectedHost?.id, fetchAndMergePairingMeta]);
 
-  const connectReady = reachReady && hostAppReady && hostPermReady;
-  // CLI hard gate — ONLY on the CLI-dependent steps, and ONLY when the CLI isn't ready yet. On the
-  // CLI-free intro/setup steps the install runs in the background and never blocks Next.
-  const cliGateActive = CLI_DEPENDENT_STEPS.has(w.index) && cliMissing;
-  const cliGateMessage =
-    cli === null
-      ? "checking xpair CLI…"
-      : cliInstall === "failed"
-      ? `xpair CLI install failed — ${cliInstallErr || cli.err || "see status bar"}`
-      : cliInstall === "installing"
-      ? "installing xpair CLI…"
-      : "waiting for xpair CLI…";
+  const needsUpdate = !!selectedHost?.outdated;
+  const majorMismatch = !!selectedHost?.majorMismatch;
+  const blockedOnUpdate = w.index === 4 && majorMismatch;
+  const blockedOnDeny = w.index === 5 && permDenied;
+  const hasRealMapping = mappings.some(isPersistedRealMapping);
+
+  const goBackToDiscover = () => {
+    setSelected(null);
+    setUpdateState("idle");
+    setUpdatePct(0);
+    setPermAccepted(false);
+    setPermDenied(false);
+    w.goTo(3, "prev");
+  };
+
+  const goToPairing = () => {
+    setPermAccepted(false);
+    setPermDenied(false);
+    w.goTo(S.WAIT_PERM, "next");
+  };
+
+  const retryHostPrompt = async () => {
+    const cur = selectedRef.current;
+    setPermDenied(false);
+    setPermAccepted(false);
+    if (!cur) return;
+    const selectedId = cur.id;
+    let mapped: DiscoveredHost | null = null;
+    try {
+      const res = await window.remotepair.discover();
+      const match = (res.peers || []).find((p) => {
+        const m = peerToHost(p);
+        const currentTarget = cur.sshTarget ?? cur.address;
+        const currentAddress = cur.pairingAddress ?? cur.address;
+        return (
+          (cur.hostKeyFP && p.fp === cur.hostKeyFP) ||
+          m.sshTarget === currentTarget ||
+          m.address === currentAddress ||
+          m.pairingAddress === currentAddress
+        );
+      });
+      mapped = match ? peerToHost(match) : null;
+    } catch {
+      mapped = null;
+    }
+    const latest = selectedRef.current;
+    if (!latest || latest.id !== selectedId) return;
+    void fetchAndMergePairingMeta(latest, mapped);
+  };
+
+  useEffect(() => {
+    if (w.index !== S.UPDATE) return;
+    if (!selectedHost) {
+      w.goTo(S.DISCOVER, "prev");
+      return;
+    }
+    void probeSelectedHost();
+  }, [w.index, selectedHost?.id, probeSelectedHost, w.goTo]);
+
+  // Re-probe once pairing is accepted. Before pairing the dedicated key is not yet authorized, so the
+  // Discover/Update hostAppStatus probes cannot SSH-authenticate and report not-installed → the Update
+  // gate auto-skips. Now that the key is authorized the probe returns the real version; the DONE-effect
+  // above then bounces a below-floor / major-mismatch host back to Update instead of reaching Done.
+  useEffect(() => {
+    if (w.index === S.WAIT_PERM && permAccepted) {
+      setPostPairProbePending(true);
+      void probeSelectedHost().finally(() => setPostPairProbePending(false));
+    }
+  }, [w.index, permAccepted, probeSelectedHost]);
+
+  useEffect(() => {
+    if (w.index !== S.DONE) return;
+    if (!selectedHost) {
+      w.goTo(S.DISCOVER, "prev");
+      return;
+    }
+    if (majorMismatch || (needsUpdate && updateState !== "done")) {
+      forcedUpdateLanding.current = true; // guard redirect, not a user Back — see the S.UPDATE effect
+      w.goTo(S.UPDATE, "prev");
+      return;
+    }
+    if (!permAccepted || permDenied) {
+      w.goTo(S.WAIT_PERM, "prev");
+      return;
+    }
+    if (!hasRealMapping) {
+      w.goTo(S.MAPPINGS, "prev");
+    }
+  }, [
+    w.index,
+    selectedHost,
+    majorMismatch,
+    needsUpdate,
+    updateState,
+    permAccepted,
+    permDenied,
+    hasRealMapping,
+    w.goTo,
+  ]);
+
+  const forcedUpdateLanding = useRef(false);
+  useEffect(() => {
+    if (w.index !== S.UPDATE) return;
+    if (w.direction === "prev") {
+      if (forcedUpdateLanding.current) {
+        // The Done guard forced this landing (below-floor/major-mismatch host) — stay on
+        // Update; only a USER Back should pass through to Discover.
+        forcedUpdateLanding.current = false;
+      } else {
+        w.goTo(S.DISCOVER, "prev");
+        return;
+      }
+    }
+    // Gate on probed: never skip Update until the host status probe has resolved, or a slow
+    // SSH probe lets the timer skip an outdated host on the pre-probe default (both flags false).
+    if (selectedHost?.probed && !needsUpdate && !majorMismatch && updateState !== "done") {
+      const tm = setTimeout(() => w.next(), 650);
+      return () => clearTimeout(tm);
+    }
+  }, [w.index, w.direction, selectedHost?.probed, needsUpdate, majorMismatch, updateState, w]);
+
   const nextDisabled =
-    cliGateActive || // wait for the background xpair CLI install on CLI-dependent steps.
-    w.index === S.DISCOVER || // Discover advances by picking a peer, not Next.
-    (w.index === S.CONNECT &&
-      (isSetup
-        ? !setupReady
-        : !connectReady || hostAppChecking || (hostPermChecking && !hostPermReady))) ||
-    (w.index === S.GRANT && !grantReady) || // wait until host AX + SR are granted
-    (w.index === S.ENGINE && !engineReady); // wait until the engine is installed + authed on the host
-  // Folder mappings are OPTIONAL — you can attach to a host for screen share / terminal without
-  // mapping any folders and add them later from the IDE ("Add Root"), so the Mappings step never
-  // blocks Next.
+    (w.index === 3 && !selectedHost) ||
+    blockedOnUpdate ||
+    (w.index === 4 && needsUpdate && updateState !== "done") ||
+    blockedOnDeny ||
+    (w.index === 5 && !permAccepted) ||
+    // Hold at WaitPerm until the post-pairing compatibility re-probe resolves, so an incompatible host
+    // routes back to Update instead of letting the user click through to Done.
+    (w.index === 5 && postPairProbePending) ||
+    (w.index === 6 && !hasRealMapping);
 
-  // Custom Next routing: Mappings → run liveness check before Done; Connect (non-setup) skips the
-  // Installing step.
-  const onNext = () => {
-    if (w.index === S.CONNECT && !isSetup) {
-      // Reconnect path and manual path both skip the Installing + Grant steps → straight to Engine.
-      stepRef.current = S.ENGINE;
-      w.goTo(S.ENGINE, "next");
-      return;
-    }
-    if (w.index === S.MAPPINGS) {
-      void runLivenessCheck();
-      return;
-    }
-    w.next();
-  };
-
-  // Prev routing: from Mappings, go back to Grant (setup) or Connect (others); Grant and Installing
-  // both fall back to the fingerprint-confirm setup step.
-  const onPrev = () => {
-    if (w.index === S.MAPPINGS) {
-      // Mappings always follows the Engine step.
-      cancelLivenessCheck();
-      setLive("idle");
-      setLiveErr("");
-      stepRef.current = S.ENGINE;
-      w.goTo(S.ENGINE, "prev");
-      return;
-    }
-    if (w.index === S.ENGINE) {
-      // Engine follows Grant on the setup path, Connect on the reconnect/manual paths.
-      const dest = isSetup && !manual ? S.GRANT : S.CONNECT;
-      stepRef.current = dest;
-      w.goTo(dest, "prev");
-      return;
-    }
-    if (w.index === S.GRANT || w.index === S.INSTALL) {
-      stepRef.current = S.CONNECT;
-      w.goTo(S.CONNECT, "prev");
-      return;
-    }
-    w.prev();
-  };
-
-  // Mappings runs the final gate before Done, so failed probes keep a retry-oriented label.
-  const nextLabel =
-    w.index === S.MAPPINGS && live === "checking"
-      ? "Checking…"
-      : w.index === S.MAPPINGS &&
-        (live === "offline" ||
-          live === "rekeyed" ||
-          live === "setup" ||
-          live === "host-app" ||
-          live === "permissions")
-      ? "Re-check"
-      : w.index === S.MAPPINGS && mappings.length === 0
-      ? "Skip for now"
-      : "Next";
-
-  const hostRepairPanel = canRepairHost ? (
-    <>
-      {manualMissingNeedsFingerprint && manualMissingRepairPeer && (
-        <div className="mt-4">
-          <StepSetupPassword peer={manualMissingRepairPeer} onReady={setSetupReady} />
-        </div>
-      )}
-      {(!manualMissingNeedsFingerprint || setupReady) && (
-        <div className="mt-4">
-          <StepInstalling
-            isUpdate={hostRepairKind === "update"}
-            forceInstall
-            repairKind={hostRepairKind}
-            host={connectTarget}
-            hostName={manual ? connectTarget : peer?.name || connectTarget}
-            currentVersion={hostApp?.version || ""}
-            requiredVersion={hostRepairKind === "update" ? MIN_COMPATIBLE_HOST : ""}
-            state={installState}
-            setState={setInstallState}
-            onDone={handleHostRepairDone}
-            onFail={() => setInstallState("idle")}
-          />
-        </div>
-      )}
-    </>
-  ) : null;
+  const showNext = !w.isLast && !blockedOnUpdate && !blockedOnDeny;
 
   return (
     <>
-    <WizardShell
-      title="Xpair"
-      subtitle={STEP_TITLES[w.index]}
-      step={w.index}
-      totalSteps={w.totalSteps}
-      onPrev={onPrev}
-      onNext={
-        w.isLast || w.index === S.DISCOVER || w.index === S.INSTALL ? undefined : onNext
-      }
-      nextDisabled={nextDisabled || live === "checking"}
-      nextLabel={nextLabel}
-      centerSlot={
-        // CLI-dependent step blocked because the bundled CLI isn't ready yet — say why (installing
-        // vs failed) so the disabled Next isn't a mystery.
-        cliGateActive ? (
-          <p className="truncate text-center text-xs text-muted-foreground">
-            {cliGateMessage}
-          </p>
-        ) : // Connect step: once reachable, surface WHY the host-app gate blocks (not installed /
-        // incompatible) so the user isn't staring at a silently-disabled Next.
-        requiresHostApp && reachReady && hostApp && !hostAppReady && !hostAppChecking ? (
-          <p className="truncate text-center text-xs text-destructive">
-            {canRepairHost
-              ? "Repair XpairHost below to continue."
-              : !hostApp.installed
-              ? "Host has no Xpair host app — install it on the host."
-              : hostApp.err || "Host version is incompatible with this client."}
-          </p>
-        ) : requiresHostPerms && reachReady && hostAppReady && !hostPermReady ? (
-          <p className="truncate text-center text-xs text-destructive">
-            {canRepairHost
-              ? "Repair XpairHost below to continue."
-              : hostPermChecking
-              ? "Checking host permissions…"
-              : hostPerms?.err ||
-                "Grant Accessibility and Screen Recording on the host to continue."}
-          </p>
-        ) : w.index === S.ENGINE && !engineReady ? (
-          <p className="truncate text-center text-xs text-muted-foreground">
-            Set up {engine} on the host to continue.
-          </p>
-        ) : w.index === S.MAPPINGS &&
-          (live === "offline" ||
-            live === "rekeyed" ||
-            live === "setup" ||
-            live === "host-app" ||
-            live === "permissions") ? (
-          <p className="text-center text-xs leading-snug text-destructive">
-            {live === "rekeyed"
-              ? "Host identity changed — re-pair."
-              : liveErr ||
-                (live === "offline"
-                  ? "Host unreachable — re-discover."
-                  : live === "setup"
-                  ? "Host setup has not finished."
-                  : live === "host-app"
-                  ? "Host app check failed."
-                  : "Host permissions are not ready.")}
-          </p>
-        ) : null
-      }
-      statusBar={
-        // Background CLI install progress — a thin, non-blocking bar at the very bottom of the
-        // wizard. Shown only while the install is in flight, just succeeded, or failed; the
-        // onboarding stays fully interactive throughout.
-        cliInstall === "installing" ? (
-          <div className="flex items-center gap-2 border-t border-border/60 bg-muted/30 px-6 py-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>Installing xpair CLI…</span>
-          </div>
-        ) : cliInstall === "ready" ? (
-          <div className="flex items-center gap-2 border-t border-border/60 bg-muted/30 px-6 py-2 text-xs text-muted-foreground">
-            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-            <span>xpair CLI ready</span>
-          </div>
-        ) : cliInstall === "failed" ? (
-          <div className="flex items-center gap-2 border-t border-destructive/30 bg-destructive/10 px-6 py-2 text-xs text-destructive">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate">
-              CLI install failed{(cliInstallErr || cli?.err) ? ` — ${cliInstallErr || cli?.err}` : ""}
-            </span>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-6 shrink-0 px-2 text-xs"
-              onClick={() => void installCliNow()}
-            >
-              Retry
+      <WizardShell
+        title="Xpair"
+        step={w.index}
+        totalSteps={w.totalSteps}
+        onPrev={w.prev}
+        onNext={showNext ? w.next : undefined}
+        nextDisabled={nextDisabled}
+        nextLabel={
+          w.index === 0
+            ? t("shell.getStarted")
+            : w.index === 6
+            ? t("shell.finish")
+            : t("shell.next")
+        }
+        footerSlot={
+          w.isLast ? (
+            <Button size="sm" onClick={() => window.remotepair.complete()}>
+              {t("shell.openXpair")}
             </Button>
-          </div>
-        ) : null
-      }
-      footerSlot={
-        w.isLast ? (
-          <Button size="sm" onClick={() => window.remotepair.complete()}>
-            Open Xpair
-          </Button>
-        ) : w.index === S.MAPPINGS && live === "checking" ? (
-          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-        ) : (live === "offline" || live === "rekeyed") && w.index === S.MAPPINGS ? (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              cancelLivenessCheck();
-              setLive("idle");
-              setLiveErr("");
-              stepRef.current = S.DISCOVER;
-              w.goTo(S.DISCOVER, "prev");
-            }}
-          >
-            Re-discover
-          </Button>
-        ) : null
-      }
-    >
-      <AnimatedStep stepKey={w.index} direction={w.direction}>
-        {w.index === S.WELCOME && <StepWelcome />}
-        {w.index === S.CONSENT && <StepConsent />}
-        {w.index === S.DISCOVER && (
-          <StepDiscover onSelect={onSelectPeer} onManual={onManual} />
-        )}
-        {w.index === S.CONNECT &&
-          (manual || isConnect || !peer ? (
-            <>
-              <StepConnect
-                host={host}
-                setHost={setHost}
-                state={connState}
-                setState={setConnState}
-                cliBlocked={cliGateActive}
-                autoCheck={initialStep === S.CONNECT}
-                onBackToDiscovery={() => {
-                  stepRef.current = S.DISCOVER;
-                  w.goTo(S.DISCOVER, "prev");
-                }}
-              />
-              {hostRepairPanel}
-            </>
-          ) : isReconnect ? (
-            <>
-              <StepReconnect peer={peer} onReady={setReconnectReady} />
-              {hostRepairPanel}
-            </>
-          ) : (
-            <StepSetupPassword
-              peer={peer}
-              onReady={setSetupReady}
+          ) : null
+        }
+      >
+        <AnimatedStep stepKey={w.index} direction={w.direction}>
+          {w.index === 0 && <StepWelcome />}
+          {w.index === 1 && (
+            <StepConsent
+              kind="crash"
+              value={crashReports}
+              disabled={!consentLoaded}
+              onChange={(v) => {
+                setConsentDirty(true);
+                setCrashReports(v);
+              }}
             />
-          ))}
-        {w.index === S.INSTALL && peer && (
-          <StepInstalling
-            peer={peer}
-            state={installState}
-            setState={setInstallState}
-            onDone={() => {
-              setGrantReady(false);
-              stepRef.current = S.GRANT;
-              w.goTo(S.GRANT, "next");
-            }}
-            onFail={() => {
-              stepRef.current = S.CONNECT;
-              w.goTo(S.CONNECT, "prev");
-            }}
-          />
-        )}
-        {w.index === S.GRANT && peer && (
-          <StepGrantPermissions peer={peer} user={account} onReady={setGrantReady} />
-        )}
-        {w.index === S.ENGINE && (
-          <StepEngine
-            engine={engine}
-            setEngine={setEngine}
-            lockConfigured={lockConfiguredEngine}
-            onReady={setEngineReady}
-          />
-        )}
-        {w.index === S.MAPPINGS && (
-          <StepFileAccess mappings={mappings} setMappings={setMappings} />
-        )}
-        {w.index === S.DONE && (
-          <StepDone host={manual ? host : peer?.name || ""} mappings={mappings} />
-        )}
-      </AnimatedStep>
-    </WizardShell>
+          )}
+          {w.index === 2 && (
+            <StepConsent
+              kind="analytics"
+              value={analytics}
+              disabled={!consentLoaded}
+              onChange={(v) => {
+                setConsentDirty(true);
+                setAnalytics(v);
+              }}
+            />
+          )}
+          {w.index === 3 && (
+            <StepDiscover
+              selected={selectedHost}
+              setSelected={setSelected}
+              engineRecovery={engineRecovery}
+            />
+          )}
+          {w.index === 4 && (
+            <StepUpdate
+              host={selectedHost}
+              state={updateState}
+              setState={setUpdateState}
+              pct={updatePct}
+              setPct={setUpdatePct}
+              onBackToDiscover={goBackToDiscover}
+              onRepairPairing={goToPairing}
+            />
+          )}
+          {w.index === 5 && (
+            <StepWaitPerm
+              host={selectedHost}
+              accepted={permAccepted}
+              setAccepted={setPermAccepted}
+              denied={permDenied}
+              onDeny={() => setPermDenied(true)}
+              onRetry={retryHostPrompt}
+              onPickAnother={goBackToDiscover}
+            />
+          )}
+          {w.index === 6 && (
+            <StepMappings
+              mappings={mappings}
+              setMappings={setMappings}
+              hostTarget={selectedHost?.sshTarget ?? selectedHost?.address}
+            />
+          )}
+          {w.index === 7 && <StepDone host={selectedHost} mappings={mappings} />}
+        </AnimatedStep>
+      </WizardShell>
       {/* Build stamp — confirms a launched window is the latest build. */}
       <div className="pointer-events-none fixed bottom-1 left-2 z-50 select-none font-mono text-[10px] text-muted-foreground/40">
         build {__BUILD_ID__}

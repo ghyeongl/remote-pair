@@ -16,11 +16,11 @@
       "nameShort": "Xpair",
       "nameLong": "Xpair",
       "applicationName": "xpair",
-      "dataFolderName": ".xpair/client",
+      "dataFolderName": ".xpair/ide",
       "darwinBundleIdentifier": "com.x10lab.xpair",
       "urlProtocol": "xpair",
       "serverApplicationName": "xpair-server",
-      "serverDataFolderName": ".xpair/client-server",
+      "serverDataFolderName": ".xpair/ide-server",
       "win32AppUserModelId": "x10lab.Xpair",
       "win32MutexName": "xpair"
     },

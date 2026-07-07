@@ -57,6 +57,7 @@ enum CaptureControlEvent {
     case startOp(gen: Generation, rid: String, cfg: CaptureConfig)
     case stopOp(gen: Generation, rid: String)
     case keyframeOp(gen: Generation, rid: String)
+    case bitrateOp(gen: Generation, rid: String, bitrate: Int)
     case startCompleted(gen: Generation, info: StartedInfo)
     case startFailed(gen: Generation, kind: CaptureEngine.CaptureFailureKind, reason: String)
     case engineError(gen: Generation, kind: CaptureEngine.CaptureFailureKind, reason: String)

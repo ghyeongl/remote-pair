@@ -8,25 +8,35 @@ import Darwin
 
 let HOME = NSHomeDirectory()
 let RP_DIR = "\(HOME)/.xpair/host"
+let CLIENT_DIR = "\(HOME)/.xpair/client"
 let LOG_DIR = "\(RP_DIR)/logs"
 let ROLE_FILE = "\(RP_DIR)/role"            // host|client|both — written by install.sh. Used to block host self-install on a client.
-let CLIENT_ENV_FILE = "\(RP_DIR)/client.env" // present = client installed on this machine
+let CLIENT_ROLE_FILE = "\(CLIENT_DIR)/role"
+let CLIENT_ENV_FILE = "\(CLIENT_DIR)/client.env" // present = client installed on this machine
+let LEGACY_CLIENT_ENV_FILE = "\(RP_DIR)/client.env" // pre-split client runtime location
 let RD_SESSION_TOKEN_FILE = "\(RP_DIR)/rd-session-token" // 0600 token read by the authenticated SSH client before RD signaling.
 
-/// This machine's role. ROLE_FILE trimmed and used as-is (host|client|both); "" if absent or empty (= default host).
+func readRoleFile(_ file: String) -> String {
+    guard let raw = try? String(contentsOfFile: file, encoding: .utf8) else { return "" }
+    return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// This machine's effective role. host/client markers are unioned; "both" in either location is host-capable.
 /// Parsing is kept consistent with Installer.shouldSkipSelfInstall(Installer.swift:50-55).
 func currentRole() -> String {
     // Absent ROLE_FILE = default host (""), the common case → stay silent. Only an *unexpected* read
     // error (file present but unreadable, e.g. perms) is worth a .debug; a missing file is not an error.
-    do {
-        return try String(contentsOfFile: ROLE_FILE, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    } catch {
-        if FileManager.default.fileExists(atPath: ROLE_FILE) {
-            log(.debug, "ROLE: present but unreadable at \(ROLE_FILE): \(error) — defaulting to host")
-        }
-        return ""
+    let hostRole = readRoleFile(ROLE_FILE)
+    let clientRole = readRoleFile(CLIENT_ROLE_FILE)
+    if FileManager.default.fileExists(atPath: ROLE_FILE), hostRole.isEmpty {
+        log(.debug, "ROLE: present but unreadable/empty at \(ROLE_FILE) — checking client marker/defaulting to host")
     }
+    if hostRole == "both" || clientRole == "both" { return "both" }
+    if hostRole == "host" || clientRole == "host" {
+        return (hostRole == "client" || clientRole == "client") ? "both" : "host"
+    }
+    if hostRole == "client" || clientRole == "client" { return "client" }
+    return ""
 }
 
 /// Does this machine act as a host? host / both / empty (unset = default host) → true.  Only client is false.
@@ -38,6 +48,32 @@ var isHostRole: Bool {
 
 /// Is this a client (ACCESS-ONLY) machine? true only when role == "client".
 var isClientRole: Bool { currentRole() == "client" }
+
+func clientEnvFileExists() -> Bool {
+    let fm = FileManager.default
+    return fm.fileExists(atPath: CLIENT_ENV_FILE) || fm.fileExists(atPath: LEGACY_CLIENT_ENV_FILE)
+}
+
+func readClientEnvFile() -> String? {
+    if let raw = try? String(contentsOfFile: CLIENT_ENV_FILE, encoding: .utf8) { return raw }
+    return try? String(contentsOfFile: LEGACY_CLIENT_ENV_FILE, encoding: .utf8)
+}
+
+func roleFileIsClientOnly(_ file: String) -> Bool {
+    return readRoleFile(file) == "client"
+}
+
+func clientEnvHasRemoteHost() -> Bool {
+    guard let raw = readClientEnvFile() else { return false }
+    for line in raw.split(separator: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("REMOTE_HOST=") {
+            let v = String(t.dropFirst("REMOTE_HOST=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+            return !v.isEmpty
+        }
+    }
+    return false
+}
 
 let HELPERS = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers").path
 func helper(_ name: String, _ fallback: String) -> String {
@@ -84,7 +120,7 @@ func writeStatus() {
     let ts = Int(Date().timeIntervalSince1970)
     let json = "{\"ts\":\(ts),\"pid\":\(getpid()),\"version\":\"\(APP_VERSION)\","
         + "\"bundle_id\":\"\(BUNDLE_ID)\",\"socket\":\"\(SOCKET)\","
-        + "\"ax\":\(Permissions.axTrusted()),\"sr\":\(Permissions.srGranted()),\"fda\":\(Permissions.fdaGranted())}\n"
+        + "\"ax\":\(Permissions.axTrusted()),\"sr\":\(Permissions.srGranted()),\"fda\":\(Permissions.fdaGranted()),\"sharing\":\(Permissions.sharingGranted()),\"serving\":\(Permissions.allGranted())}\n"
     // status.json is the agent's ground truth; a stale file makes the agent misjudge liveness/grants → warn.
     do { try json.write(toFile: STATUS_FILE, atomically: true, encoding: .utf8) }
     catch { log(.warn, "STATUS: write \(STATUS_FILE) failed: \(error)") }
@@ -187,10 +223,10 @@ func rotateIfNeeded(_ path: String, _ maxBytes: Int) {
     catch { diag("move live \(path) → \(path).1 failed: \(error)") }
 }
 
-/// §6 REMOTE_HOST for redaction — env wins, else parsed once from ~/.xpair/host/client.env (KEY=VALUE).
+/// §6 REMOTE_HOST for redaction — env wins, else parsed once from ~/.xpair/client/client.env (KEY=VALUE).
 private let logRemoteHost: String? = {
     if let h = ProcessInfo.processInfo.environment["REMOTE_HOST"], !h.isEmpty { return h }
-    if let raw = try? String(contentsOfFile: "\(RP_DIR)/client.env", encoding: .utf8) {
+    if let raw = readClientEnvFile() {
         for line in raw.split(separator: "\n") {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("REMOTE_HOST=") {

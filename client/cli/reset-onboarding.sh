@@ -6,8 +6,8 @@
 # empty state with this script, then launch the app, which will behave exactly as a clean install.
 #
 # What it does (client-side only — never touches the host):
-#   1. Unmounts any Xpair mounts under ~/.xpair/host/mounts and removes the leftover dirs.
-#   2. Clears the onboarding-produced keys in ~/.xpair/host/client.env (REMOTE_HOST, FOLDER_MAPS,
+#   1. Unmounts mount-method folder mappings under /Volumes/<share>.
+#   2. Clears the onboarding-produced keys in ~/.xpair/client/client.env (REMOTE_HOST, FOLDER_MAPS,
 #      SYNC_BACKEND, MOUNT_BACKEND) while preserving install-level keys (LAUNCHER, TERMINAL_APP).
 #   3. Leaves the SSH key (~/.ssh/id_ed25519) in place by default — onboarding reuses it. Pass
 #      --keys to also remove it for a truly bare state.
@@ -15,9 +15,10 @@
 # Usage: reset-onboarding.sh [-y|--yes] [--keys]
 set -euo pipefail
 
-RP_DIR="$HOME/.xpair/host"
-CLIENT_ENV="$RP_DIR/client.env"
-MOUNTS_ROOT="$RP_DIR/mounts"
+RP_DIR="$HOME/.xpair/client"
+RP_CLIENT_DIR="${RP_CLIENT_DIR:-$RP_DIR}"
+RP_HOST_DIR="$HOME/.xpair/host"
+CLIENT_ENV="$RP_CLIENT_DIR/client.env"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 YES=0
@@ -31,6 +32,35 @@ for a in "$@"; do
   esac
 done
 
+if [ -f "$RP_CLIENT_DIR/bin/maplib.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$RP_CLIENT_DIR/bin/maplib.sh"
+else
+  # Deferred failure: mapping-free commands (self-update, host, status, logs) must keep
+  # working on a pre-maplib install — a load-time exit would brick the upgrade path
+  # (the old self-update never fetched maplib.sh, so the recovery command itself dies).
+  # valid_host is the one REAL implementation here: startup validates $REMOTE_HOST with it
+  # before any dispatch, so even its stub would re-brick self-update. It is a pure,
+  # dependency-free string check — bootstrap copy of maplib.sh's (t_16 asserts they match).
+  valid_host() {
+    local target="${1:-}" user="" host=""
+    case "$target" in ''|-*) return 1 ;; esac
+    case "$target" in
+      *@*)
+        case "$target" in *@*@*|@*|*@) return 1 ;; esac
+        user="${target%@*}"; host="${target#*@}"
+        case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        ;;
+      *) host="$target" ;;
+    esac
+    case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+  }
+  for _maplib_fn in map_client_of map_host_of map_to_host resolve_host smb_host map_mode_infer smb_user share_name_for_hostpath expected_mountpoint smb_mount_url smb_mount_source discover_mountpoint_for_share discover_mountpoint_for_hostpath host_smb_status; do
+    eval "$_maplib_fn() { printf '%s\n' 'maplib.sh missing — run: xpair self-update' >&2; exit 1; }"
+  done
+  unset _maplib_fn
+fi
+
 # Resolve xpair-mount (installed or on PATH) for backend-correct unmounts.
 RPM=""
 if command -v xpair-mount >/dev/null 2>&1; then RPM="$(command -v xpair-mount)"
@@ -42,19 +72,56 @@ if [ "$YES" != 1 ]; then
   case "${ans:-n}" in [yY]*) ;; *) echo "Aborted."; exit 1 ;; esac
 fi
 
-# 1) Unmount anything currently mounted under the mounts root.
-if [ -d "$MOUNTS_ROOT" ]; then
+map_mode_for() {
+  local client="$1" e c IFS=';'
+  for e in ${FOLDER_MAP_MODES:-}; do
+    [ -n "$e" ] || continue
+    c="$(map_client_of "$e")"
+    [ "$c" = "$client" ] && { map_host_of "$e"; return; }
+  done
+  map_mode_infer "$client"
+}
+
+unmount_path() {
+  local mp="$1"
+  [ -n "$mp" ] || return 0
+  echo "unmounting $mp"
+  diskutil unmount "$mp" >/dev/null 2>&1 \
+    || umount "$mp" >/dev/null 2>&1 \
+    || diskutil unmount force "$mp" >/dev/null 2>&1 \
+    || echo "  (could not unmount $mp — may already be detached)"
+}
+
+# 1) Unmount real mount-method mappings before clearing config.
+if [ -f "$CLIENT_ENV" ]; then
+  unset FOLDER_MAPS FOLDER_MAP_MODES
+  # shellcheck disable=SC1090
+  . "$CLIENT_ENV" >/dev/null 2>&1 || true
+  IFS=';'
+  for pair in ${FOLDER_MAPS:-}; do
+    [ -n "$pair" ] || continue
+    client_path="$(map_client_of "$pair")"
+    host_path="$(map_host_of "$pair")"
+    [ "$(map_mode_for "$client_path")" = mount ] || continue
+    if [ -n "$RPM" ]; then
+      "$RPM" unmount "$host_path" >/dev/null 2>&1 \
+        || "$RPM" unmount "$client_path" >/dev/null 2>&1 \
+        || unmount_path "$client_path"
+    else
+      unmount_path "$client_path"
+    fi
+  done
+  unset IFS
+fi
+
+# Legacy pre-split mount roots are retired, but clean up any still-attached volumes.
+for legacy_root in "$RP_HOST_DIR/mounts" "$RP_DIR/mounts"; do
   while IFS= read -r mp; do
     [ -n "$mp" ] || continue
-    echo "unmounting $mp"
-    { [ -n "$RPM" ] && "$RPM" unmount "$mp" >/dev/null 2>&1; } \
-      || umount "$mp" >/dev/null 2>&1 \
-      || diskutil unmount force "$mp" >/dev/null 2>&1 \
-      || echo "  (could not unmount $mp — may already be detached)"
-  done < <(/sbin/mount | awk -v r="$MOUNTS_ROOT" 'index($0, " on "r){s=index($0," on ")+4; e=index($0," (")-1; print substr($0,s,e-s+1)}')
-  rm -rf "${MOUNTS_ROOT:?}/"* 2>/dev/null || true
-  echo "cleared $MOUNTS_ROOT"
-fi
+    unmount_path "$mp"
+  done < <(/sbin/mount | awk -v r="$legacy_root" 'index($0, " on "r){s=index($0," on ")+4; e=index($0," (")-1; print substr($0,s,e-s+1)}')
+  [ -d "$legacy_root" ] && rmdir "$legacy_root"/* "$legacy_root" >/dev/null 2>&1 || true
+done
 
 # 2) Clear onboarding keys in client.env (preserve install-level keys + the file itself).
 if [ -f "$CLIENT_ENV" ]; then

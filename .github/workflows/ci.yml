@@ -15,23 +15,40 @@ jobs:
         run: |
           set -e
           fail=0
-          for f in shared/bootstrap.sh \
-                   shared/install.sh shared/uninstall.sh shared/config.sh shared/lib.sh shared/sync-setup.sh \
-                   client/cli/xpair client/cli/xpair-launch client/cli/xpair-askpass \
-                   client/cli/xpair-desktop client/cli/xpair-mount client/cli/xpair-editor \
-                   host/build-host.sh host/build-tmux-aqua.sh host/make-signing-cert.sh \
-                   host/xpair-approve-router.sh; do
-            [ -f "$f" ] || continue
+          list="$(mktemp)"
+          trap 'rm -f "$list"' EXIT
+          git ls-files shared client/cli host tests | while IFS= read -r f; do
+            base="${f##*/}"
+            case "$base" in
+              *.sh) printf '%s\n' "$f" ;;
+              *.*) : ;;
+              *)
+                [ -f "$f" ] || { printf '%s\n' "$f"; continue; }
+                first="$(sed -n '1p' "$f" 2>/dev/null || true)"
+                printf '%s\n' "$first" | grep -Eq '^#!.*[/ ](ba)?sh([[:space:]]|$)' && printf '%s\n' "$f"
+                ;;
+            esac
+          done > "$list"
+          while IFS= read -r f; do
+            if [ ! -f "$f" ]; then
+              echo "FAIL missing $f"
+              fail=1
+              continue
+            fi
             if bash -n "$f"; then echo "ok  $f"; else echo "FAIL $f"; fail=1; fi
-          done
+          done < "$list"
           exit $fail
 
       - name: Test suite (mock harness, 0 real ssh/tmux)
         run: cd tests && bash run.sh
+
+      - name: SoT drift guards
+        run: bash shared/check-ide-selfcontained.sh && bash shared/screen-protocol/check-screen-protocol.sh && bash shared/identity/check-identity.sh
 
       - name: Swift compile-check (RemotePairHost, no signing)
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           # Compile via SwiftPM (mirrors build-host.sh: `swift build --package-path host -c release`)
           swift build --package-path host -c release
+          "$(swift build --package-path host -c release --show-bin-path)/XpairHost" --capture-control-self-test
           echo "RemotePairHost compiles ✓"

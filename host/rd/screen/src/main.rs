@@ -151,6 +151,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!("{err}");
+            eprintln!("{err}");
             ExitCode::FAILURE
         }
     }
@@ -188,7 +189,9 @@ fn cmd_capture(out: &PathBuf) -> Result<(), String> {
         .save(out)
         .map_err(|e| format!("failed to write PNG to {}: {e}", out.display()))?;
 
-    tracing::info!("captured {}x{} frame -> {}", width, height, out.display());
+    let message = format!("captured {}x{} frame -> {}", width, height, out.display());
+    tracing::info!("{message}");
+    println!("{message}");
     Ok(())
 }
 
@@ -199,17 +202,21 @@ fn cmd_info() -> Result<(), String> {
         return Err("no displays found (is Screen Recording permission granted?)".to_string());
     }
 
-    tracing::info!("{} display(s):", monitors.len());
+    let header = format!("{} display(s):", monitors.len());
+    tracing::info!("{header}");
+    println!("{header}");
     for (i, m) in monitors.iter().enumerate() {
         let name = m.name().unwrap_or_else(|_| "<unknown>".to_string());
         let width = m.width().unwrap_or(0);
         let height = m.height().unwrap_or(0);
         let scale = m.scale_factor().unwrap_or(1.0);
         let primary = m.is_primary().unwrap_or(false);
-        tracing::info!(
+        let message = format!(
             "  [{i}] {name}: {width}x{height} @ {scale}x{}",
             if primary { " (primary)" } else { "" }
         );
+        tracing::info!("{message}");
+        println!("{message}");
     }
     Ok(())
 }

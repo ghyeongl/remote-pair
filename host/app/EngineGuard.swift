@@ -6,7 +6,7 @@
 // and the user's exported provider env (ANTHROPIC_API_KEY/OPENAI_API_KEY) resolve exactly as they will at
 // launch time.
 //
-// Mirrors client/ide/remotepair/ext/onboarding-bridge.js (ENGINE_PROBE / ENGINE_INSTALL / ENGINE_AUTH_WRITE):
+// Host-side engine operations:
 //   probe   — `command -v <engine>` for install; engine-specific auth check (env OR on-disk credential).
 //   install — each engine's official native installer (non-interactive), then PATH persistence.
 //   auth    — the secret is fed over the child's STDIN only (read -r KEY) — never argv/log/disk-plaintext.
@@ -25,7 +25,7 @@ enum EngineGuard {
         "export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; "
 
     static func isKnown(_ engine: String) -> Bool {
-        engine == "claude" || engine == "codex" || engine == "opencode"
+        engine == "claude" || engine == "codex" || engine == "opencode" || engine == "shell"
     }
 
     // MARK: - probe
@@ -125,8 +125,7 @@ enum EngineGuard {
             "touch \"$RC\"; chmod 600 \"$RC\" 2>/dev/null || true; " +
             "TMP=\"$(mktemp)\"; " +
             // Drop ONLY the prior Xpair-managed block (markers + the line between), never a user's own
-            // `export VAR=` outside our block — a blanket grep would silently delete it. (Mirror of
-            // onboarding-bridge.js rcExportWriter.)
+            // `export VAR=` outside our block — a blanket grep would silently delete it.
             "awk -v b=\"# >>> xpair \(varName) >>>\" -v e=\"# <<< xpair \(varName) <<<\" '$0==b{skip=1;next} $0==e{skip=0;next} skip!=1' \"$RC\" > \"$TMP\" || true; " +
             "mv \"$TMP\" \"$RC\"; " +
             "{ echo \"# >>> xpair \(varName) >>>\"; printf 'export \(varName)=%s\\n' \"$KEY\"; echo \"# <<< xpair \(varName) <<<\"; } >> \"$RC\"; " +
@@ -182,9 +181,39 @@ enum EngineGuard {
         }
     }
 
+    /// Write ENGINE=<id> ONLY if host.env does not already record a non-empty one. Used when onboarding
+    /// SKIPS the engine step (some engine is already installed+authed): xpair-launch reads host.env's
+    /// ENGINE, so it must find one — but we must NOT clobber a choice the user made in a previous run.
+    static func persistIfUnset(_ engine: String) -> Result {
+        if let raw = try? String(contentsOfFile: hostEnvPath, encoding: .utf8),
+           raw.split(separator: "\n", omittingEmptySubsequences: false)
+               .contains(where: { $0.hasPrefix("ENGINE=") && $0 != "ENGINE=" }) {
+            return Result(ok: true, err: "")   // already recorded — leave the user's choice intact
+        }
+        return persist(engine)
+    }
+
     // MARK: - login-shell runner
 
     private struct Run { let code: Int32; let out: String; let err: String }
+
+    private final class PipeBuffer {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func store(_ data: Data) {
+            lock.lock()
+            self.data = data
+            lock.unlock()
+        }
+
+        func string() -> String {
+            lock.lock()
+            let snapshot = data
+            lock.unlock()
+            return String(data: snapshot, encoding: .utf8) ?? ""
+        }
+    }
 
     /// Run `script` via `/bin/bash -lc` (login shell → brew/npm PATH + exported provider env). When
     /// `stdin` is non-nil, the value is written ONCE to the child's stdin then closed — used to hand a
@@ -201,18 +230,31 @@ enum EngineGuard {
         do { try p.run() } catch {
             return Run(code: -1, out: "", err: "\(error)")
         }
+        let readGroup = DispatchGroup()
+        let readQueue = DispatchQueue(label: "rp.engineguard.runLogin.pipes", qos: .utility, attributes: .concurrent)
+        let outBuffer = PipeBuffer()
+        let errBuffer = PipeBuffer()
+        readGroup.enter()
+        readQueue.async {
+            outBuffer.store(outPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
+        readGroup.enter()
+        readQueue.async {
+            errBuffer.store(errPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
         if let inPipe, let stdin {
             let h = inPipe.fileHandleForWriting
             h.write(Data(stdin.utf8))
             try? h.close()
         }
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        readGroup.wait()
         return Run(
             code: p.terminationStatus,
-            out: (String(data: outData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-            err: (String(data: errData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            out: outBuffer.string().trimmingCharacters(in: .whitespacesAndNewlines),
+            err: errBuffer.string().trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
 }

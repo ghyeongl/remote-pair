@@ -138,7 +138,7 @@ Xpair는 에이전트를 **호스트에서**, **호스트의 파일**을 대상�
 
 ```bash
 xpair launch <host-folder>   # 호스트의 폴더에 대한 세션 시작 / attach
-xpair mount                  # 호스트 폴더를 로컬에 마운트(smb/sshfs)해서 보고 편집
+xpair mount                  # 호스트 폴더를 SMB로 로컬에 마운트해서 보고 편집
 ```
 
 ---
@@ -156,7 +156,7 @@ xpair status           # 앱 PID, 호스트 서버, heartbeat 경과
 xpair doctor           # SSH 인증, 호스트 앱, 호스트의 tmux-aqua 점검
 xpair desktop open     # macOS 화면 공유(vnc://)로 호스트 화면 열기
 xpair editor start     # 앱 내장 code-server 에디터 실행(loopback)
-xpair mount            # 호스트 폴더 직접 마운트(smb/sshfs)
+xpair mount            # 호스트 폴더 직접 SMB 마운트
 xpair notify           # 최근 호스트 알림 가져오기(Stop / approve / …)
 xpair logs [--host -f] # 런처/앱 로그 tail(또는 ssh로 호스트 로그)
 xpair config set host my-mac-mini

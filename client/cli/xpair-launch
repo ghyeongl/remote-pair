@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# xpair-launch — open a session (Claude Code, Shell, Codex, or OpenCode; remote host or local) for a single folder and attach.
-# Engine is chosen interactively, via RP_ENGINE (set by 'xpair launch --engine <claude|shell|codex|opencode>'), or client.env ENGINE.
+# xpair-launch — open a session (Claude Code, Shell, Codex, or OpenCode) on the configured host and attach.
+# Engine is chosen explicitly, interactively, or from the host's host.env ENGINE read over SSH.
 #
 # Key behavior (1:1 connection only — no session sharing / multi-attach):
 #   • Path mapping: client folder → host folder (FOLDER_MAPS; content is identical via external sync
@@ -12,9 +12,8 @@
 #   • computer-use: session is added to the patched tmux-aqua server socket started by
 #                   XpairHost → claude inherits its permissions
 #   • non-interactive: RP_YES=1 (or --yes) skips all prompts (auto dir creation, etc.)
-#   • transient local mode: LOCAL_MODE=1 forces local target selection until remote SSH is restored
 #
-# Usage:  xpair-launch [--local|--remote] [--fresh] [--yes] [--engine <claude|claudecode|shell|codex|opencode>] [<dir>]
+# Usage:  xpair-launch [--fresh] [--yes] [--engine <claude|claudecode|shell|codex|opencode>] [<dir>]
 #         (typically called via 'xpair launch <dir>' or a Finder Service)
 set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -33,14 +32,34 @@ XPAIR_OS="$(_xpair_os)"
 # stat: BSD (mac) uses -f, GNU (linux/WSL/Git-Bash coreutils) uses -c. Keep callers OS-agnostic.
 _stat_size() { if [ "$XPAIR_OS" = mac ]; then stat -f %z "$1" 2>/dev/null; else stat -c %s "$1" 2>/dev/null; fi; }
 
-# ── config (single source of truth: ~/.xpair/host) ──
+# ── config (split runtime dirs) ──
 RP_DIR="${RP_DIR:-$HOME/.xpair/host}"
-for _f in common host client; do
-  # shellcheck disable=SC1090
-  [ -f "$RP_DIR/$_f.env" ] && { set -a; . "$RP_DIR/$_f.env"; set +a; }
-done
+RP_HOST_DIR="${RP_HOST_DIR:-$HOME/.xpair/host}"
+RP_CLIENT_DIR="${RP_CLIENT_DIR:-$HOME/.xpair/client}"
+if [ -f "$RP_CLIENT_DIR/client.env" ]; then
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_CLIENT_DIR/$_f.env" ] && { set -a; . "$RP_CLIENT_DIR/$_f.env"; set +a; }
+  done
+else
+  for _f in common client; do
+    # shellcheck disable=SC1090
+    [ -f "$RP_HOST_DIR/$_f.env" ] && { set -a; . "$RP_HOST_DIR/$_f.env"; set +a; }
+  done
+fi
+# shellcheck disable=SC1090
+[ -f "$RP_HOST_DIR/host.env" ] && { set -a; . "$RP_HOST_DIR/host.env"; set +a; }
 REMOTE_HOST="${REMOTE_HOST:-}"
-LOCAL_MODE="${LOCAL_MODE:-0}"
+
+# Dedicated pairing identity: offer ~/.xpair/host/pairing_ed25519 (installed as the restricted
+# forced-command line) on every ssh/mosh so a paired client authenticates. Added with -i but WITHOUT
+# IdentitiesOnly, so ssh still falls back to the user's normal key when the pairing key isn't
+# authorized yet (unproven pairing). Pre-pairing (no key yet) SSH_ID is empty and ssh uses its defaults.
+# Scalar (NOT an array): an empty array expanded as "${arr[@]}" under `set -u` is an "unbound
+# variable" error on bash 3.2 (the macOS default). A scalar is always safe, and the xpair path has
+# no spaces, so unquoted word-splitting into ssh options is fine.
+PAIRING_KEY="$RP_HOST_DIR/pairing_ed25519"
+SSH_ID=""; [ -f "$PAIRING_KEY" ] && SSH_ID="-i $PAIRING_KEY"
 APP_NAME="${APP_NAME:-XpairHost}"
 BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.x10lab.xpair-host}"
 REMOTE_BIN="${REMOTE_BIN:-\$HOME/.local/bin}"          # path evaluated on the remote side (preserve quoting)
@@ -52,10 +71,11 @@ AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux.sock}"
 # SSH account differs from the client user. Left empty here when no override was given.
 MOSH_SERVER="${MOSH_SERVER:-}"
 FOLDER_MAPS="${FOLDER_MAPS:-}"
-HROMANIZE="${HROMANIZE:-$RP_DIR/bin/hangul-romanize}"
-# Engine selection (claude|codex|opencode). RP_ENGINE (env, set by 'xpair launch --engine') wins;
-# otherwise client.env ENGINE; default claude. Validated below — unknown values fall back to claude.
-RP_ENGINE="${RP_ENGINE:-${ENGINE:-claude}}"
+HROMANIZE="${HROMANIZE:-$RP_CLIENT_DIR/bin/hangul-romanize}"
+# Engine selection (claude|codex|opencode|shell). RP_ENGINE/--engine wins; otherwise the host's
+# host.env ENGINE is read over SSH at launch. The client-side ENGINE is only a last-resort fallback.
+CLIENT_ENGINE_FALLBACK="${ENGINE:-claude}"
+RP_ENGINE="${RP_ENGINE:-}"
 RP_ENGINE_EXPLICIT="${RP_ENGINE_EXPLICIT:-0}"
 canonical_engine() {
   case "${1:-}" in
@@ -67,69 +87,77 @@ canonical_engine() {
 
 sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
-valid_host() {
-  case "${1:-}" in
-    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
-    *) return 0 ;;
-  esac
-}
+# Source the shared logger; no-op fallback for partially-updated clients.
+# shellcheck disable=SC1090
+[ -f "$RP_CLIENT_DIR/bin/logging.sh" ] && . "$RP_CLIENT_DIR/bin/logging.sh"
+type rp_log >/dev/null 2>&1 || { rp_log(){ :; }; log_info(){ :; }; log_warn(){ printf '%s\n' "$*" >&2; }; log_error(){ printf '%s\n' "$*" >&2; }; }
+
+if [ -f "$RP_CLIENT_DIR/bin/maplib.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$RP_CLIENT_DIR/bin/maplib.sh"
+else
+  # Deferred failure: mapping-free commands (self-update, host, status, logs) must keep
+  # working on a pre-maplib install — a load-time exit would brick the upgrade path
+  # (the old self-update never fetched maplib.sh, so the recovery command itself dies).
+  # valid_host is the one REAL implementation here: startup validates $REMOTE_HOST with it
+  # before any dispatch, so even its stub would re-brick self-update. It is a pure,
+  # dependency-free string check — bootstrap copy of maplib.sh's (t_16 asserts they match).
+  valid_host() {
+    local target="${1:-}" user="" host=""
+    case "$target" in ''|-*) return 1 ;; esac
+    case "$target" in
+      *@*)
+        case "$target" in *@*@*|@*|*@) return 1 ;; esac
+        user="${target%@*}"; host="${target#*@}"
+        case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        ;;
+      *) host="$target" ;;
+    esac
+    case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+  }
+  for _maplib_fn in map_client_of map_host_of map_to_host resolve_host smb_host map_mode_infer smb_user share_name_for_hostpath expected_mountpoint smb_mount_url smb_mount_source discover_mountpoint_for_share discover_mountpoint_for_hostpath host_smb_status; do
+    eval "$_maplib_fn() { printf '%s\n' 'maplib.sh missing — run: xpair self-update' >&2; exit 1; }"
+  done
+  unset _maplib_fn
+fi
 
 if [ -n "$REMOTE_HOST" ] && ! valid_host "$REMOTE_HOST"; then
   printf 'invalid REMOTE_HOST ignored: %s\n' "$REMOTE_HOST" >&2
   REMOTE_HOST=""
 fi
 
-case "$LOCAL_MODE" in
-  1|true|TRUE|yes|YES|on|ON|local) LOCAL_MODE=1 ;;
-  *) LOCAL_MODE=0 ;;
-esac
-local_mode_on() { [ "${LOCAL_MODE:-0}" = 1 ]; }
-
-rp_set() {
-  local k="$1" v="$2" f="$RP_DIR/client.env"
-  mkdir -p "$(dirname "$f")"; touch "$f"
-  { grep -v "^$k=" "$f" 2>/dev/null || true; printf '%s=%q\n' "$k" "$v"; } > "$f.tmp" && mv "$f.tmp" "$f"
-}
-
-clear_local_mode_quiet() {
-  local_mode_on || return 0
-  rp_set LOCAL_MODE 0
-  LOCAL_MODE=0
-}
-
-# Source the shared logger; no-op fallback for partially-updated clients.
-# shellcheck disable=SC1090
-[ -f "$RP_DIR/bin/logging.sh" ] && . "$RP_DIR/bin/logging.sh"
-type rp_log >/dev/null 2>&1 || { rp_log(){ :; }; log_info(){ :; }; log_warn(){ printf '%s\n' "$*" >&2; }; log_error(){ printf '%s\n' "$*" >&2; }; }
-
 # ── args ──
-TARGET_PREF=""; LOCAL_MODE_EXPLICIT=0; FRESH=0; RP_YES="${RP_YES:-0}"; DIR_ARG=""
+FRESH=0; RP_YES="${RP_YES:-0}"; DIR_ARG=""
 while [ $# -gt 0 ]; do case "$1" in
-  --local)  TARGET_PREF=local; LOCAL_MODE_EXPLICIT=1; shift ;;
-  --remote) TARGET_PREF=remote; shift ;;
   --fresh)  FRESH=1; shift ;;
   --yes|-y) RP_YES=1; shift ;;
   --engine) RP_ENGINE="${2:-}"; RP_ENGINE_EXPLICIT=1; shift 2 ;;
+  --*)      printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
   *)        DIR_ARG="$1"; shift ;;
 esac; done
-
-if _canon="$(canonical_engine "$RP_ENGINE")"; then
-  RP_ENGINE="$_canon"
-else
-  printf 'unknown engine: %s (use claude|claudecode|shell|codex|opencode)\n' "$RP_ENGINE" >&2
-  exit 2
-fi
 
 # ── error logging + pause on failure ──
 # Tee all stderr to a log file — prevents errors from disappearing when the window closes.
 # On success the process is replaced by exec (tmux/mosh), so the EXIT trap only fires on failure.
-LAUNCH_LOG="$RP_DIR/logs/claude-launch.err.log"
-mkdir -p "$RP_DIR/logs"
+LAUNCH_LOG="$RP_CLIENT_DIR/logs/claude-launch.err.log"
+mkdir -p "$RP_CLIENT_DIR/logs"
 # size-cap rotation (5MB → .1) — unbounded otherwise on a long-lived client
 _rotate_log() { local f="$1" max="${2:-5000000}" sz; sz="$(_stat_size "$f" || echo 0)"; [ "$sz" -gt "$max" ] && mv -f "$f" "$f.1" 2>/dev/null || true; }
 _rotate_log "$LAUNCH_LOG"
 printf '\n===== %s launch %s (%s) =====\n' "$(date '+%F %T')" "${DIR_ARG:-$PWD}" "$(hostname -s)" >> "$LAUNCH_LOG"
-exec 2> >(while IFS= read -r l; do printf '%s %s\n' "$(date '+%T')" "$l" >> "$LAUNCH_LOG"; printf '%s\n' "$l" >&2; done)
+if exec 2> >(while IFS= read -r l; do printf '%s %s\n' "$(date '+%T')" "$l" >> "$LAUNCH_LOG"; printf '%s\n' "$l" >&2; done); then
+  :
+else
+  _stderr_fifo="${TMPDIR:-/tmp}/xpair-launch-stderr.$$"
+  if mkfifo "$_stderr_fifo" 2>/dev/null; then
+    while IFS= read -r l; do printf '%s %s\n' "$(date '+%T')" "$l" >> "$LAUNCH_LOG"; printf '%s\n' "$l" >&2; done < "$_stderr_fifo" &
+    if exec 2>"$_stderr_fifo"; then
+      rm -f "$_stderr_fifo"
+    else
+      rm -f "$_stderr_fifo"
+    fi
+  fi
+fi
 on_exit() {
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -185,25 +213,95 @@ choose_engine() {
   esac
 }
 
-PROJECT_DIR="$(cd "${DIR_ARG:-$PWD}" 2>/dev/null && pwd)" || die "directory not found: ${DIR_ARG:-$PWD}"
 LOCAL_HOST="$(hostname -s)"
 
 # ── path mapping: client path → host path (longest-prefix). Assumes same path if no mapping. ──
-map_to_host() { # $1=clientDir → echo hostDir
-  local d="$1" best_c="" best_h="" c h pair IFS=';'
+# ── mount-method attach guard: remount missing SMB mounts best-effort before attach ──
+map_mode_of() {
+  local d="$1" e c IFS=';'
+  for e in ${FOLDER_MAP_MODES:-}; do [ -n "$e" ] || continue
+    c="$(map_client_of "$e")"
+    [ "$c" = "$d" ] && { map_host_of "$e"; return; }
+  done
+  map_mode_infer "$d"
+}
+
+resolve_xpair_mount_tool() {
+  if [ -x "$LOCAL_BIN/xpair-mount" ]; then
+    printf '%s\n' "$LOCAL_BIN/xpair-mount"
+  elif [ -x "$RP_CLIENT_DIR/bin/xpair-mount" ]; then
+    printf '%s\n' "$RP_CLIENT_DIR/bin/xpair-mount"
+  elif command -v xpair-mount >/dev/null 2>&1; then
+    command -v xpair-mount
+  else
+    return 1
+  fi
+}
+replace_mount_mapping_client_path() {
+  local old="$1" new="$2" out="" pair c h e mode_out="" mode_c mode_v IFS=';'
+  [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ] || return 0
   for pair in $FOLDER_MAPS; do
     [ -n "$pair" ] || continue
-    c="${pair%%::*}"; h="${pair#*::}"
-    [ "$c" = "$pair" ] && h="$c"            # no '::' → identity mapping
-    case "$d" in "$c"|"$c"/*) if [ "${#c}" -gt "${#best_c}" ]; then best_c="$c"; best_h="$h"; fi ;; esac
+    c="$(map_client_of "$pair")"; h="$(map_host_of "$pair")"
+    [ "$c" = "$old" ] && c="$new"
+    out="${out:+$out;}$c::$h"
   done
-  if [ -n "$best_c" ]; then printf '%s%s' "$best_h" "${d#"$best_c"}"; else printf '%s' "$d"; fi
+  FOLDER_MAPS="$out"
+  for e in ${FOLDER_MAP_MODES:-}; do
+    [ -n "$e" ] || continue
+    mode_c="$(map_client_of "$e")"; mode_v="$(map_host_of "$e")"
+    [ "$mode_c" = "$old" ] && mode_c="$new"
+    mode_out="${mode_out:+$mode_out;}$mode_c::$mode_v"
+  done
+  FOLDER_MAP_MODES="$mode_out"
+  case "${DIR_ARG:-}" in "$old"|"$old"/*) DIR_ARG="$new${DIR_ARG#"$old"}" ;; esac
 }
+ensure_mount_mappings_best_effort() {
+  [ -n "${FOLDER_MAPS:-}" ] || return 0
+  [ -n "${REMOTE_HOST:-}" ] || return 0
+
+  local tool pair client_path host_path mode mountpoint expected out IFS=';'
+  tool="$(resolve_xpair_mount_tool 2>/dev/null)" || {
+    for pair in $FOLDER_MAPS; do [ -n "$pair" ] || continue
+      client_path="$(map_client_of "$pair")"
+      [ "$(map_mode_of "$client_path")" = mount ] || continue
+      printf 'warning: xpair-mount not found; cannot ensure mount-method folder maps before attach\n' >&2
+      return 0
+    done
+    return 0
+  }
+
+  for pair in $FOLDER_MAPS; do
+    [ -n "$pair" ] || continue
+    client_path="$(map_client_of "$pair")"
+    mode="$(map_mode_of "$client_path")"
+    [ "$mode" = mount ] || continue
+    host_path="$(map_host_of "$pair")"
+    mountpoint="$(discover_mountpoint_for_hostpath "$host_path")"
+    if [ -n "$mountpoint" ]; then
+      replace_mount_mapping_client_path "$client_path" "$mountpoint"
+      continue
+    fi
+    expected="$(expected_mountpoint "$host_path")"
+    if out="$("$tool" --backend smb mount "$host_path" 2>&1)"; then
+      printf '%s\n' "$out"
+      mountpoint="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Mountpoint:[[:space:]]*//p' | tail -1)"
+      [ -n "$mountpoint" ] || mountpoint="$(discover_mountpoint_for_hostpath "$host_path")"
+      [ -n "$mountpoint" ] && replace_mount_mapping_client_path "$client_path" "$mountpoint"
+    else
+      printf 'warning: could not mount %s at %s before attach; continuing with attach\n' "$host_path" "$expected" >&2
+      [ -n "$out" ] && printf '%s\n' "$out" >&2
+    fi
+  done
+}
+
+ensure_mount_mappings_best_effort
+PROJECT_DIR="$(cd "${DIR_ARG:-$PWD}" 2>/dev/null && pwd)" || die "directory not found: ${DIR_ARG:-$PWD}"
 
 # ── human-readable deterministic session name ──
 # Folder name → session name mapping is the deterministic SSOT.
 # Stored in a permanent location (not .cache which may be deleted).
-_TRCACHE="$RP_DIR/session-names"
+_TRCACHE="$RP_CLIENT_DIR/session-names"
 # Folder basename → readable ASCII slug.
 #  · Already ASCII → use as-is (no translation)
 #  · Non-ASCII (e.g. Korean) → translate to English via claude haiku (cached → deterministic)
@@ -248,10 +346,6 @@ _proj_base() {
 }
 # Session name = "<host>_<proj_base>" — glance at the bottom-left status-left [...] to know which machine.
 # (':' is a tmux reserved char → normalize to '_'. '.' too: .claude → _claude)
-# Local session name is based on PROJECT_DIR; remote session name on map_to_host result —
-# both computed locally (SSOT; cache avoids duplicate claude calls).
-LOCAL_PROJ="${LOCAL_HOST}_$(_proj_base "$PROJECT_DIR")"
-LOCAL_PROJ="${LOCAL_PROJ//[.:]/_}"
 
 # ── respawn body (engine + crash restart) ──
 # Dispatches on RP_ENGINE. The EXIT-trap process-group kill is common to all engines
@@ -385,72 +479,9 @@ done
 RESPAWN
 }
 
-# ── optional ~/.claude git sync (only when present — not a Xpair requirement) ──
-# Heavy parallel sync intentionally omitted (~/.claude sync is opt-in).
-# --resume pointers are per-machine local, so sync is not needed for basic operation.
-sync_claude_local() {
-  [ -d "$HOME/.claude/.git" ] || return 0
-  ( cd "$HOME/.claude"
-    git fetch -q origin main 2>/dev/null && git merge --no-edit -X ours origin/main >/dev/null 2>&1 \
-      || git merge --abort >/dev/null 2>&1 || true ) || true
-}
-
-# ── tmux-aqua helper (local) ──
-tm_local() { "$LOCAL_BIN/tmux-aqua" -S "$AQUA_SOCK" "$@"; }
-
-local_host_role_expected() {
-  local _role; _role="$(cat "$RP_DIR/role" 2>/dev/null | tr -d '[:space:]')"
-  case "$_role" in
-    host|both) return 0 ;;
-    client)    return 1 ;;
-    *)         [ -f "$RP_DIR/host.env" ] && [ "$(hostname -s)" = "${REMOTE_HOST:-$(hostname -s)}" ] ;;
-  esac
-}
-
-host_setup_recovery_local() {
-  local why="${1:-XpairHost tmux-aqua is not ready}"
-  printf '\nXpairHost setup is required before this host session can start.\n' >&2
-  printf 'Reason: %s\n' "$why" >&2
-  printf 'Recovery on %s:\n' "$LOCAL_HOST" >&2
-  printf '  1. Open %s.app on the host Mac.\n' "$APP_NAME" >&2
-  printf '  2. From the menu bar, choose Set up... or Permissions...\n' >&2
-  printf '  3. Grant Accessibility and Screen Recording, then retry xpair launch.\n' >&2
-  printf 'Diagnostics: tmux-aqua=%s socket=%s\n' "$LOCAL_BIN/tmux-aqua" "$AQUA_SOCK" >&2
-  exit 13
-}
-
-# _local_next_n PROJ_BASE — echo "N state" (best-effort; no die on absence)
-# state: "new" | "reattach" | "fresh"
-_local_next_n() {
-  local base="$1" fresh="${2:-0}" n=1 aqua="$LOCAL_BIN/tmux-aqua"
-  if [ ! -x "$aqua" ]; then printf '1 new'; return; fi
-  if [ "$fresh" = 1 ]; then
-    while "$aqua" -S "$AQUA_SOCK" list-clients -t "=${base}_${n}" -F x 2>/dev/null | grep -q x \
-      || "$aqua" -S "$AQUA_SOCK" has-session -t "=${base}_${n}" 2>/dev/null; do
-      n=$((n+1))
-    done
-    printf '%s fresh' "$n"
-    return
-  fi
-  # Skip any _N that already has a live client
-  while "$aqua" -S "$AQUA_SOCK" list-clients -t "=${base}_${n}" -F x 2>/dev/null | grep -q x; do
-    n=$((n+1))
-  done
-  if [ "$n" -gt 1 ]; then
-    printf '%s fresh' "$n"
-  elif "$aqua" -S "$AQUA_SOCK" has-session -t "=${base}_1" 2>/dev/null; then
-    printf '1 reattach'
-  else
-    printf '1 new'
-  fi
-}
-
-# _remote_next_n REMOTE_PROJ_BASE [HOST_ATTACHED_SESSIONS] [ALL_REMOTE_SESSIONS] — echo "N state"
-# state (N==1): "reattach" if _1 already exists detached on the host | "new" if it does not
-#   (decided from ALL_REMOTE_SESSIONS) | "new/reattach" only when the all-set is unknown.
-#   "fresh" when N>1 (a lower _N already has a live client).
+# _remote_next_n REMOTE_PROJ_BASE [HOST_ATTACHED_SESSIONS] — echo N
 _remote_next_n() {
-  local base="$1" attached="${2:-}" all="${3:-}" n=1
+  local base="$1" attached="${2:-}" n=1
   # Skip any _N that already has a live client, whether visible as a local mosh tab
   # or as an attached client on the host tmux server.
   while pgrep -f "mosh-client.*attach -d -t =${base}_${n}( |\$)" >/dev/null 2>&1 ||
@@ -458,191 +489,38 @@ _remote_next_n() {
   do
     n=$((n+1))
   done
-  if [ "$n" -gt 1 ]; then
-    printf '%s fresh' "$n"
-  elif [ -n "$all" ] && printf '%s\n' "$all" | grep -Fxq "${base}_1"; then
-    printf '1 reattach'
-  elif [ -n "$all" ]; then
-    printf '1 new'
-  else
-    printf '1 new/reattach'
-  fi
+  printf '%s' "$n"
 }
 
-ensure_local_host() {
-  # The computer-use (aqua-tmux) path is HOST-only. A client has no granted XpairHost,
-  # so local sessions there use plain tmux only as a labeled non-computer-use mode.
-  # One tmux per machine, no socket fragmentation.
-  # (Mirrors the reference's `AQUA="" on non-host`, but role-based instead of hostname-hardcoded.)
-  # Allow the local aqua path only when this machine is in an *actual host role* (role host|both).
-  # Prevents leaking to local even if a stray host.env exists on a client (the gh-mac-m4 incident:
-  # routed locally, then got reaped by host churn). The role marker is the SSOT; old installs
-  # (no marker) fall back to host.env + (remote unset, or this machine IS that remote) — guards against
-  # a 'both' regression.
-  local_host_role_expected || return 1
-  [ -f "$RP_DIR/host.env" ] || return 1
-  local AQUA="$LOCAL_BIN/tmux-aqua"
-  [ -x "$AQUA" ] || return 1
-  tm_local has-session 2>/dev/null && return 0
-  open -a "$APP_NAME" 2>/dev/null || /bin/launchctl kickstart "gui/$(id -u)/$BUNDLE_PREFIX" 2>/dev/null || true
-  for _ in 1 2 3 4 5 6 7 8; do tm_local has-session 2>/dev/null && return 0; sleep 0.5; done
-  return 1
-}
-
-plain_local_non_computer_use_notice() {
-  local mode="local"
-  [ "${TARGET_PREF:-}" = local ] && mode="explicit --local"
-  printf 'Xpair: %s launch is non-computer-use (plain tmux; XpairHost/tmux-aqua unavailable). macOS grants are not inherited.\n' "$mode" >&2
-}
-
-plain_local_respawn_preamble() {
-  cat <<'RESPAWN'
-export XPAIR_COMPUTER_USE=0
-export XPAIR_LAUNCH_MODE=plain-local-tmux
-printf '\n[Xpair: non-computer-use]\n'
-printf 'Plain local tmux is outside XpairHost/tmux-aqua; macOS grants are not inherited.\n\n'
-RESPAWN
-}
-
-plain_local_display_message() {
-  tmux display-message -t "=$1" 'Xpair: non-computer-use (plain local tmux; no XpairHost grants)' 2>/dev/null || true
-}
-
-# tmux 3-way branching policy (local and remote):
+# tmux 3-way branching policy:
 #   no session        → create + resume last conversation (CL_CONTINUE=1)
 #   exists, detached  → attach -d (take-over, continue as-is)
 #   already attached  → open next _N fresh
 # "attached" is based on live client tabs on this machine, so even if a dead mosh-server
 # leaves a stale attach on the remote tmux, we take over the lowest _N without spawning extras.
 
-# ---------------- local launch (explicit local target only) ----------------
-launch_local() {
-  [ "$RP_ENGINE" = shell ] || command -v "$RP_ENGINE" >/dev/null 2>&1 || die "$RP_ENGINE not found on $LOCAL_HOST (PATH=$PATH)" 11
-  local T; T="$(mktemp -t claude-respawn.XXXXXX)"
-  sync_claude_local
-  cd "$PROJECT_DIR"                                 # local: host == client
-  # For computer-use, claude must be inside the patched-tmux server under the granted
-  # .app (XpairHost) process subtree. If Xpair host (aqua-tmux) is on this machine,
-  # use it; otherwise fall back to plain tmux.
-  if ensure_local_host; then
-    # Skip any _N that already has a client (tab) attached — opens _2 if _1 is visible on screen
-    local _ln_out; _ln_out="$(_local_next_n "$LOCAL_PROJ" "$FRESH")"
-    local N="${_ln_out%% *}"
-    local SESS="${LOCAL_PROJ}_${N}" CONT=1 NEED_CREATE=1
-    [ "$N" -gt 1 ] && CONT=0                                                   # _2+ → fresh
-    [ "$FRESH" = 1 ] && CONT=0                                                 # --fresh → fresh
-    if [ "$FRESH" = 1 ]; then
-      while tm_local has-session -t "=$SESS" 2>/dev/null; do
-        N=$((N+1))
-        SESS="${LOCAL_PROJ}_${N}"
-      done
-    else
-      tm_local has-session -t "=$SESS" 2>/dev/null && NEED_CREATE=0           # detached → take-over re-attach
-    fi
-    if [ "$NEED_CREATE" = 1 ]; then
-      [ -d "$PROJECT_DIR" ] || die "project directory missing: $PROJECT_DIR" 1
-      { printf "export CLAUDE_WARP_RC=%q\n" "$SESS"; printf "export CL_CONTINUE=%s\n" "$CONT"; respawn_body; } > "$T"
-      tm_local new-session -d -s "$SESS" -c "$PROJECT_DIR" "bash $T" \
-        || host_setup_recovery_local "tmux-aqua could not create session $SESS on $AQUA_SOCK"
-    fi   # XpairHost subtree → computer-use
-    # host-side session-lifecycle log (local==host here; correlation id = session name).
-    # Export RP_SESSION so child claude processes stamp the same id in their log lines.
-    export RP_SESSION="$SESS"
-    # Route through rp_log host (uses shared lock $LOG_DIR/.xpair.log.lock, coordinated with Swift).
-    rp_log info host "SESSION: $([ "$NEED_CREATE" = 1 ] && echo created || echo attached) $SESS (client=$LOCAL_HOST local)"
-    # Xpair (E): surface the SSOT tmux session name as the terminal title (OSC-2) so the
-    # Xpair IDE shows it in the Sessions sidebar header (xterm title -> instance.title ->
-    # syncTitleToActiveSession). Emitted right before exec so it lands before tmux takes over.
-    printf '\033]2;%s\007' "$SESS"
-    # exec cannot call functions → invoke the binary directly (instead of tm_local).
-    exec "$LOCAL_BIN/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$SESS"   # -d: drop stale clients (take-over)
-  fi
-  # Fallback: plain tmux (no computer-use — machine without XpairHost or tmux-aqua server not up).
-  # We deliberately do NOT block here on local_host_role_expected: a host/both machine whose
-  # tmux-aqua server is not running must still get a usable (non-computer-use) plain-tmux session
-  # rather than a hard exit. The labeled non-computer-use notice below makes the downgrade explicit.
-  plain_local_non_computer_use_notice
-  command -v tmux >/dev/null 2>&1 || die "tmux not found on $LOCAL_HOST. Install it: brew install tmux" 10
-  # Skip any _N that already has a client (tab) attached
-  local TN=1
-  while tmux list-clients -t "=${LOCAL_PROJ}_${TN}" -F x 2>/dev/null | grep -q x \
-    || { [ "$FRESH" = 1 ] && tmux has-session -t "=${LOCAL_PROJ}_${TN}" 2>/dev/null; }; do
-    TN=$((TN+1))
-  done
-  local TSESS="${LOCAL_PROJ}_${TN}" TCONT=1
-  [ "$TN" -gt 1 ] && TCONT=0                         # _2+ → fresh
-  [ "$FRESH" = 1 ] && TCONT=0
-  printf '\033]2;%s\007' "$TSESS"   # Xpair (E): surface tmux session name as terminal title (OSC-2)
-  if [ "$FRESH" != 1 ] && tmux has-session -t "=$TSESS" 2>/dev/null; then
-    plain_local_display_message "$TSESS"
-    exec tmux attach -d -t "=$TSESS"                 # detached → take-over re-attach (-d: drop stale clients)
-  else
-    { printf "export CLAUDE_WARP_RC=%q\n" "$TSESS"; printf "export CL_CONTINUE=%s\n" "$TCONT"; plain_local_respawn_preamble; respawn_body; } > "$T"
-    exec tmux new -s "$TSESS" "bash $T"
-  fi
-}
-
-# ── target decision ──
-# LOCAL_HOST == REMOTE_HOST → local. Otherwise --local/--remote flag; if absent: RP_YES→remote, else interactive.
-
 # Remote session name is computed locally from the MAPPED host path —
 # safe even if the remote has no romanize/claude.
-# Computed here (before the prompt) so _remote_next_n can annotate the interactive prompt.
 HOST_DIR="$(map_to_host "$PROJECT_DIR")"
 REMOTE_PROJ="${REMOTE_HOST}_$(_proj_base "$HOST_DIR")"
-REMOTE_PROJ="${REMOTE_PROJ//[.:]/_}"
+# REMOTE_HOST may be user-qualified (user@addr). tmux session names must stay within the
+# [A-Za-z0-9_.-] set that `xpair attach` accepts, so sanitize '@' too (not just '.'/':') — otherwise
+# detached/history reattach from the Sessions UI fails for hosts paired as hostUser@addr.
+REMOTE_PROJ="${REMOTE_PROJ//[.:@]/_}"
 HOST_DIR_Q="$(sh_quote "$HOST_DIR")"
 AQUA_SOCK_Q="$(sh_quote "$AQUA_SOCK")"
 REMOTE_PROJ_Q="$(sh_quote "$REMOTE_PROJ")"
 
-# Raw "<session> <attached?>" lines for every remote session (one SSH round-trip).
-# Callers derive both the ATTACHED set (skip live _N) and the ALL set (new-vs-reattach).
-_remote_session_states() {
-  [ -n "$REMOTE_HOST" ] || return 0
-  { ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
-      "${REMOTE_BIN}/tmux-aqua -S ${AQUA_SOCK_Q} list-sessions -F '#S #{session_attached}' 2>/dev/null || true" 2>/dev/null || true; }
-}
-
-# Ask this before the machine/target prompt so users choose the agent first.
-choose_engine
-
-if [ -n "$TARGET_PREF" ]; then
-  TARGET="$TARGET_PREF"
-elif local_mode_on; then
-  TARGET=local
-  LOCAL_MODE_EXPLICIT=1
-elif [ -z "$REMOTE_HOST" ] || [ "$LOCAL_HOST" = "$REMOTE_HOST" ]; then
-  TARGET=local
-  LOCAL_MODE_EXPLICIT=1
-elif [ "$RP_YES" = 1 ]; then
-  TARGET=remote
-else
-  # Compute prospective session annotations from local mosh plus a best-effort host tmux probe.
-  _rn_raw="$(_remote_session_states)"
-  _rn_att="$(printf '%s\n' "$_rn_raw" | awk '($2!="0"){print $1}')"
-  _rn_all="$(printf '%s\n' "$_rn_raw" | awk 'NF{print $1}')"
-  _rn_out="$(_remote_next_n "$REMOTE_PROJ" "$_rn_att" "$_rn_all")"
-  _rn="${_rn_out%% *}"; _rs="${_rn_out#* }"
-  _ln_out="$(_local_next_n "$LOCAL_PROJ")"
-  _ln="${_ln_out%% *}"; _ls="${_ln_out#* }"
-  printf 'Launch %s for "%s":\n  [1] %s (remote, default)  → session _%s  (%s)\n  [2] %s (local)            → session _%s  (%s)\n' \
-    "$(engine_label "$RP_ENGINE")" "$LOCAL_PROJ" "$REMOTE_HOST" "$_rn" "$_rs" "$LOCAL_HOST" "$_ln" "$_ls"
-  ans="$(ask 'select [1/2]: ')"
-  if [ "${ans:-1}" = 2 ]; then
-    TARGET=local
-    LOCAL_MODE_EXPLICIT=1
-  else
-    TARGET=remote
-  fi
-fi
-if [ "$TARGET" = local ]; then
-  [ "$LOCAL_MODE_EXPLICIT" = 1 ] || die "local launch requires explicit local mode — rerun with --local, or configure a remote host with 'xpair config set host <ssh-host>'" 1
-  launch_local
-fi
-[ -n "$REMOTE_HOST" ] || die "no valid REMOTE_HOST configured — run 'xpair config set host <ssh-host>' or use --local" 1
+# Single uniform target: the configured host (may be localhost). No local/remote branch.
+[ -n "$REMOTE_HOST" ] || die "no host configured — set up a host (local or remote) in Xpair.app, or: xpair config set host <ssh-host>" 1
 
 # Expose ssh errors verbatim — timeout/key-rejection/host-key errors must appear on screen + in log.
-reach() { ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" true; }
+reach() { ssh $SSH_ID -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" true; }
+read_host_engine() {
+  ssh $SSH_ID -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
+    'set -a; [ -f "$HOME/.xpair/host/host.env" ] && . "$HOME/.xpair/host/host.env"; printf "%s\n" "${ENGINE:-}"' \
+    2>/dev/null | head -1
+}
 
 remote_disconnect_diag() {
   local reason="$1" rc="${2:-20}"
@@ -650,7 +528,6 @@ remote_disconnect_diag() {
   printf 'please connect/reconnect to %s (LAN, VPN, or Tailscale), then rerun xpair launch.\n' "$REMOTE_HOST" >&2
   printf '  (tailscale exit-node is not auto-configured by Xpair — bring the link up yourself)\n' >&2
   printf 'Xpair will not change Tailscale exit-node settings or fall back to local automatically.\n' >&2
-  printf 'For a local session, rerun explicitly: xpair launch --local %s\n' "$(sh_quote "$PROJECT_DIR")" >&2
   exit "$rc"
 }
 
@@ -658,13 +535,29 @@ if ! reach; then
   remote_disconnect_diag "cannot reach $REMOTE_HOST by SSH" 20
 fi
 
+if [ "${RP_ENGINE_EXPLICIT:-0}" != 1 ]; then
+  HOST_ENGINE="$(read_host_engine || true)"
+  if _canon="$(canonical_engine "$HOST_ENGINE")"; then
+    RP_ENGINE="$_canon"
+  else
+    RP_ENGINE="${RP_ENGINE:-$CLIENT_ENGINE_FALLBACK}"
+  fi
+fi
+if _canon="$(canonical_engine "$RP_ENGINE")"; then
+  RP_ENGINE="$_canon"
+else
+  printf 'unknown engine: %s (use claude|claudecode|shell|codex|opencode)\n' "$RP_ENGINE" >&2
+  exit 2
+fi
+choose_engine
+
 # ---- check that the host folder (mapped path) exists ----
 # Distinguish ssh failure (timeout/hiccup) from "directory genuinely missing" —
 # use output markers rather than exit code.
 # Do not suppress stderr — ssh failure reason must appear raw on screen + in launch log for debugging.
 DIR_CHECK=""
 for i in 1 2 3; do
-  DIR_CHECK="$(ssh -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" "[ -d ${HOST_DIR_Q} ] && echo __YES__ || echo __NO__")" || DIR_CHECK=""
+  DIR_CHECK="$(ssh $SSH_ID -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" "[ -d ${HOST_DIR_Q} ] && echo __YES__ || echo __NO__")" || DIR_CHECK=""
   case "$DIR_CHECK" in *__YES__*|*__NO__*) break ;; esac
   printf '  (dir-check ssh attempt %s/3 failed — see error above, retrying in 1s)\n' "$i" >&2
   sleep 1
@@ -675,13 +568,12 @@ case "$DIR_CHECK" in
     printf '%s does not exist on %s (mapped host path).\n' "$HOST_DIR" "$REMOTE_HOST" >&2
     mk="$(ask 'create the directory on host? [y/N]: ')"; [ "$RP_YES" = 1 ] && mk=y
     case "${mk:-n}" in
-      [yY]*) ssh "$REMOTE_HOST" "mkdir -p ${HOST_DIR_Q}" || die "mkdir failed ($REMOTE_HOST)" 4 ;;
+      [yY]*) ssh $SSH_ID "$REMOTE_HOST" "mkdir -p ${HOST_DIR_Q}" || die "mkdir failed ($REMOTE_HOST)" 4 ;;
       *)     die "cancelled: directory missing on host ($HOST_DIR)" 5 ;;
     esac ;;
   *)
     remote_disconnect_diag "$REMOTE_HOST dir-check ssh failed 3 times" 21 ;;
 esac
-clear_local_mode_quiet
 
 # ── zombie tab cleanup + host attached-client facts ──
 # It's possible for a mosh-client to be alive (tab open) while the remote server is dead
@@ -689,7 +581,7 @@ clear_local_mode_quiet
 # Query the host's attach list and kill local clients with no matching server → tab closes + number freed.
 # On ssh failure, keep local clients intact and let host-side setup recheck before attach.
 ATT=""
-if ATT_RAW="$(ssh -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" \
+if ATT_RAW="$(ssh $SSH_ID -n -o BatchMode=yes -o ConnectTimeout=4 "$REMOTE_HOST" \
      "${REMOTE_BIN}/tmux-aqua -S ${AQUA_SOCK_Q} list-sessions -F '#S #{session_attached}' 2>/dev/null || true")"; then
   ATT="$(printf '%s\n' "$ATT_RAW" | awk '($2!="0"){print $1}')"
   { pgrep -fl mosh-client 2>/dev/null | grep -E "attach -d -t =${REMOTE_PROJ}_[0-9]+" || true; } | while IFS= read -r line; do
@@ -708,8 +600,7 @@ fi
 # Session number is decided from both local mosh-client facts and live host tmux attached-client
 # facts. Host-side setup rechecks before create/attach so a stale client-side choice cannot
 # take over another active client.
-_rn_final="$(_remote_next_n "$REMOTE_PROJ" "$ATT")"
-RN="${_rn_final%% *}"
+RN="$(_remote_next_n "$REMOTE_PROJ" "$ATT")"
 RCONT=1
 [ "$RN" -gt 1 ] && RCONT=0   # _2+ → fresh
 [ "$FRESH" = 1 ] && RCONT=0  # --fresh → fresh
@@ -833,7 +724,7 @@ EOF
 # Phase 1: SSH setup (sync + create detached tmux session), capture session name.
 # Use || to capture rc rather than letting ssh failure abort at the assignment under set -e.
 SSH_RC=0
-SSH_OUT="$(ssh -o BatchMode=yes "$REMOTE_HOST" "$REMOTE_SCRIPT" 2>&1)" || SSH_RC=$?
+SSH_OUT="$(ssh $SSH_ID -o BatchMode=yes "$REMOTE_HOST" "$REMOTE_SCRIPT" 2>&1)" || SSH_RC=$?
 # Show setup output to user and persist it for `xpair logs --collect`; strip the session + recovery markers.
 SETUP_OUT="$(printf '%s\n' "$SSH_OUT" | grep -Ev '^(__SESSION__:|__HOME__:|__XPAIR_HOST_RECOVERY__$)' || true)"
 if [ -n "$SETUP_OUT" ]; then
@@ -866,7 +757,7 @@ remote_attach_ssh() {
   # `choose_attach_recovery ssh`. exec would replace the launcher with ssh, so a failed
   # ssh attach (e.g. preserved/detached session) would surface its raw exit instead of
   # returning to the recovery UI (retry / repair / detached-session guidance).
-  ssh -t "$REMOTE_HOST" "$REMOTE_BIN/tmux-aqua -S ${AQUA_SOCK_Q} attach -d -t $(sh_quote "=$ACTUAL_SESSION")"
+  ssh $SSH_ID -t "$REMOTE_HOST" "$REMOTE_BIN/tmux-aqua -S ${AQUA_SOCK_Q} attach -d -t $(sh_quote "=$ACTUAL_SESSION")"
 }
 
 resolve_xpair_cli() {
@@ -874,8 +765,8 @@ resolve_xpair_cli() {
     command -v xpair
   elif [ -x "$LOCAL_BIN/xpair" ]; then
     printf '%s\n' "$LOCAL_BIN/xpair"
-  elif [ -x "$RP_DIR/bin/xpair" ]; then
-    printf '%s\n' "$RP_DIR/bin/xpair"
+  elif [ -x "$RP_CLIENT_DIR/bin/xpair" ]; then
+    printf '%s\n' "$RP_CLIENT_DIR/bin/xpair"
   else
     return 1
   fi
@@ -893,7 +784,7 @@ reinstall_mosh() {
     printf 'Homebrew not found locally. Install mosh manually: brew install mosh\n' >&2
     rc=1
   fi
-  if ! ssh "$REMOTE_HOST" 'if command -v brew >/dev/null 2>&1; then brew reinstall mosh || brew install mosh; else exit 127; fi'; then
+  if ! ssh $SSH_ID "$REMOTE_HOST" 'if command -v brew >/dev/null 2>&1; then brew reinstall mosh || brew install mosh; else exit 127; fi'; then
     printf 'host mosh reinstall failed. On %s, install mosh or run setup repair.\n' "$REMOTE_HOST" >&2
     rc=1
   fi
@@ -977,13 +868,13 @@ while :; do
     # The only case where stale state remains is a client crash where signal propagation is impossible —
     # the next attach -d recovers it (dual safety net).
     on_tab_close() {
-      ( trap '' HUP; ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
+      ( trap '' HUP; ssh $SSH_ID -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
           "${REMOTE_BIN}/tmux-aqua -S ${AQUA_SOCK_Q} detach-client -s $(sh_quote "=$ACTUAL_SESSION")" \
           >/dev/null 2>&1 || true ) </dev/null >/dev/null 2>&1 &
       exit 129
     }
     trap on_tab_close HUP TERM
-    mosh --server="$MOSH_SERVER" "$REMOTE_HOST" -- "$REMOTE_HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$ACTUAL_SESSION" || ATTACH_RC=$?
+    mosh --ssh="ssh $SSH_ID" --server="$MOSH_SERVER" "$REMOTE_HOST" -- "$REMOTE_HOME/.local/bin/tmux-aqua" -S "$AQUA_SOCK" attach -d -t "=$ACTUAL_SESSION" || ATTACH_RC=$?
     trap - HUP TERM
     [ "$ATTACH_RC" = 0 ] && exit 0
     choose_attach_recovery mosh "$ATTACH_RC" || exit $?

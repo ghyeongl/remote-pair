@@ -4,6 +4,14 @@ const path = require("node:path");
 
 const root = __dirname;
 const app = fs.readFileSync(path.join(root, "onboarding-webview/src/App.tsx"), "utf8");
+const waitPerm = fs.readFileSync(
+  path.join(root, "onboarding-webview/src/components/onboarding/client/StepWaitPerm.tsx"),
+  "utf8",
+);
+const mappings = fs.readFileSync(
+  path.join(root, "onboarding-webview/src/components/onboarding/client/StepMappings.tsx"),
+  "utf8",
+);
 const main = fs.readFileSync(path.join(root, "onboarding-main.cjs"), "utf8");
 const preload = fs.readFileSync(path.join(root, "onboarding-preload.cjs"), "utf8");
 
@@ -28,17 +36,24 @@ function stripLineComments(source) {
     .join("\n");
 }
 
-test("Q0369 Q0402 Q0474 client onboarding closes only after necessary setup completes", () => {
-  assert.match(
-    app,
-    /const runLivenessCheck\s*=\s*useCallback[\s\S]*w\.goTo\(S\.DONE,\s*"next"\)/,
-    "React onboarding must only land on Done after the host liveness check succeeds",
-  );
-  assert.match(
-    app,
-    /w\.index\s*===\s*S\.MAPPINGS[\s\S]{0,160}runLivenessCheck\(\)/,
-    "Mappings/finish path must run liveness before Done",
-  );
+test("Q0369 Q0402 Q0474 client onboarding reaches completion only from gated Done", () => {
+  assert.match(app, /DONE: 7/);
+  assert.match(app, /if \(w\.index !== S\.DONE\) return;/);
+  assert.match(app, /if \(!selectedHost\) \{[\s\S]*w\.goTo\(S\.DISCOVER, "prev"\)/);
+  assert.match(app, /if \(majorMismatch \|\| \(needsUpdate && updateState !== "done"\)\) \{[\s\S]*w\.goTo\(S\.UPDATE, "prev"\)/);
+  assert.match(app, /if \(!permAccepted \|\| permDenied\) \{[\s\S]*w\.goTo\(S\.WAIT_PERM, "prev"\)/);
+  assert.match(app, /const hasRealMapping = mappings\.some\(isPersistedRealMapping\)/);
+  assert.match(app, /if \(!hasRealMapping\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
+  assert.match(app, /footerSlot=\{[\s\S]*w\.isLast \? \([\s\S]*window\.remotepair\.complete\(\)/);
+  assert.match(app, /w\.index === 7 && <StepDone host=\{selectedHost\} mappings=\{mappings\} \/>/);
+
+  assert.match(waitPerm, /status\.paired[\s\S]*window\.remotepair\.pinHostKey\(sshTarget, host\.hostKeyFP!\)/);
+  assert.match(waitPerm, /status\.paired[\s\S]*await window\.remotepair\.setHost\(sshTarget\)/);
+  assert.match(waitPerm, /setAccepted\(true\)/);
+  assert.match(mappings, /mappings: Mapping\[\]/);
+  assert.match(mappings, /setMappings: Dispatch<SetStateAction<Mapping\[\]>>/);
+  assert.match(mappings, /export function isPersistedRealMapping\(mapping: Mapping\): boolean/);
+
   assert.match(
     preload,
     /complete:\s*\(\)\s*=>\s*\{[\s\S]*ipcRenderer\.invoke\('onboarding:complete'\)/,
@@ -54,7 +69,7 @@ test("Q0369 Q0402 Q0474 client onboarding closes only after necessary setup comp
 
   assert.doesNotMatch(
     closedHandler,
-    /!\s*_completed[\s\S]*onComplete\s*\(/,
+    /onComplete\s*\(/,
     "closing the onboarding window before completion must not call onComplete/open the workbench",
   );
 });

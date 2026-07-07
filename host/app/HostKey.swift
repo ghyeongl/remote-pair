@@ -2,8 +2,8 @@
 //
 // The SHA256 fingerprint of the host's ed25519 SSH key, in OpenSSH `SHA256:<base64>` form
 // (byte-for-byte equal to `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`). It is the
-// machine-identity anchor advertised in the Bonjour TXT `fp` key (BonjourAdvertiser) so a
-// discovering client can TOFU-check it against the host's first ssh connection.
+// machine-identity anchor included in the LAN beacon and metadata endpoint so a discovering
+// client can TOFU-check it against the host's first ssh connection.
 //
 // We pin the ed25519 host key specifically (the client's ssh config prefers ssh-ed25519) so
 // the displayed fingerprint is the key ssh actually pins — no TOFU theater.
