@@ -2,7 +2,7 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { listSessionsFromCli } = require("./session-list.js");
+const { listSessionsFromCli, checkSessionAvailableFromCli } = require("./session-list.js");
 
 let failures = 0;
 async function check(name, fn) {
@@ -77,6 +77,21 @@ async function check(name, fn) {
   await check("timeout CLI exit marks the session list unavailable", async () => {
     const result = await listSessionsFromCli(async () => ({ code: -2, stdout: "", stderr: "" }));
     assert.deepStrictEqual(result, { sessions: [], unavailable: true });
+  });
+
+  await check("checkAttach refuses sessions that are attached elsewhere", async () => {
+    const result = await checkSessionAvailableFromCli(async () => ({
+      code: 0,
+      stdout: JSON.stringify({ sessions: [{ name: "local_one", attached: 1 }] }),
+      stderr: "",
+    }), "local_one");
+    assert.deepStrictEqual(result, {
+      sessions: [{ name: "local_one", attached: 1 }],
+      ok: false,
+      attachedElsewhere: true,
+      session: { name: "local_one", attached: 1 },
+      cause: "Some sessions are attached in another window or device.",
+    });
   });
 
   await check("thrown runner error marks the session list unavailable", async () => {

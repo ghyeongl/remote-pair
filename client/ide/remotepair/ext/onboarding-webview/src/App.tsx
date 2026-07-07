@@ -250,7 +250,7 @@ export default function App() {
             hostNonce: undefined,
             pairPort: undefined,
             pairingMetaStatus: "error",
-            pairingMetaError: meta.err || "Host is not broadcasting pairing details.",
+            pairingMetaError: meta.err || t("wait.discoveryMissing"),
           };
         }
         return {

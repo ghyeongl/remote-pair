@@ -37,7 +37,7 @@ test("client launches and reattaches persistent host sessions by stable IDs, not
   assert.match(frontendPatch, /export const REMOTEPAIR_SESSIONS_ATTACHED_ID = 'remotepair\.sessions\.attached'/);
   assert.match(frontendPatch, /export const REMOTEPAIR_SESSIONS_DETACHED_ID = 'remotepair\.sessions\.detached'/);
   assert.match(frontendPatch, /export const REMOTEPAIR_SESSIONS_HISTORY_ID = 'remotepair\.sessions\.history'/);
-  assert.match(frontendPatch, /setSessionReattacher\(\(name\) => this\.launchReattach\(name\)\)/);
+  assert.match(frontendPatch, /setSessionReattacher\(\(name\) => this\.reattachSession\(name\)\)/);
   assert.match(frontendPatch, /instance\.sendText\('xpair attach ' \+ shellSingleQuote\(name\), true\)/);
   assert.match(frontendPatch, /v\.group\.openEditor\(v\.input, \{ pinned: true \}\)/);
 
