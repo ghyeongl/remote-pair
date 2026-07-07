@@ -5,6 +5,35 @@
 - **Scope**: first-party code only (`client/cli`, `client/ide/remotepair/ext`, `client/onboarding`, `host/app`, `host/rd`, `shared`, `tests`, `bench`, `Casks`). Vendored VSCodium, `dist/`, `generated/`, `node_modules/` excluded.
 - **Severity**: high 6 / medium 33 / low 32. Kinds: bug 34, dead-code 24, architecture 10, design-pattern 3.
 
+## Status (living — updated 2026-07-07)
+
+The audit body below (findings F01–F71, per-WS design) is the frozen source record; this section is the live tracker.
+
+| WS | Scope | PR | State |
+|---|---|---|---|
+| — | Spec (this doc) | #67 | ✅ merged (6 review rounds) |
+| WS1 | bash 3.2 empty-array guards | #68 | ✅ merged |
+| WS2 | test gating (suite now hard-fails) | #69 | ✅ merged |
+| WS3 | install/uninstall symmetry, config precedence | #72 | ✅ merged |
+| WS4 | single `maplib.sh` | #76 | ✅ merged |
+| WS5 | CLI small fixes | #70 | ✅ merged |
+| WS6 | Swift stability (capture race, pipe drain, retain cycle) | #75 | ✅ merged |
+| WS7 | Rust RD lifecycle (leaks, zombie, console) | #74 | ✅ merged |
+| WS8 | dead-code sweep + IPC allowlist | #77 | ✅ merged |
+| WS9 | telemetry consent SoT + service lock | #73 | ✅ merged |
+| WS10 | wizard UX **+ pull-pairing + LAN beacon + border/logo** (see expanded section) | #78 | 🔵 in review |
+| WS11 | bench scoring/RTX/rate math | #71 | ✅ merged |
+| WS12 | onboarding-ui shared source (D1 build-time dist) | — | ⏳ next |
+| WS13 | win32 gates | — | ⏸ parked until Rust CLI #37 |
+| WS14 | real host folder browsing (`listHostDir`) | — | ⏳ after WS10 |
+| WS15 | DC ownership (`negotiated:true`) | — | ⏳ own soak-tested branch |
+| **WS16** | host permission model: File Sharing REQUIRED, Sentry consent UI default-OFF (new — from live QA) | — | ⏳ queued |
+| **WS17** | terminal session restore + bottom-bar attached/detached/history (new — from live QA) | — | ⏳ after WS10 |
+
+**All 6 high + all but a few medium findings are on `develop`.** The `fix/onboarding-ssh-tofu-and-path-quoting` blocker named below **dissolved**: that branch's work (host-key TOFU + path quoting) was already absorbed into develop via the #60 onboarding redesign, so WS8/WS10/WS12 were unblocked and proceed normally.
+
+WS16 and WS17 are net-new workstreams surfaced by the product owner testing the live onboarding/session flow — they are not audit findings F01–F71. Their designs live in their own sections at the end of this document.
+
 ## How to use this document
 
 Each workstream (WS) below is one branch off `develop` and one PR into `develop`, sized for a single implementation pass. The **Design** section is binding; **Steps** are the mechanical checklist; **Acceptance** is what the PR must prove. Implementers must not weaken product code to satisfy a stale test — when a wired-in test fails, fix whichever side has drifted from the *documented* contract, and say which side moved in the PR description.
@@ -16,13 +45,9 @@ Global rules:
 3. Commit messages, PR titles/bodies in English.
 4. Run `tests/run.sh` locally before pushing; after WS2 lands it is the gate for everything else.
 
-### Coordination: in-flight branch
+### Coordination: in-flight branch (RESOLVED)
 
-`fix/onboarding-ssh-tofu-and-path-quoting` (active in another session) touches: `client/cli/xpair`, `ext/onboarding-bridge.js`, `ext/onboarding-preload.cjs`, `onboarding-webview/src/App.tsx`, `StepSetupPassword.tsx`, `global.d.ts`, both `Casks/*.rb`, `shared/identity/versions.json`.
-
-- **WS1, WS4, WS5** (touch `client/cli/xpair`) and **WS3** (Casks): rebase onto develop after that branch merges; re-verify line numbers.
-- **WS8** (bridge/preload deletions) and **WS10** (App.tsx): **do not start until that branch lands.**
-- **F21** (installHost password contract): the in-flight branch touches `StepSetupPassword.tsx` and may be building exactly this consumer. Re-check after it lands; skip F21 if superseded.
+~~`fix/onboarding-ssh-tofu-and-path-quoting`~~ — this blocker is gone. Its host-key TOFU hardening and remote-path quoting were already in develop via the #60 onboarding redesign; the local branch was superseded and deleted. WS8/WS10 proceeded without it. F21's password contract was addressed in WS10 (#78) by routing `NEEDS_PASSWORD` to re-pair guidance, not by building a password form.
 
 ### Workstream order
 
@@ -181,7 +206,17 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 
 **Acceptance**: with consent granted in onboarding, Settings checkbox reflects it on next launch; toggling the checkbox off stops capture (verify `telemetry.env`); `app_first_launch` appears exactly once for a fresh `~/.xpair` (grep the posthog queue/log); only one poller lock exists while a window is open.
 
-## WS10 — `fix/onboarding-wizard-ux` (medium) — after the in-flight branch
+## WS10 — `fix/onboarding-wizard-ux` (medium) — PR #78, in review
+
+> **As-built note (supersedes the original design below).** WS10 grew well past its audit findings during live QA. What actually shipped in #78:
+> - **F37/F38/F39/F52** as designed. **F39 caveat**: making the host probe async introduced a race — the Update-step 650ms auto-skip could fire before the probe resolved and skip an outdated host. Fixed by gating the skip on a `probed` flag (set true on probe success *and* failure). **F38 caveat**: the Done guard's forced landing on Update (below-floor/major-mismatch) had to be distinguished from a user Back via a `forcedUpdateLanding` ref so only user Backs pass through to Discover.
+> - **F21**: resolved as planned (route `NEEDS_PASSWORD` → re-pair guidance, no password form). **F13**: left untouched (deferred to WS14) as designed.
+> - **U1 — pull-based pairing (user-directed):** pairing fields (`serviceInstanceID`/`hostNonce`/`pairPort`/`fp`) are no longer captured at scan time; a new `fetchPairingMeta` bridge method HTTP-GETs the host's `/.well-known/xpair-pairing.json` (port 8891) on host selection and every retry. Discovery is a listing hint only. This structurally kills the "host is not broadcasting" false-negative class. `fetchPairingMeta` was added to preload + `global.d.ts` + `RENDERER_METHODS` + the WS8 surface contract test (the sanctioned way to grow the frozen surface). A failed pull invalidates any stale transcript fields so WaitPerm can't poll a dead pairing window.
+> - **U2 — Bonjour removed, replaced by a native LAN beacon (user-directed):** the dns-sd browse/resolve phase left `cmd_discover` and `BonjourAdvertiser.swift` left the host. Replacement: `host/app/LanBeacon.swift` UDP-broadcasts a secret-free JSON hint (`{v,kind,name,fp,role,user,metaPort,ver}`, <512B) to `255.255.255.255:8892` every 2s; `cmd_discover` gains a bounded UDP listen phase (sender IP = peer address). Discovery is now pure pull + announce-beacon; no mDNS. **The beacon starts at launch, BEFORE the permission run-gate** (the lifecycle Bonjour had) — gating it on `startServing()` deadlocked LAN-only fresh installs (onboarding completes only after a client pairs, which needs the beacon up). Pre-1.0: old dns-sd clients won't see new hosts / new clients won't see old Bonjour-only hosts — accepted, no compatibility shim.
+> - **U3 — window boundary == design boundary:** `WizardShell` dropped the mockup backdrop band (a 720px card floated in a `bg-muted` padded band inside a 720px window → visible double border); the card root now fills the window, and the Electron BrowserWindow + host NSWindow shrank to the card's natural 720×524.
+> - **U4 — logo:** both webview logo assets were 128px upscales (blurry on Retina); regenerated at 512px from `assets/icon/Logo-1024.png` and rendered `object-contain` (never cropped).
+>
+> The `SessionDataProvider` for the bottom bar and the "broadcasting" copy cleanup that U2 implies are **WS17**, not here.
 
 **Findings**: F13, F37, F38, F39 (webview), F21 (bridge contract), F52 (host Done step).
 
@@ -257,6 +292,39 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 | D3 | Host launch-time auto-update? | **Not needed** — the client's connect-time host-version gate covers stale hosts. Delete `SettingsWindow`, `RPAutoUpdateCheck`, and the `startServing()` check; manual "Check for Updates…" menu stays (WS8 step 10). |
 | D4 | DC ownership redesign? | **Yes** — `negotiated:true` + fixed IDs as its own soak-tested branch, WS15, with a protocol-version fallback window. |
 | D5 | Real host folder browsing? | **Yes** — `listHostDir` bridge + lazy tree, WS14 (supersedes WS10's F13 step). |
+
+## WS16 — `fix/host-permission-model` (new, from live QA) — queued
+
+Not an audit finding — surfaced when the maintainer tested the host onboarding on 2026-07.
+
+**Problems (verified in code):**
+- `StepSinglePerm.tsx`: `PERM_ORDER = [login, ax, sr, fda, sharing]` but `REQUIRED_PERMS = [login, ax, sr]`. File Sharing (`sharing`) is only *recommended*, so `nextDisabled` (App.tsx) never blocks on it and the parachute (`firstUnmetPermIndex`, required-only) never lands there — the wizard auto-advances past an ungranted File Sharing. But **File Sharing is mandatory for SMB mounts** (the whole `/Volumes` mount path), so it must be required.
+- `host/onboarding/src/App.tsx:75` `crashReports = useState(true)`: the crash-report (Sentry) consent toggle renders **checked by default** until the async `getConsent()` load overwrites it, and `StepConsent.tsx` badges crash as "recommended". The storage layer is correctly opt-in (`AppDelegate` registers `RPCrashReportConsent=false`; `SentryBridge.setupIfConsented` needs consent+DSN), but the UI default contradicts docs/logging.md §11.1 ("both flags default OFF, opt-in") and can persist consent:true for a user who never touched the toggle. *(Note: the maintainer separately found Sentry receives zero events regardless — the release build ships no `RPSentryDSN`, so the backend stays Noop. That DSN-pipeline fix is tracked separately and is out of WS16 scope by the maintainer's instruction.)*
+
+**Design:**
+1. Move `sharing` into `REQUIRED_PERMS` (mount needs it). The parachute + `nextDisabled` then block/land on it automatically — the landing machinery already exists, it was just scoped to a too-narrow required set. `fda` stays recommended unless a mount path is shown to need it.
+2. `crashReports` default → `false`; disable the toggle until `getConsent()` resolves (no checked-then-unchecked flash); drop the "recommended" badge on crash so it reads as opt-in, matching §11.1.
+
+**Acceptance:** fresh host with File Sharing off cannot advance past the sharing step and re-lands there on reopen; a click-through host onboarding leaves `RPCrashReportConsent` false.
+
+## WS17 — `fix/session-restore-and-bottom-bar` (new, from live QA) — after WS10
+
+Not an audit finding — surfaced in live QA. Touches both the IDE frontend patch (`client/ide/remotepair/patches/zz-remotepair-ide-frontend.patch`) and the extension, so it lands after WS10 (#78) to avoid `extension.js` churn.
+
+**Problems (verified in code):**
+- **Bottom-bar Detached/History are permanently empty.** `remotePairSessionManager.ts` exposes a `setSessionDataProvider` hook, but **no caller exists anywhere in the repo** — the default empty provider is always used. Only the Attached tab works (fed by the sidebar's own registry).
+- **No opened-set persistence / restore.** The only "restore" in `extension.js` is the RD webview panel serializer. Nothing records which sessions were attached at quit, and nothing re-attaches them on next launch — a relaunch reopens with no terminals.
+
+**Desired contract (maintainer):** define *opened* = the sessions attached (live terminal tabs) at the moment of last quit. Persist that set; on next launch re-attach exactly those (not every detached session). Invariant: every terminal tab appears in Attached, and every terminal tab corresponds to an attached session — nothing outside Attached (except the brief `xpair launch` → tmux-created window).
+
+**Design:**
+1. **Data supply**: the extension registers a workbench command the patch calls (mirroring the `setSessionLauncher`/`setAttachedSessionsProvider` injection pattern), pushing `xpair ls --json` poll results so the renderer never spawns a child process. Detached = in tmux, `attached==0`, not a local tab; History = a last-seen session-name store (extension-maintained) whose session is no longer in tmux.
+2. **Opened-set persistence**: write `~/.xpair/client/opened-sessions.json` on every terminal tab open/close (write-on-change *is* the last-quit snapshot — a quit hook is unreliable).
+3. **Restore**: on activation, read the opened set, and for each session still present in tmux, re-attach via the existing `setSessionReattacher` path (same as clicking a Detached card), gated on host reachability with bounded retry.
+4. **Invariant**: the tab→Attached direction is already structural (sidebar registry); the Attached→tab direction is enforced by deriving Attached from the tab registry reconciled against tmux state, not tmux state alone.
+5. Also fold in the U2 fallout: remove the now-dead host Bonjour advertising remnants and retire "broadcasting" copy in favor of "discoverable on your network / Tailscale".
+
+**Acceptance:** quit with N terminals attached → relaunch re-attaches exactly those N (verified against a tmux fixture); Detached/History tabs populate from `xpair ls`; no terminal tab exists without a matching Attached entry.
 
 ## Rejected findings (for the record)
 
