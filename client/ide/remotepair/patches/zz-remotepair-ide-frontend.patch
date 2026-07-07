@@ -2640,6 +2640,7 @@ index 0000000..6e5d586
 +	id: string;
 +	title: string;
 +	sessionName?: string;
++	createdAt: number;
 +}
 +
 +/**
@@ -2689,6 +2690,7 @@ index 0000000..6e5d586
 +let shutdownGuardRegistered = false;
 +const SESSION_REFRESH_RETRY_MS = 1000;
 +const SESSION_REFRESH_INTERVAL_MS = 10000;
++const ATTACHED_SESSION_NAME_FREEZE_GRACE_MS = 30000;
 +export const SESSION_NAME_RE = /^[A-Za-z0-9_.-]+$/;
 +
 +function registerOpenedSessionsShutdownGuard(lifecycleService: ILifecycleService): void {
@@ -2759,9 +2761,13 @@ index 0000000..6e5d586
 +	return names;
 +}
 +
-+function localAttachedSessionsHaveUnfrozenName(): boolean {
++function localAttachedSessionsHaveYoungUnfrozenName(now = Date.now()): boolean {
++	// Defer only briefly for terminals whose tmux name has not yet frozen. Some shells
++	// or failed launches never produce an xpair session name; after the grace window
++	// they are excluded by localAttachedSessionNames() because a name we never learned
++	// is not restorable anyway.
 +	for (const session of attachedProvider?.getAttached() ?? []) {
-+		if (!normalizedSessionName(session.sessionName)) {
++		if (!normalizedSessionName(session.sessionName) && now - session.createdAt < ATTACHED_SESSION_NAME_FREEZE_GRACE_MS) {
 +			return true;
 +		}
 +	}
@@ -2854,8 +2860,8 @@ index 0000000..6e5d586
 +		rpLog('debug', 'opened sessions write skipped during workbench shutdown');
 +		return;
 +	}
-+	if (localAttachedSessionsHaveUnfrozenName()) {
-+		rpLog('debug', 'opened sessions write deferred until attached session names freeze');
++	if (localAttachedSessionsHaveYoungUnfrozenName()) {
++		rpLog('debug', 'opened sessions write deferred until young attached session names freeze');
 +		return;
 +	}
 +	commandService.executeCommand('remotepair.sessions.writeOpened', localAttachedSessionNameList()).then(undefined, (error) => {
@@ -3587,7 +3593,7 @@ index 00000000..820a8de4
 +	 * Used to populate the Session Manager's Attached row (S0 isolation means these instances
 +	 * never appear in ITerminalService.instances, so we source the Attached row from here).
 +	 */
-+	private readonly attached = new Map<string, { instance: ITerminalInstance; input: EditorInput; group: IEditorGroup; sessionName?: string }>();
++	private readonly attached = new Map<string, { instance: ITerminalInstance; input: EditorInput; group: IEditorGroup; sessionName?: string; createdAt: number }>();
 +
 +	/** Last body layout size, so we can re-layout the part once an editor mounts. */
 +	private lastWidth = 0;
@@ -3642,6 +3648,7 @@ index 00000000..820a8de4
 +				id: v.instance.resource.toString(),
 +				title: v.sessionName || v.instance.title || 'Session',
 +				sessionName: v.sessionName,
++				createdAt: v.createdAt,
 +			})),
 +			reveal: (id) => {
 +				const v = this.attached.get(id);
@@ -3773,6 +3780,7 @@ index 00000000..820a8de4
 +		const instance = this.terminalInstanceService.createInstance(cwd ? { cwd } : {}, TerminalLocation.Editor);
 +		const input = this.instantiationService.createInstance(TerminalEditorInput, instance.resource, instance);
 +		const key = instance.resource.toString();
++		const createdAt = Date.now();
 +		let frozenSessionName = sessionName && SESSION_NAME_RE.test(sessionName) ? sessionName : this.sessionNameFromTitle(instance.title);
 +
 +		// Per-instance lifecycle store so these listeners live only as long as the terminal,
@@ -3796,7 +3804,7 @@ index 00000000..820a8de4
 +
 +		const opened = group.openEditor(input, { pinned: true }).then(() => {
 +			// Record only after the editor is open so `group` is live.
-+			this.attached.set(key, { instance, input, group, sessionName: frozenSessionName });
++			this.attached.set(key, { instance, input, group, sessionName: frozenSessionName, createdAt });
 +			notifyAttachedSessionsChanged();
 +		}, (e) => {
 +			// Open failed: tear down the orphaned instance + its listeners (don't strand it).

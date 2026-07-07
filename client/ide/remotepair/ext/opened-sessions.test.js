@@ -7,7 +7,9 @@ const openedSessionsSource = fs.readFileSync(path.join(__dirname, "opened-sessio
 
 const {
   OPENED_SESSIONS_VERSION,
+  OPENED_SESSIONS_BUCKET_HEARTBEAT_MS,
   OPENED_SESSIONS_LOCK_FILE,
+  BUCKET_KEY_RE,
   claimOpenedSessionsBucket,
   migrateOpenedSessionsClaim,
   normalizeOpenedSessionNames,
@@ -50,14 +52,23 @@ test("reads only the requested v2 per-window bucket", () => {
     windows: {
       "scope-a": { sessions: ["one", "two", "bad name"], ts: 1000, pid: 11 },
       "scope-a#2": { sessions: ["sibling"], ts: 1000, pid: 14 },
+      "scope-a#10": { sessions: ["ten"], ts: 1000, pid: 15 },
       "scope-b": { sessions: ["two", "three"], ts: 1001, pid: 12 },
       "bad/scope": { sessions: ["ignored"], ts: 1002, pid: 13 },
     },
   });
   assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "scope-a"), ["one", "two"]);
   assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "scope-a#2"), ["sibling"]);
+  assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "scope-a#10"), ["ten"]);
   assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "scope-b"), ["two", "three"]);
   assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "missing"), []);
+});
+
+test("bucket keys accept multi-digit sibling suffixes without accepting #1", () => {
+  assert.equal(BUCKET_KEY_RE.test("scope-a#10"), true);
+  assert.equal(BUCKET_KEY_RE.test("scope-a#123"), true);
+  assert.equal(BUCKET_KEY_RE.test("scope-a#1"), false);
+  assert.equal(BUCKET_KEY_RE.test("scope-a#01"), false);
 });
 
 test("migrates v1 reads while the first scoped write replaces the file with v2", () => {
@@ -156,6 +167,45 @@ test("stale pid buckets are takeoverable without losing their sessions", () => {
   assert.deepStrictEqual(written.windows["scope-a"], { sessions: ["old"], ts: 2000, pid: 101 });
 });
 
+test("stale heartbeat buckets are takeoverable even when their pid is alive", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
+  const file = path.join(dir, "opened-sessions.json");
+  const now = 2000 + OPENED_SESSIONS_BUCKET_HEARTBEAT_MS;
+  fs.writeFileSync(file, JSON.stringify({
+    v: OPENED_SESSIONS_VERSION,
+    host: "host-a",
+    windows: {
+      "scope-a": { sessions: ["old"], ts: now - OPENED_SESSIONS_BUCKET_HEARTBEAT_MS - 1, pid: 777 },
+    },
+  }) + "\n");
+
+  assert.deepStrictEqual(
+    claimOpenedSessionsBucket(file, "host-a", "scope-a", { now, pid: 101, isProcessAlive: (pid) => pid === 777 }),
+    { bucketKey: "scope-a", sessions: ["old"] },
+  );
+  const written = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.deepStrictEqual(written.windows["scope-a"], { sessions: ["old"], ts: now, pid: 101 });
+});
+
+test("claim preference recognizes multi-digit sibling bucket suffixes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
+  const file = path.join(dir, "opened-sessions.json");
+  fs.writeFileSync(file, JSON.stringify({
+    v: OPENED_SESSIONS_VERSION,
+    host: "host-a",
+    windows: {
+      "scope-a": { sessions: ["exact"], ts: 1000, pid: 901 },
+      "scope-a#2": { sessions: ["two"], ts: 1000, pid: 902 },
+      "scope-a#10": { sessions: ["ten"], ts: 1000, pid: 910 },
+    },
+  }) + "\n");
+
+  assert.deepStrictEqual(
+    claimOpenedSessionsBucket(file, "host-a", "scope-a", { now: 2000, pid: 101, isProcessAlive: (pid) => pid === 901 || pid === 902 }),
+    { bucketKey: "scope-a#10", sessions: ["ten"] },
+  );
+});
+
 test("claimed bucket writes target only the claimed key", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
   const file = path.join(dir, "opened-sessions.json");
@@ -230,6 +280,34 @@ test("scope migration respects the opened-sessions lock", () => {
     null,
   );
   assert.equal(fs.readFileSync(file, "utf8"), before);
+});
+
+test("stale lock takeover does not unlink a fresh racer lock", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
+  const file = path.join(dir, "opened-sessions.json");
+  const lockFile = path.join(dir, OPENED_SESSIONS_LOCK_FILE);
+  fs.writeFileSync(lockFile, "901\n");
+  let staleOwnerChecked = false;
+
+  assert.equal(
+    claimOpenedSessionsBucket(file, "host-a", "scope-a", {
+      now: 1000,
+      pid: 101,
+      lockWaitMs: 0,
+      isProcessAlive: (pid) => {
+        if (pid === 901) {
+          if (!staleOwnerChecked) {
+            staleOwnerChecked = true;
+            fs.writeFileSync(lockFile, "902\n");
+          }
+          return false;
+        }
+        return pid === 902;
+      },
+    }),
+    null,
+  );
+  assert.equal(fs.readFileSync(lockFile, "utf8"), "902\n");
 });
 
 test("two claimers racing the same workspace leave the second in #2", () => {

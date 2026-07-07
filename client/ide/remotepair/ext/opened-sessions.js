@@ -4,9 +4,10 @@ const path = require("path");
 const OPENED_SESSIONS_VERSION = 2;
 const OPENED_SESSIONS_LEGACY_VERSION = 1;
 const OPENED_SESSIONS_BUCKET_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const OPENED_SESSIONS_BUCKET_HEARTBEAT_MS = 30 * 60 * 1000;
 const OPENED_SESSIONS_LOCK_FILE = "opened-sessions.lock";
 const SESSION_NAME_RE = /^[A-Za-z0-9_.-]+$/;
-const BUCKET_KEY_RE = /^[A-Za-z0-9_.-]+(?:#[2-9][0-9]*)?$/;
+const BUCKET_KEY_RE = /^[A-Za-z0-9_.-]+(?:#(?:[2-9]|[1-9][0-9]+))?$/;
 
 function normalizeOpenedSessionNames(names) {
   const out = [];
@@ -217,14 +218,18 @@ function hasOwn(obj, key) {
 }
 
 function bucketClaimed(bucket, opts) {
-  return isRecord(bucket) && lockPidAlive(bucket.pid, opts);
+  if (!isRecord(bucket) || !lockPidAlive(bucket.pid, opts)) return false;
+  const ts = Number.isFinite(bucket.ts) ? bucket.ts : 0;
+  // A reused pid that writes within this ceiling is accepted as owner; a random
+  // claim token would close that remaining gap if it ever matters.
+  return ts >= nowFromOpts(opts) - OPENED_SESSIONS_BUCKET_HEARTBEAT_MS;
 }
 
 function suffixNumberForScope(bucketKey, scope) {
   const prefix = `${scope}#`;
   if (!bucketKey.startsWith(prefix)) return null;
   const raw = bucketKey.slice(prefix.length);
-  if (!/^[2-9][0-9]*$/.test(raw)) return null;
+  if (!/^(?:[2-9]|[1-9][0-9]+)$/.test(raw)) return null;
   const n = parseInt(raw, 10);
   return Number.isInteger(n) ? n : null;
 }
@@ -279,6 +284,20 @@ function writeLockAtomic(lockFile, pid) {
   }
 }
 
+function deleteStaleOpenedSessionsLock(lockFile, expectedOwner, opts) {
+  if (!Number.isInteger(expectedOwner) || expectedOwner <= 0) return false;
+  const currentOwner = readLockPid(lockFile);
+  if (currentOwner !== expectedOwner) return false;
+  if (lockPidAlive(currentOwner, opts)) return false;
+  try {
+    fs.unlinkSync(lockFile);
+    return true;
+  } catch (e) {
+    if (e && e.code === "ENOENT") return true;
+    throw e;
+  }
+}
+
 function sleepSync(ms) {
   if (ms <= 0) return;
   try {
@@ -300,14 +319,8 @@ function claimOpenedSessionsLock(lockFile, opts = {}) {
     } catch (e) {
       if (!e || e.code !== "EEXIST") throw e;
       const owner = readLockPid(lockFile);
-      if (!owner || !lockPidAlive(owner, opts)) {
-        try {
-          fs.unlinkSync(lockFile);
-          continue;
-        } catch (unlinkErr) {
-          if (!unlinkErr || unlinkErr.code !== "ENOENT") throw unlinkErr;
-          continue;
-        }
+      if (owner > 0 && !lockPidAlive(owner, opts)) {
+        if (deleteStaleOpenedSessionsLock(lockFile, owner, opts)) continue;
       }
       if (Date.now() >= deadline) return false;
       sleepSync(25);
@@ -421,6 +434,7 @@ function migrateOpenedSessionsScope(filePath, host, oldScopeId, newScopeId, opts
 module.exports = {
   OPENED_SESSIONS_VERSION,
   OPENED_SESSIONS_BUCKET_TTL_MS,
+  OPENED_SESSIONS_BUCKET_HEARTBEAT_MS,
   OPENED_SESSIONS_LOCK_FILE,
   SESSION_NAME_RE,
   BUCKET_KEY_RE,

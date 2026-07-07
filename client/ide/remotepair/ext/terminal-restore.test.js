@@ -89,8 +89,13 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     sessionManager,
-    /function localAttachedSessionsHaveUnfrozenName\(\): boolean \{[\s\S]*for \(const session of attachedProvider\?\.getAttached\(\) \?\? \[\]\)[\s\S]*if \(!normalizedSessionName\(session\.sessionName\)\) \{[\s\S]*return true;[\s\S]*function writeOpenedSessions\(commandService: ICommandService\): void \{[\s\S]*if \(localAttachedSessionsHaveUnfrozenName\(\)\) \{[\s\S]*opened sessions write deferred until attached session names freeze[\s\S]*return;[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.writeOpened', localAttachedSessionNameList\(\)\)/,
-    "Attached snapshot writes must defer while any attached terminal lacks a frozen tmux sessionName",
+    /const ATTACHED_SESSION_NAME_FREEZE_GRACE_MS = 30000;[\s\S]*function localAttachedSessionsHaveYoungUnfrozenName\(now = Date\.now\(\)\): boolean \{[\s\S]*a name we never learned[\s\S]*for \(const session of attachedProvider\?\.getAttached\(\) \?\? \[\]\)[\s\S]*if \(!normalizedSessionName\(session\.sessionName\) && now - session\.createdAt < ATTACHED_SESSION_NAME_FREEZE_GRACE_MS\) \{[\s\S]*return true;[\s\S]*function writeOpenedSessions\(commandService: ICommandService\): void \{[\s\S]*if \(localAttachedSessionsHaveYoungUnfrozenName\(\)\) \{[\s\S]*opened sessions write deferred until young attached session names freeze[\s\S]*return;[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.writeOpened', localAttachedSessionNameList\(\)\)/,
+    "Attached snapshot writes must defer only while an unfrozen attached terminal is still young",
+  );
+  assert.match(
+    terminalSidebar,
+    /sessionName\?: string; createdAt: number[\s\S]*createdAt: v\.createdAt,[\s\S]*const createdAt = Date\.now\(\);[\s\S]*this\.attached\.set\(key, \{ instance, input, group, sessionName: frozenSessionName, createdAt \}\);/,
+    "Attached terminal creation time must be tracked per instance for the young-unfrozen write deferral",
   );
   assert.match(
     terminalSidebar,
@@ -124,7 +129,7 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     terminalSidebar,
-    /let frozenSessionName = sessionName && SESSION_NAME_RE\.test\(sessionName\) \? sessionName : this\.sessionNameFromTitle\(instance\.title\);[\s\S]*if \(!frozenSessionName\) \{[\s\S]*frozenSessionName = this\.sessionNameFromTitle\(instance\.title\);[\s\S]*this\.attached\.set\(key, \{ instance, input, group, sessionName: frozenSessionName \}\);/,
+    /let frozenSessionName = sessionName && SESSION_NAME_RE\.test\(sessionName\) \? sessionName : this\.sessionNameFromTitle\(instance\.title\);[\s\S]*if \(!frozenSessionName\) \{[\s\S]*frozenSessionName = this\.sessionNameFromTitle\(instance\.title\);[\s\S]*this\.attached\.set\(key, \{ instance, input, group, sessionName: frozenSessionName, createdAt \}\);/,
     "reattach must freeze the explicit tmux name immediately while new sessions wait for a live-cache title match",
   );
   assert.match(
