@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const extension = fs.readFileSync(path.join(__dirname, "extension.js"), "utf8");
+const openedSessionsSource = fs.readFileSync(path.join(__dirname, "opened-sessions.js"), "utf8");
 
 const {
   OPENED_SESSIONS_VERSION,
@@ -33,12 +34,12 @@ test("serializes a v2 scoped host snapshot with validated unique session names",
 });
 
 test("skips corrupt, wrong-version, and host-mismatched snapshots", () => {
-  assert.deepStrictEqual(parseOpenedSessions("{", "host-a"), []);
-  assert.deepStrictEqual(parseOpenedSessions(JSON.stringify({ v: 3, host: "host-a", sessions: ["one"] }), "host-a"), []);
-  assert.deepStrictEqual(parseOpenedSessions(JSON.stringify({ v: 1, host: "host-b", sessions: ["one"] }), "host-a"), []);
+  assert.deepStrictEqual(parseOpenedSessions("{", "host-a", "scope-a"), []);
+  assert.deepStrictEqual(parseOpenedSessions(JSON.stringify({ v: 3, host: "host-a", sessions: ["one"] }), "host-a", "scope-a"), []);
+  assert.deepStrictEqual(parseOpenedSessions(JSON.stringify({ v: 1, host: "host-b", sessions: ["one"] }), "host-a", "scope-a"), []);
 });
 
-test("reads v2 snapshots as a deduped union of validated per-window buckets", () => {
+test("reads only the requested v2 per-window bucket", () => {
   const raw = JSON.stringify({
     v: 2,
     host: "host-a",
@@ -48,14 +49,16 @@ test("reads v2 snapshots as a deduped union of validated per-window buckets", ()
       "bad/scope": { sessions: ["ignored"], ts: 1002, pid: 13 },
     },
   });
-  assert.deepStrictEqual(parseOpenedSessions(raw, "host-a"), ["one", "two", "three"]);
+  assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "scope-a"), ["one", "two"]);
+  assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "scope-b"), ["two", "three"]);
+  assert.deepStrictEqual(parseOpenedSessions(raw, "host-a", "missing"), []);
 });
 
 test("migrates v1 reads while the first scoped write replaces the file with v2", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-opened-sessions-"));
   const file = path.join(dir, "opened-sessions.json");
   fs.writeFileSync(file, JSON.stringify({ v: 1, host: "host-a", sessions: ["legacy", "two"] }) + "\n");
-  assert.deepStrictEqual(readOpenedSessions(file, "host-a"), ["legacy", "two"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-a"), ["legacy", "two"]);
   assert.equal(writeOpenedSessionsForScope(file, "host-a", "scope-a", ["one", "two"], { now: 2000, pid: 101 }), true);
   const written = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.deepStrictEqual(written, {
@@ -65,8 +68,8 @@ test("migrates v1 reads while the first scoped write replaces the file with v2",
       "scope-a": { sessions: ["one", "two"], ts: 2000, pid: 101 },
     },
   });
-  assert.deepStrictEqual(readOpenedSessions(file, "host-a"), ["one", "two"]);
-  assert.deepStrictEqual(readOpenedSessions(file, "host-b"), []);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-a"), ["one", "two"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-b", "scope-a"), []);
 });
 
 test("scoped writes merge buckets, update only the caller scope, and prune stale buckets", () => {
@@ -74,10 +77,12 @@ test("scoped writes merge buckets, update only the caller scope, and prune stale
   const file = path.join(dir, "opened-sessions.json");
   assert.equal(writeOpenedSessionsForScope(file, "host-a", "scope-a", ["one"], { now: 1000, pid: 101 }), true);
   assert.equal(writeOpenedSessionsForScope(file, "host-a", "scope-b", ["two"], { now: 2000, pid: 102 }), true);
-  assert.deepStrictEqual(readOpenedSessions(file, "host-a"), ["one", "two"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-a"), ["one"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-b"), ["two"]);
 
   assert.equal(writeOpenedSessionsForScope(file, "host-a", "scope-a", ["three"], { now: 3000, pid: 103 }), true);
-  assert.deepStrictEqual(readOpenedSessions(file, "host-a"), ["three", "two"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-a"), ["three"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-b"), ["two"]);
 
   const oldTs = 3000 - (31 * 24 * 60 * 60 * 1000);
   fs.writeFileSync(file, JSON.stringify({
@@ -91,7 +96,13 @@ test("scoped writes merge buckets, update only the caller scope, and prune stale
   assert.equal(writeOpenedSessionsForScope(file, "host-a", "scope-a", ["one"], { now: 3000, pid: 101 }), true);
   const written = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.deepStrictEqual(Object.keys(written.windows).sort(), ["scope-a", "scope-b"]);
-  assert.deepStrictEqual(readOpenedSessions(file, "host-a"), ["two", "one"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-a"), ["one"]);
+  assert.deepStrictEqual(readOpenedSessions(file, "host-a", "scope-b"), ["two"]);
+});
+
+test("opened-session lock creation writes content before the name is visible", () => {
+  assert.match(openedSessionsSource, /fs\.writeFileSync\(tmp, `\$\{pid\}\\n`, \{ mode: 0o600 \}\);[\s\S]*fs\.linkSync\(tmp, lockFile\);/);
+  assert.doesNotMatch(openedSessionsSource, /fs\.openSync\(lockFile, "wx"/);
 });
 
 test("opened-session writes are gated to the services lock owner", () => {
@@ -106,6 +117,7 @@ test("opened-session writes are gated to the services lock owner", () => {
   );
   assert.match(extension, /setOpenedSessionsWriteOwner\(\!!clientServicesLock\);/);
   assert.match(extension, /const CLIENT_SERVICES_SCOPE_ID = \(\(\) => \{[\s\S]*return scope;[\s\S]*const CLIENT_SERVICES_LOCK_FILE = \(\(\) => \{[\s\S]*const scope = CLIENT_SERVICES_SCOPE_ID;[\s\S]*extension-services\.\$\{scope\}\.lock/);
+  assert.match(extension, /readOpenedSessions\(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, \{ log \}\)/);
 });
 
 if (failures > 0) {

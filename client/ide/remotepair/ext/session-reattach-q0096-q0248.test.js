@@ -128,8 +128,13 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
   );
   assert.match(
     patch,
-    /function validateAndReattach\(name: string, commandService: ICommandService\): void \{[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.checkAttach', name\)[\s\S]*if \(isRecord\(value\) && value\.ok === true\)[\s\S]*reattach\(name\)/,
-    "History validation must use the existing checkAttach path and only reattach when ok",
+    /function validateAndReattach\(name: string, commandService: ICommandService\): void \{[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.checkAttach', name\)[\s\S]*const attached = checkedSession \? normalizedAttached\(checkedSession\.attached\) : -1;[\s\S]*if \(isRecord\(value\) && value\.ok === true && attached === 0\)[\s\S]*reattach\(name\)/,
+    "History validation must use checkAttach and only reattach when the session is live and unattached",
+  );
+  assert.match(
+    patch,
+    /attached > 0 \? localize\('remotepairAttachedElsewhere', "Some sessions are attached in another window or device\."\)/,
+    "History validation must surface the attached-elsewhere refusal instead of stealing with xpair attach -d",
   );
 
   const attach = extract(cli, "cmd_attach() {", "\ncmd_host() {");

@@ -85,25 +85,30 @@ function normalizedWindows(windows, now, pruneOld) {
   return out;
 }
 
-function unionWindowSessions(windows) {
-  const out = [];
-  const seen = new Set();
-  if (!isRecord(windows)) return out;
-  for (const [scope, bucket] of Object.entries(windows)) {
-    if (!cleanScopeId(scope)) continue;
-    if (!isRecord(bucket)) continue;
-    for (const name of normalizeOpenedSessionNames(bucket.sessions)) {
-      if (seen.has(name)) continue;
-      seen.add(name);
-      out.push(name);
-    }
-  }
-  return out;
+function scopeWindowSessions(windows, scopeId) {
+  const scope = cleanScopeId(scopeId);
+  if (!scope || !isRecord(windows)) return [];
+  const bucket = windows[scope];
+  if (!isRecord(bucket)) return [];
+  return normalizeOpenedSessionNames(bucket.sessions);
 }
 
-function parseOpenedSessions(raw, currentHost) {
+function legacyBucketForScope(parsed, scopeId, now) {
+  const scope = cleanScopeId(scopeId);
+  if (!scope) return {};
+  return {
+    [scope]: {
+      sessions: normalizeOpenedSessionNames(parsed.sessions),
+      ts: now,
+      pid: 0,
+    },
+  };
+}
+
+function parseOpenedSessions(raw, currentHost, scopeId) {
   const clean = cleanHost(currentHost);
-  if (!clean || typeof raw !== "string" || !raw.trim()) return [];
+  const scope = cleanScopeId(scopeId);
+  if (!clean || !scope || typeof raw !== "string" || !raw.trim()) return [];
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -112,7 +117,7 @@ function parseOpenedSessions(raw, currentHost) {
   }
   if (!isRecord(parsed) || parsed.host !== clean) return [];
   if (parsed.v === OPENED_SESSIONS_VERSION) {
-    return unionWindowSessions(parsed.windows);
+    return scopeWindowSessions(parsed.windows, scope);
   }
   if (parsed.v === OPENED_SESSIONS_LEGACY_VERSION) {
     return normalizeOpenedSessionNames(parsed.sessions);
@@ -120,7 +125,7 @@ function parseOpenedSessions(raw, currentHost) {
   return [];
 }
 
-function readOpenedSessions(filePath, currentHost, opts = {}) {
+function readOpenedSessions(filePath, currentHost, scopeId, opts = {}) {
   let raw;
   try {
     raw = fs.readFileSync(filePath, "utf8");
@@ -130,17 +135,18 @@ function readOpenedSessions(filePath, currentHost, opts = {}) {
     }
     return [];
   }
-  const sessions = parseOpenedSessions(raw, currentHost);
+  const sessions = parseOpenedSessions(raw, currentHost, scopeId);
   if (sessions.length === 0 && typeof opts.log === "function") {
     opts.log("opened sessions: no usable snapshot", "debug");
   }
   return sessions;
 }
 
-function readSnapshotForWrite(filePath, currentHost, now) {
+function readSnapshotForWrite(filePath, currentHost, scopeId, now) {
   const clean = cleanHost(currentHost);
+  const scope = cleanScopeId(scopeId);
   const empty = { v: OPENED_SESSIONS_VERSION, host: clean, windows: {} };
-  if (!clean) return null;
+  if (!clean || !scope) return null;
   let raw;
   try {
     raw = fs.readFileSync(filePath, "utf8");
@@ -154,6 +160,13 @@ function readSnapshotForWrite(filePath, currentHost, now) {
     return empty;
   }
   if (!isRecord(parsed) || parsed.host !== clean) return empty;
+  if (parsed.v === OPENED_SESSIONS_LEGACY_VERSION) {
+    return {
+      v: OPENED_SESSIONS_VERSION,
+      host: clean,
+      windows: legacyBucketForScope(parsed, scope, now),
+    };
+  }
   if (parsed.v !== OPENED_SESSIONS_VERSION) return empty;
   return {
     v: OPENED_SESSIONS_VERSION,
@@ -198,6 +211,19 @@ function readLockPid(lockFile) {
   }
 }
 
+function writeLockAtomic(lockFile, pid) {
+  const dir = path.dirname(lockFile);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(dir, 0o700); } catch (_e) {}
+  const tmp = path.join(dir, `.${path.basename(lockFile)}.${pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
+  fs.writeFileSync(tmp, `${pid}\n`, { mode: 0o600 });
+  try {
+    fs.linkSync(tmp, lockFile);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (_e) {}
+  }
+}
+
 function sleepSync(ms) {
   if (ms <= 0) return;
   try {
@@ -212,19 +238,11 @@ function sleepSync(ms) {
 function claimOpenedSessionsLock(lockFile, opts = {}) {
   const pid = pidFromOpts(opts);
   const deadline = Date.now() + (Number.isFinite(opts.lockWaitMs) ? opts.lockWaitMs : 1000);
-  fs.mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(path.dirname(lockFile), 0o700); } catch (_e) {}
   while (true) {
-    let fd;
     try {
-      fd = fs.openSync(lockFile, "wx", 0o600);
-      fs.writeFileSync(fd, `${pid}\n`);
-      fs.closeSync(fd);
+      writeLockAtomic(lockFile, pid);
       return true;
     } catch (e) {
-      if (fd !== undefined) {
-        try { fs.closeSync(fd); } catch (_closeErr) {}
-      }
       if (!e || e.code !== "EEXIST") throw e;
       const owner = readLockPid(lockFile);
       if (!owner || !lockPidAlive(owner, opts)) {
@@ -257,7 +275,7 @@ function writeOpenedSessionsForScope(filePath, host, scopeId, names, opts = {}) 
   if (!claimOpenedSessionsLock(lockFile, opts)) return false;
   try {
     const now = nowFromOpts(opts);
-    const snapshot = readSnapshotForWrite(filePath, clean, now);
+    const snapshot = readSnapshotForWrite(filePath, clean, scope, now);
     if (!snapshot) return false;
     snapshot.windows[scope] = {
       sessions: normalizeOpenedSessionNames(names),

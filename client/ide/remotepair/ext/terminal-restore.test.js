@@ -84,8 +84,13 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     terminalSidebar,
-    /private sessionNameFromTitle\(title: string \| undefined\): string \| undefined \{[\s\S]*SESSION_NAME_RE\.test\(name\) \? name : undefined/,
-    "newly launched terminal sessions must be able to derive a stable tmux sessionName from the first valid title",
+    /import \{[\s\S]*onDidChangeSessionData, liveSessionNameFromTitle, SESSION_NAME_RE[\s\S]*\} from '\.\/remotePairSessionManager\.js';[\s\S]*private sessionNameFromTitle\(title: string \| undefined\): string \| undefined \{[\s\S]*return liveSessionNameFromTitle\(title\);/,
+    "new session title candidates must be accepted only when they match the live tmux session cache",
+  );
+  assert.match(
+    sessionManager,
+    /export function liveSessionNameFromTitle\(value: string \| undefined\): string \| undefined \{[\s\S]*SESSION_NAME_RE\.test\(name\)[\s\S]*return liveSessionCache\.some\(s => s\.name === name\) \? name : undefined;/,
+    "default titles such as zsh or Terminal must not freeze unless they exactly match liveSessionCache",
   );
   assert.match(
     terminalSidebar,
@@ -99,8 +104,13 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     terminalSidebar,
-    /let frozenSessionName = sessionName \?\? this\.sessionNameFromTitle\(instance\.title\);[\s\S]*if \(!frozenSessionName\) \{[\s\S]*frozenSessionName = this\.sessionNameFromTitle\(instance\.title\);[\s\S]*this\.attached\.set\(key, \{ instance, input, group, sessionName: frozenSessionName \}\);/,
-    "new sessions must freeze the first valid title while reattach keeps the known tmux name",
+    /this\._register\(onDidChangeSessionData\(\(\) => this\.freezePendingSessionNamesFromLiveCache\(\)\)\);[\s\S]*private freezePendingSessionNamesFromLiveCache\(\): void \{[\s\S]*for \(const \[key, entry\] of this\.attached\)[\s\S]*this\.freezeSessionNameFromTitle\(key, entry\.instance\)[\s\S]*notifyAttachedSessionsChanged\(\);/,
+    "live-list refreshes must keep rechecking unfrozen title candidates until the tmux name appears",
+  );
+  assert.match(
+    terminalSidebar,
+    /let frozenSessionName = sessionName && SESSION_NAME_RE\.test\(sessionName\) \? sessionName : this\.sessionNameFromTitle\(instance\.title\);[\s\S]*if \(!frozenSessionName\) \{[\s\S]*frozenSessionName = this\.sessionNameFromTitle\(instance\.title\);[\s\S]*this\.attached\.set\(key, \{ instance, input, group, sessionName: frozenSessionName \}\);/,
+    "reattach must freeze the explicit tmux name immediately while new sessions wait for a live-cache title match",
   );
   assert.match(
     extension,
@@ -134,8 +144,8 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     extension,
-    /restoreOpenedSessionsOnActivation\(\)[\s\S]*let sessionListWasAvailable = false;[\s\S]*const list = await waitForAvailableSessionList\(\);[\s\S]*if \(!list\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*sessionListWasAvailable = true;[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*if \(sessionListWasAvailable\) \{[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
-    "restore must enable writes either way but only sync opened sessions after the live list was fetched",
+    /restoreOpenedSessionsOnActivation\(\)[\s\S]*readOpenedSessions\(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, \{ log \}\)[\s\S]*let sessionListWasAvailable = false;[\s\S]*const list = await waitForAvailableSessionList\(\);[\s\S]*if \(!list\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*sessionListWasAvailable = true;[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*if \(sessionListWasAvailable && restored === 0\) \{[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
+    "restore must read only this window scope and sync immediately only when nothing was restored",
   );
   assert.doesNotMatch(
     extension,

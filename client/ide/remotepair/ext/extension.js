@@ -1845,7 +1845,7 @@ async function waitForAvailableSessionList() {
 
 async function restoreOpenedSessionsOnActivation() {
   const host = getValidHost();
-  const openedNames = host ? readOpenedSessions(OPENED_SESSIONS_FILE, host, { log }) : [];
+  const openedNames = host ? readOpenedSessions(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, { log }) : [];
   let restored = 0;
   let sessionListWasAvailable = false;
 
@@ -1879,7 +1879,7 @@ async function restoreOpenedSessionsOnActivation() {
     return restored;
   } finally {
     enableOpenedSessionWrites();
-    if (sessionListWasAvailable) {
+    if (sessionListWasAvailable && restored === 0) {
       try {
         await vscode.commands.executeCommand("remotepair.terminalSidebar.syncOpenedSessions");
       } catch (e) {

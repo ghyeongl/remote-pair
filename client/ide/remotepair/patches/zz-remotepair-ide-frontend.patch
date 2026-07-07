@@ -2769,6 +2769,14 @@ index 0000000..6e5d586
 +	return liveSessionCache.map(s => s.name);
 +}
 +
++export function liveSessionNameFromTitle(value: string | undefined): string | undefined {
++	const name = (value ?? '').trim();
++	if (!SESSION_NAME_RE.test(name)) {
++		return undefined;
++	}
++	return liveSessionCache.some(s => s.name === name) ? name : undefined;
++}
++
 +function sameSessionCache(a: readonly SessionListEntry[], b: readonly SessionListEntry[]): boolean {
 +	return a.length === b.length && a.every((entry, index) => entry.name === b[index]?.name && entry.attached === b[index]?.attached);
 +}
@@ -2880,12 +2888,14 @@ index 0000000..6e5d586
 +	}
 +	commandService.executeCommand('remotepair.sessions.checkAttach', name).then((value) => {
 +		const cause = applySessionCheckResult(value);
-+		if (isRecord(value) && value.ok === true) {
++		const checkedSession = isRecord(value) && isRecord(value.session) ? value.session : undefined;
++		const attached = checkedSession ? normalizedAttached(checkedSession.attached) : -1;
++		if (isRecord(value) && value.ok === true && attached === 0) {
 +			setSessionCardCause(undefined);
 +			reattach(name);
 +			return;
 +		}
-+		setSessionCardCause(cause ?? localize('remotepairSessionAttachCheckFailed', "Session no longer exists. The list was refreshed; choose another session or start a new one."));
++		setSessionCardCause(cause ?? (attached > 0 ? localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device.") : localize('remotepairSessionAttachCheckFailed', "Session no longer exists. The list was refreshed; choose another session or start a new one.")));
 +		scheduleSessionRefresh(commandService, SESSION_REFRESH_RETRY_MS);
 +	}, (error) => {
 +		rpLog('warn', `session attach check failed for ${name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -3486,7 +3496,7 @@ index 00000000..820a8de4
 +import { EditorInput } from '../../../common/editor/editorInput.js';
 +import { SessionPickerInput, SessionKind } from './remotePairSessionPicker.js';
 +import { VIEWLET_ID as BROWSER_VIEWLET_ID } from '../../files/common/files.js';
-+import { setSessionReattacher, setAttachedSessionsProvider, setSessionCardCause, notifyAttachedSessionsChanged, attachedSessionCount, onDidChangeAttachedSessions, SESSION_NAME_RE } from './remotePairSessionManager.js';
++import { setSessionReattacher, setAttachedSessionsProvider, setSessionCardCause, notifyAttachedSessionsChanged, attachedSessionCount, onDidChangeAttachedSessions, onDidChangeSessionData, liveSessionNameFromTitle, SESSION_NAME_RE } from './remotePairSessionManager.js';
 +import { rpLog } from './remotePairLog.js';
 +
 +export const REMOTEPAIR_TERMINAL_SIDEBAR_ID = 'remotepair.terminalSidebar';
@@ -3631,6 +3641,7 @@ index 00000000..820a8de4
 +				return instance?.resource.toString();
 +			},
 +		});
++		this._register(onDidChangeSessionData(() => this.freezePendingSessionNamesFromLiveCache()));
 +	}
 +
 +	/**
@@ -3690,8 +3701,7 @@ index 00000000..820a8de4
 +	}
 +
 +	private sessionNameFromTitle(title: string | undefined): string | undefined {
-+		const name = (title ?? '').trim();
-+		return SESSION_NAME_RE.test(name) ? name : undefined;
++		return liveSessionNameFromTitle(title);
 +	}
 +
 +	private freezeSessionNameFromTitle(key: string, instance: ITerminalInstance): boolean {
@@ -3707,6 +3717,18 @@ index 00000000..820a8de4
 +		return true;
 +	}
 +
++	private freezePendingSessionNamesFromLiveCache(): void {
++		let changed = false;
++		for (const [key, entry] of this.attached) {
++			if (!entry.sessionName && this.freezeSessionNameFromTitle(key, entry.instance)) {
++				changed = true;
++			}
++		}
++		if (changed) {
++			notifyAttachedSessionsChanged();
++		}
++	}
++
 +	/**
 +	 * Shared terminal-open path: create a terminal editor in `group`, record it in the
 +	 * `attached` map, and notify the Session Manager's Attached row. Both launchSession and
@@ -3716,7 +3738,7 @@ index 00000000..820a8de4
 +		const instance = this.terminalInstanceService.createInstance(cwd ? { cwd } : {}, TerminalLocation.Editor);
 +		const input = this.instantiationService.createInstance(TerminalEditorInput, instance.resource, instance);
 +		const key = instance.resource.toString();
-+		let frozenSessionName = sessionName ?? this.sessionNameFromTitle(instance.title);
++		let frozenSessionName = sessionName && SESSION_NAME_RE.test(sessionName) ? sessionName : this.sessionNameFromTitle(instance.title);
 +
 +		// Per-instance lifecycle store so these listeners live only as long as the terminal,
 +		// not the whole Sessions view (otherwise opening/closing N sessions leaks 2*N listeners

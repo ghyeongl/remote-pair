@@ -30,6 +30,10 @@ function sessionListUnavailableCause() {
   return "Session list unavailable. Check the host connection, then retry.";
 }
 
+function sessionAttachedElsewhereCause() {
+  return "Some sessions are attached in another window or device.";
+}
+
 async function listSessionsFromCli(runXpairCli, opts = {}) {
   const timeoutMs = opts.timeoutMs || 5000;
   const log = typeof opts.log === "function" ? opts.log : () => {};
@@ -73,6 +77,9 @@ async function checkSessionAvailableFromCli(runXpairCli, name, opts = {}) {
   const session = list.sessions.find((entry) => entry.name === sessionName);
   if (!session) {
     return { ...list, ok: false, stale: true, cause: sessionUnavailableCause(sessionName) };
+  }
+  if (session.attached !== 0) {
+    return { ...list, ok: false, attachedElsewhere: true, session, cause: sessionAttachedElsewhereCause() };
   }
 
   return { ...list, ok: true, session };
