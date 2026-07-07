@@ -66,6 +66,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // (legacy v0 InputServer 0.1s main-thread polling removed — screencapture's synchronous blocking froze the menu bar.
         //  Screen sharing is replaced by v1/v2 (xpair-screen serve-webrtc, view-only, no remote input).)
 
+        // LAN beacon starts BEFORE the permission run-gate (the lifecycle Bonjour had): a fresh
+        // host mid-onboarding is exactly when a LAN client must be able to list it and send the
+        // pairing request — gating the beacon on startServing() would deadlock LAN-only setups
+        // (onboarding completes only after a client pairs). Secret-free hint; safe pre-grant.
+        if isHostRole { lanBeacon.ensureAdvertising() }
+
         // Hard run-gate. The host needs BOTH Accessibility (approve auto-click via cliclick/System
         // Events) AND Screen Recording (screen-share + approve OCR). If either is ungranted, show the
         // in-process onboarding window and DO NOT start serving until the React flow completes (both

@@ -231,6 +231,12 @@ export default function App() {
           return {
             ...base,
             hostKeyFP: base.hostKeyFP || h.hostKeyFP,
+            // A failed pull INVALIDATES any earlier pairing-window transcript: the window may
+            // have been denied/expired/closed, and stale sid/nonce/port would let WaitPerm
+            // poll a dead window instead of surfacing the real state.
+            serviceInstanceID: undefined,
+            hostNonce: undefined,
+            pairPort: undefined,
             pairingMetaStatus: "error",
             pairingMetaError: meta.err || "Host is not broadcasting pairing details.",
           };
@@ -375,6 +381,7 @@ export default function App() {
       return;
     }
     if (majorMismatch || (needsUpdate && updateState !== "done")) {
+      forcedUpdateLanding.current = true; // guard redirect, not a user Back — see the S.UPDATE effect
       w.goTo(S.UPDATE, "prev");
       return;
     }
@@ -397,11 +404,18 @@ export default function App() {
     w.goTo,
   ]);
 
+  const forcedUpdateLanding = useRef(false);
   useEffect(() => {
     if (w.index !== S.UPDATE) return;
     if (w.direction === "prev") {
-      w.goTo(S.DISCOVER, "prev");
-      return;
+      if (forcedUpdateLanding.current) {
+        // The Done guard forced this landing (below-floor/major-mismatch host) — stay on
+        // Update; only a USER Back should pass through to Discover.
+        forcedUpdateLanding.current = false;
+      } else {
+        w.goTo(S.DISCOVER, "prev");
+        return;
+      }
     }
     if (!needsUpdate && !majorMismatch && updateState !== "done") {
       const tm = setTimeout(() => w.next(), 650);

@@ -86,16 +86,18 @@ async function runDiscoverWithBeacon() {
     metaPort: 8891,
     ver: "0.5-test",
   });
-  for (let i = 0; i < 5; i += 1) {
-    await delay(120);
-    await sendBeacon(port, "not-json");
-    await sendBeacon(port, JSON.stringify({ v: 1, kind: "other", name: "Wrong Kind Host", fp: "SHA256:wrongKind" }));
-    await sendBeacon(port, valid);
-  }
+  // Keep transmitting until discover exits: bash startup + the embedded python listener
+  // binding can outlast any fixed burst count on a slow CI runner.
+  const sender = setInterval(() => {
+    sendBeacon(port, "not-json").catch(() => {});
+    sendBeacon(port, JSON.stringify({ v: 1, kind: "other", name: "Wrong Kind Host", fp: "SHA256:wrongKind" })).catch(() => {});
+    sendBeacon(port, valid).catch(() => {});
+  }, 120);
 
   const code = await new Promise((resolve) => {
     child.on("close", resolve);
   });
+  clearInterval(sender);
   clearTimeout(timer);
   fs.rmSync(tmp, { recursive: true, force: true });
   return { code, stdout, stderr };
