@@ -34,7 +34,7 @@ export function StepHero({
           }
         />
         <div className="relative z-10 flex h-28 w-28 items-center justify-center rounded-3xl border border-border/60 bg-card shadow-[0_10px_30px_-12px_rgba(0,0,0,0.15)]">
-          <img src={image} alt="" className="h-full w-full rounded-3xl object-cover" />
+          <img src={image} alt="" className="h-full w-full rounded-3xl object-contain" />
         </div>
       </div>
     );
@@ -101,4 +101,3 @@ export function StepHeader({
     </div>
   );
 }
-

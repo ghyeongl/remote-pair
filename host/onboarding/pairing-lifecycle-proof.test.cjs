@@ -30,7 +30,7 @@ test("US-004 window close tears down pairing and backend TTL force-closes Broadc
   assert.match(manager, /private let maxBroadcastTTLSec = [1-9][0-9]*/);
   assert.match(
     manager,
-    /func beginWindow\(force: Bool = false\) throws -> \[String: Any\] \{[\s\S]*BonjourAdvertiser\.setPairingInfo[\s\S]*scheduleBroadcastExpiryLocked\(\)/,
+    /func beginWindow\(force: Bool = false\) throws -> \[String: Any\] \{[\s\S]*try startMetadataServerLocked\(\)[\s\S]*scheduleBroadcastExpiryLocked\(\)/,
     "beginWindow must arm the backend TTL after opening the UDP endpoint",
   );
   // R12-5: the paired short-circuit MUST be gated on !force, so an explicit re-advertise (force=true)
@@ -49,14 +49,14 @@ test("US-004 window close tears down pairing and backend TTL force-closes Broadc
     /private func expireBroadcastWindowLocked\(\) \{[\s\S]*phase = "closed"[\s\S]*incoming = nil[\s\S]*incomingExpiresAt = nil[\s\S]*lastError = "broadcast expired; restart pairing"[\s\S]*closeEndpoint\(cancelBroadcastTimer: false\)/,
     "TTL expiry must force the same closed endpoint state as UI cleanup",
   );
-	  assert.match(
-	    manager,
-	    /private func closeEndpoint\(cancelBroadcastTimer: Bool = true, cancelMetadata: Bool = true\) \{[\s\S]*broadcastExpiryTimer\?\.cancel\(\)[\s\S]*metadataServer\?\.cancel\(\)[\s\S]*endpoint\?\.cancel\(\)[\s\S]*serviceInstanceID = ""[\s\S]*hostNonce = ""[\s\S]*BonjourAdvertiser\.setPairingInfo\(nil\)/,
-	    "normal endpoint close must cancel TTL, clear broadcast identity, and stop Bonjour pairing info",
-	  );
+		  assert.match(
+		    manager,
+	    /private func closeEndpoint\(cancelBroadcastTimer: Bool = true, cancelMetadata: Bool = true\) \{[\s\S]*broadcastExpiryTimer\?\.cancel\(\)[\s\S]*metadataServer\?\.cancel\(\)[\s\S]*endpoint\?\.cancel\(\)[\s\S]*serviceInstanceID = ""[\s\S]*hostNonce = ""/,
+		    "normal endpoint close must cancel TTL, stop metadata, and clear broadcast identity",
+		  );
 });
 
-test("US-004 pairing nonce uses SecRandomCopyBytes before advertising", () => {
+test("US-004 pairing nonce uses SecRandomCopyBytes before exposing metadata", () => {
   assert.match(manager, /import Security/);
   assert.match(manager, /case randomUnavailable\(OSStatus\)/);
   assert.match(manager, /private static func randomToken\(byteCount: Int\) throws -> String/);
@@ -70,8 +70,8 @@ test("US-004 pairing nonce uses SecRandomCopyBytes before advertising", () => {
   assert.doesNotMatch(manager, /UInt8\.random/);
   assert.match(
     manager,
-    /let nextHostNonce = try Self\.randomToken\(byteCount: 24\)[\s\S]*let server = try PairingUDPServer[\s\S]*phase = "waiting"[\s\S]*hostNonce = nextHostNonce[\s\S]*BonjourAdvertiser\.setPairingInfo/,
-    "pairing window must not enter waiting state or advertise before CSPRNG nonce generation succeeds",
+    /let nextHostNonce = try Self\.randomToken\(byteCount: 24\)[\s\S]*let server = try PairingUDPServer[\s\S]*phase = "waiting"[\s\S]*hostNonce = nextHostNonce[\s\S]*try startMetadataServerLocked\(\)/,
+    "pairing window must not enter waiting state or expose metadata before CSPRNG nonce generation succeeds",
   );
 });
 

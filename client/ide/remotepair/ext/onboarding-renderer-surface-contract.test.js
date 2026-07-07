@@ -56,6 +56,7 @@ test("preload, global.d.ts, and IPC allowlist expose the same renderer RPC metho
 
   assert.deepEqual(globalRpc, preloadRpc, "global.d.ts must declare exactly the preload rp methods");
   assert.deepEqual(allowlist, preloadRpc, "RENDERER_METHODS must mirror the preload rp methods");
+  assert.ok(allowlist.includes("fetchPairingMeta"), "fetchPairingMeta must stay renderer-callable");
 
   assert.match(preload, /complete:\s*\(\)\s*=>\s*\{[\s\S]*ipcRenderer\.invoke\('onboarding:complete'\)/);
   assert.match(globals, /complete: \(\) => Promise<void>/);

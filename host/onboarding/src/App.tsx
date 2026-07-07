@@ -337,6 +337,25 @@ export default function App() {
     }
   }, [applyPairingStatus]);
 
+  const completeOnboarding = useCallback(async () => {
+    setPairingError("");
+    try {
+      const result = await window.xpair.complete();
+      if (result?.ok !== false) return;
+      const freshPerm = await probePermissions().catch(() => perm);
+      const unmetPerm = firstUnmetPermIndex(freshPerm);
+      if (unmetPerm !== null) {
+        w.goTo(unmetPerm, "prev");
+        return;
+      }
+      setPairingError(result.err || "Could not complete onboarding.");
+      w.goTo(BROADCAST_IDX, "prev");
+    } catch (error) {
+      setPairingError(error instanceof Error ? error.message : String(error));
+      w.goTo(BROADCAST_IDX, "prev");
+    }
+  }, [perm, probePermissions, w]);
+
   const rebroadcastingRef = useRef(false);
   useEffect(() => {
     if (!hydrated || w.index !== BROADCAST_IDX) return;
@@ -374,7 +393,7 @@ export default function App() {
   const footerSlot = useMemo(() => {
     if (w.isLast) {
       return (
-        <Button size="sm" onClick={() => window.xpair.complete()}>
+        <Button size="sm" onClick={() => void completeOnboarding()}>
           {t("shell.openXpair")}
         </Button>
       );
@@ -411,7 +430,7 @@ export default function App() {
       );
     }
     return null;
-  }, [applyPairingStatus, broadcast, request, t, w.index, w.isLast]);
+  }, [applyPairingStatus, broadcast, completeOnboarding, request, t, w.index, w.isLast]);
 
   return (
     <WizardShell

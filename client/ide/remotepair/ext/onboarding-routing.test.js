@@ -41,18 +41,21 @@ test("native guard still returns the old startStep words used by electron-main",
   assert.match(onboardingMain, /configuredHostEngine\(host, probeBridge\)[\s\S]*probeBridge\.hostEngineStatus\(engineToCheck\)[\s\S]*return START_STEP\.ENGINE/);
 });
 
-test("discover selection probes host status and carries pairing transcript fields", () => {
-  assert.match(discover, /function peerToHost\(peer: BridgePeer\): DiscoveredHost/);
+test("discover selection maps peers while App owns probes and pairing metadata", () => {
+  assert.match(discover, /export function peerToHost\(peer: BridgePeer\): DiscoveredHost/);
   assert.match(discover, /const pairingAddress = peer\.pairingAddress \?\? peer\.addrs\[0\] \?\? peer\.name;/);
   assert.match(discover, /const sshTarget =[\s\S]*peer\.target \?\? \(peer\.hostUser \? `\$\{peer\.hostUser\}@\$\{pairingAddress\}` : pairingAddress\)/);
-  assert.match(discover, /transport: peer\.source === "tailscale" \? "Tailscale" : "LAN"/);
-  assert.match(discover, /hostKeyFP: peer\.fp \|\| undefined/);
-  assert.match(discover, /serviceInstanceID: peer\.serviceInstanceID/);
-  assert.match(discover, /hostNonce: peer\.hostNonce/);
-  assert.match(discover, /pairPort: peer\.pairPort/);
-  assert.match(discover, /const status = await window\.remotepair\.hostAppStatus\(host\.sshTarget \?\? host\.address\)/);
-  assert.match(discover, /majorMismatch[\s\S]*incompatibleKind === "major_mismatch"/);
-  assert.match(discover, /outdated[\s\S]*incompatibleKind === "below_floor"/);
+  assert.match(discover, /peer\.source === "lan" \? "LAN" : peer\.source === "tailscale" \? "Tailscale" : "SSH"/);
+  assert.match(discover, /const chooseHost = \(peer: BridgePeer\) => \{[\s\S]*setSelected\(peerToHost\(peer\)\)/);
+  assert.doesNotMatch(discover, /window\.remotepair\.hostAppStatus/);
+  assert.doesNotMatch(discover, /serviceInstanceID: peer\.serviceInstanceID|hostNonce: peer\.hostNonce|pairPort: peer\.pairPort/);
+  assert.match(app, /export function deriveHostFlags/);
+  assert.match(app, /window\.remotepair\.hostAppStatus\(host\.sshTarget \?\? host\.address\)/);
+  assert.match(app, /fetchAndMergePairingMeta/);
+  assert.match(app, /window\.remotepair\.fetchPairingMeta\(target\)/);
+  assert.match(app, /serviceInstanceID: meta\.serviceInstanceID \|\| undefined/);
+  assert.match(app, /hostNonce: meta\.hostNonce \|\| undefined/);
+  assert.match(app, /pairPort: meta\.pairPort \|\| undefined/);
 });
 
 test("pairing wait step sends the signed request and persists host only after proof", () => {

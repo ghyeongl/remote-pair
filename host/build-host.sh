@@ -78,8 +78,7 @@ cat > "$APP/Contents/Info.plist" <<P
 <key>RPGitHubRepo</key><string>${GH_REPO}</string>
 <key>LSUIElement</key><true/>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
-<key>NSBonjourServices</key><array><string>_xpair._tcp</string><string>_remotepair._tcp</string></array>
-<key>NSLocalNetworkUsageDescription</key><string>Xpair advertises this Mac on your local network so your Xpair client can discover and pair with it.</string>
+<key>NSLocalNetworkUsageDescription</key><string>Xpair broadcasts this Mac on your local network so your Xpair client can discover and pair with it.</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleIconName</key><string>AppIcon</string>
 </dict></plist>

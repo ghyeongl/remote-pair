@@ -2057,9 +2057,8 @@ function activate(context) {
   context.subscriptions.push(panelToggleBtn);
 
   let hostReachable = null; // null = unknown/probing, true/false = last probe result
-  // Telemetry: classify the real connection path used today (Bonjour LAN discovery does not
-  // exist yet, so a `.ts.net` host = tailscale, otherwise the manual/LAN path). Reported as
-  // host_connected{path}. NOTE: `lan` here means "not a tailnet name", not Bonjour-discovered.
+  // Telemetry: classify the real connection path used today (`.ts.net` = tailscale, otherwise the
+  // manual/local path). Reported as host_connected{path}. NOTE: `lan` here means "not a tailnet name".
   const classifyPath = (host) =>
     /\.ts\.net$/i.test(String(host || "")) ? telemetry.PATHS.TAILSCALE : telemetry.PATHS.LAN;
   const renderHostButton = () => {

@@ -10,16 +10,6 @@ import Darwin
 import Network
 import Security
 
-struct PairingAdvertiseInfo {
-    let serviceInstanceID: String
-    let hostNonce: String
-    let pairPort: UInt16
-}
-
-extension Notification.Name {
-    static let bonjourPairingInfoChanged = Notification.Name("xpair.bonjourPairingInfoChanged")
-}
-
 enum PairingSecurityError: Error, CustomStringConvertible {
     case missingHostKey
     case malformedRequest(String)
@@ -951,18 +941,15 @@ final class PairingManager {
                 try startMetadataServerLocked()
             } catch {
                 // The fixed metadata port is in use: roll the window back to "closed" instead of leaving
-                // committed phase/sid/nonce/endpoint with no metadata/Bonjour advertisement (which would
+                // committed phase/sid/nonce/endpoint with no metadata endpoint (which would
                 // report "waiting" forever with nothing for clients to discover). closeEndpoint() resets
-                // the endpoint + sid/nonce + Bonjour; "closed" makes the poll loop reopen (or surface the
+                // the endpoint + sid/nonce; "closed" makes the poll loop reopen (or surface the
                 // error) instead of hanging.
                 closeEndpoint()
                 phase = "closed"
                 lastError = "pairing metadata port unavailable: \(error)"
                 throw error
             }
-            BonjourAdvertiser.setPairingInfo(PairingAdvertiseInfo(serviceInstanceID: serviceInstanceID,
-                                                                  hostNonce: hostNonce,
-                                                                  pairPort: server.port))
             scheduleBroadcastExpiryLocked()
             log(.info, "pairing: window opened sid=\(serviceInstanceID) udp=\(server.port)")
             return statusLocked()
@@ -1210,7 +1197,7 @@ final class PairingManager {
             } else if let rec = self.accepted,
                       XpairAuthorizedKeys.pending(clientID: rec.clientID) == nil,
                       self.phase == "accepted-pending-proof" {
-                // acceptIncoming() already closed the UDP endpoint/Bonjour advertisement, so there is
+                // acceptIncoming() already closed the UDP endpoint, so there is
                 // nothing to broadcast on. Roll back to "closed" (NOT "waiting"): the host UI auto-calls
                 // beginPairing() only on "closed", reopening a fresh endpoint. Leaving it "waiting" would
                 // show a live broadcast while pairPort is 0 and no client could ever send a new request.
@@ -1351,7 +1338,6 @@ final class PairingManager {
         endpoint = nil
         serviceInstanceID = ""
         hostNonce = ""
-        BonjourAdvertiser.setPairingInfo(nil)
     }
 
     private static func randomToken(byteCount: Int) throws -> String {

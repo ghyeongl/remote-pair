@@ -37,22 +37,19 @@ test("bridge and preload contracts still expose force host updates and incompati
   assert.match(globals, /incompatibleKind: "below_floor" \| "major_mismatch" \| ""/);
 });
 
-test("discovery classifies host update states before leaving Discover", () => {
-  assert.match(discover, /function deriveHostFlags/);
-  assert.match(discover, /!!r\.installed && !r\.compatible && r\.incompatibleKind === "major_mismatch"/);
-  assert.match(discover, /!majorMismatch && !!r\.installed && !r\.compatible && r\.incompatibleKind === "below_floor"/);
-  assert.match(discover, /const status = await window\.remotepair\.hostAppStatus\(host\.sshTarget \?\? host\.address\)/);
-  assert.match(discover, /outdated: flags\.outdated/);
-  assert.match(discover, /majorMismatch: flags\.majorMismatch/);
+test("App classifies host update states after Discover selection", () => {
+  assert.match(app, /export function deriveHostFlags/);
+  assert.match(app, /!!r\.installed && !r\.compatible && r\.incompatibleKind === "major_mismatch"/);
+  assert.match(app, /!majorMismatch && !!r\.installed && !r\.compatible && r\.incompatibleKind === "below_floor"/);
+  assert.match(app, /window\.remotepair\.hostAppStatus\(host\.sshTarget \?\? host\.address\)/);
+  assert.match(app, /outdated: flags\.outdated/);
+  assert.match(app, /majorMismatch: flags\.majorMismatch/);
+  assert.doesNotMatch(discover, /window\.remotepair\.hostAppStatus/);
 });
 
 test("Discover keeps non-broadcasting XpairHosts so below-floor hosts can reach the Update flow", () => {
-  // Regression for the round-10 `if (!canPair) continue` drop-everything filter: it hid below-floor
-  // XpairHosts (fp set, no live pairing metadata), so selecting them — the only way hostAppStatus()
-  // detects below_floor and routes to Update — was impossible and the upgrade dead-ended in an empty
-  // Discover screen. The keep must be gated on `!canPair && !isXpairHost`, never `!canPair` alone.
   assert.match(discover, /const isXpairHost = !!peer\.fp \|\| peer\.status !== "setup"/);
-  assert.match(discover, /if \(!canPair && !isXpairHost\) continue/);
+  assert.match(discover, /if \(!isXpairHost\) continue/);
   assert.doesNotMatch(discover, /if \(!canPair\) continue/);
 });
 
@@ -65,7 +62,8 @@ test("App gates the Update step and cannot finish while update or pairing is inc
   assert.match(app, /if \(majorMismatch \|\| \(needsUpdate && updateState !== "done"\)\) \{[\s\S]*w\.goTo\(S\.UPDATE, "prev"\)/);
   assert.match(app, /if \(!permAccepted \|\| permDenied\) \{[\s\S]*w\.goTo\(S\.WAIT_PERM, "prev"\)/);
   assert.match(app, /if \(!hasRealMapping\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
-  assert.match(app, /w\.index === 4 && !needsUpdate && !majorMismatch && updateState !== "done"[\s\S]*setTimeout\(\(\) => w\.next\(\), 650\)/);
+  assert.match(app, /if \(w\.index !== S\.UPDATE\) return;[\s\S]*if \(w\.direction === "prev"\) \{[\s\S]*w\.goTo\(S\.DISCOVER, "prev"\)/);
+  assert.match(app, /if \(!needsUpdate && !majorMismatch && updateState !== "done"\) \{[\s\S]*setTimeout\(\(\) => w\.next\(\), 650\)/);
 });
 
 test("StepUpdate force-installs below-floor hosts, re-probes, and blocks major mismatches", () => {
@@ -86,6 +84,7 @@ test("password bootstrap states remain bridge-only, not a renderer StepInstallin
   assert.match(bridge, /PASSWORD_DENIED: "password_denied"/);
   assert.match(bridge, /PROMPT_PASSWORD: "prompt_password"/);
   assert.match(bridge, /cliWithPasswordStdin\(args, pw\)/);
+  assert.match(update, /installed\.action === "prompt_password"[\s\S]*onRepairPairing\?\.\(\)/);
   assert.doesNotMatch(app, /StepSetupPassword/);
 });
 

@@ -978,6 +978,11 @@ function fetchPairingMetadata(host, timeoutMs = 1200) {
   return new Promise((resolve) => {
     const req = http.get(pairingMetadataURL(h), { timeout: timeoutMs }, (res) => {
       let body = "";
+      if (res.statusCode && res.statusCode !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
       res.setEncoding("utf8");
       res.on("data", (chunk) => {
         body += chunk;
@@ -997,6 +1002,27 @@ function fetchPairingMetadata(host, timeoutMs = 1200) {
     });
     req.on("error", () => resolve(null));
   });
+}
+
+function normalizePairingMetadata(metadata) {
+  const fpRaw = String(metadata?.hostKeyFP || metadata?.fp || "");
+  const fp = fpRaw ? (fpRaw.startsWith("SHA256:") ? fpRaw : `SHA256:${fpRaw}`) : "";
+  const serviceInstanceID = String(metadata?.serviceInstanceID || metadata?.sid || "");
+  const hostNonce = String(metadata?.hostNonce || metadata?.nonce || "");
+  const pairPort = Number(metadata?.pairPort || metadata?.pp || 0);
+  const hostUser = String(metadata?.hostUser || metadata?.user || "");
+  if (!fp || !serviceInstanceID || !hostNonce || !Number.isInteger(pairPort) || pairPort <= 0 || pairPort > 65535) {
+    return {
+      ok: false,
+      fp,
+      serviceInstanceID,
+      hostNonce,
+      pairPort: Number.isFinite(pairPort) ? pairPort : 0,
+      hostUser,
+      err: "pairing metadata incomplete",
+    };
+  }
+  return { ok: true, fp, serviceInstanceID, hostNonce, pairPort, hostUser, err: "" };
 }
 
 function sendUdpJSON(host, port, obj) {
@@ -1453,7 +1479,7 @@ const bridge = {
   // sets up the bash-managed askpass fd. A key passphrase is never received or returned. Do NOT add a
   // tCapture/telemetry call inside discover/installHost.
 
-  // Discovery — concurrent Bonjour + Tailscale sweep via the CLI. Returns a deduped peer array
+  // Discovery — Tailscale sweep via the CLI. Returns a deduped peer array
   // (deduped by host-key fingerprint inside the CLI; the UI dedups again as a backstop).
   // Each peer: {name, addrs[], source, sources[], fp, status("reconnect"|"connect"|"setup")}.
   async discover() {
@@ -1467,6 +1493,42 @@ const bridge = {
       return { peers: [], err: "discover: bad JSON: " + String(e && e.message ? e.message : e) };
     }
     return { peers, err: "" };
+  },
+
+  async fetchPairingMeta(target) {
+    const h = String(target || "").trim();
+    if (!h) {
+      return { ok: false, fp: "", serviceInstanceID: "", hostNonce: "", pairPort: 0, hostUser: "", err: "no host" };
+    }
+    const host = sshTargetHost(h);
+    if (!validHost(host)) {
+      return { ok: false, fp: "", serviceInstanceID: "", hostNonce: "", pairPort: 0, hostUser: "", err: invalidHost(host) };
+    }
+    try {
+      const metadata = await fetchPairingMetadata(host, 3000);
+      if (!metadata) {
+        return {
+          ok: false,
+          fp: "",
+          serviceInstanceID: "",
+          hostNonce: "",
+          pairPort: 0,
+          hostUser: "",
+          err: "Host is not broadcasting pairing details. Open Connect on the host, then rescan.",
+        };
+      }
+      return normalizePairingMetadata(metadata);
+    } catch (e) {
+      return {
+        ok: false,
+        fp: "",
+        serviceInstanceID: "",
+        hostNonce: "",
+        pairPort: 0,
+        hostUser: "",
+        err: String(e && e.message ? e.message : e),
+      };
+    }
   },
 
   // Pairing — send a signed request to the host's ephemeral UDP endpoint. The request carries the

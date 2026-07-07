@@ -9,7 +9,7 @@ const onboardingWindow = fs.readFileSync(path.join(__dirname, "OnboardingWindow.
 const screenServer = fs.readFileSync(path.join(__dirname, "ScreenServer.swift"), "utf8");
 const captureEngine = fs.readFileSync(path.join(__dirname, "CaptureEngine.swift"), "utf8");
 const captureControlTests = fs.readFileSync(path.join(__dirname, "CaptureControlTests.swift"), "utf8");
-const bonjourAdvertiser = fs.readFileSync(path.join(__dirname, "BonjourAdvertiser.swift"), "utf8");
+const lanBeacon = fs.readFileSync(path.join(__dirname, "LanBeacon.swift"), "utf8");
 // The redesign merged the old StepWaiting into the host StepBroadcast (the pairing/broadcast step).
 const stepBroadcast = fs.readFileSync(
   path.join(root, "host/onboarding/src/components/onboarding/host/StepBroadcast.tsx"),
@@ -64,8 +64,8 @@ test("Q0343 host onboarding does not install, open, or operate the client workbe
   assert.match(config, /var isHostRole: Bool \{[\s\S]*return role == "host" \|\| role == "both" \|\| role\.isEmpty[\s\S]*\}/);
   assert.match(config, /var isClientRole: Bool \{ currentRole\(\) == "client" \}/);
 
-  assert.match(appDelegate, /if isHostRole \{ advertiser\.ensureAdvertising\(\) \}/);
-  assert.match(bonjourAdvertiser, /txt\["role"\] = role\.isEmpty \? "host" : role/);
+  assert.match(appDelegate, /if isHostRole \{ lanBeacon\.ensureAdvertising\(\) \}/);
+  assert.match(lanBeacon, /"role": role\.isEmpty \? "host" : role/);
   assert.match(screenServer, /Screen sharing belongs to the host app, not the client\./);
 
   // The host pairing/broadcast step drives ONLY the host bridge (window.xpair) and must never invoke

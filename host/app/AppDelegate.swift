@@ -9,7 +9,7 @@ import Cocoa
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let host = HostManager()
     let approve = ApproveManager()
-    let advertiser = BonjourAdvertiser()   // ① LAN discovery: advertise _xpair._tcp (host role only)
+    let lanBeacon = LanBeacon()   // LAN discovery: broadcast host hints (host role only)
     var statusItem: NSStatusItem!
     var menu: NSMenu!
     var hostTimer: Timer?
@@ -57,13 +57,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self           // rebuilt each time via menuNeedsUpdate
         statusItem.menu = menu
         rebuildMenu()
-        NotificationCenter.default.addObserver(forName: .bonjourPairingInfoChanged,
-                                               object: nil,
-                                               queue: .main) { [weak self] _ in
-            guard isHostRole else { return }
-            self?.advertiser.refreshAdvertising()
-        }
-
         log("launched (XpairHost v\(APP_VERSION), repo=\(GH_REPO))")
 
         // The tick loop (heartbeat + writeStatus + approve/onboarding triggers) ALWAYS runs — even while
@@ -120,12 +113,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// onComplete once the user grants it. Idempotent enough to call once per launch.
     private func startServing() {
         host.ensureServer()
-        if isHostRole { advertiser.ensureAdvertising() }   // ① advertise on launch (host/both only)
+        if isHostRole { lanBeacon.ensureAdvertising() }   // advertise on launch (host/both only)
         hostTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.host.ensureServer()
-            if isHostRole { self.advertiser.ensureAdvertising() }   // ① watchdog: re-advertise if listener died
+            if isHostRole { self.lanBeacon.ensureAdvertising() }   // watchdog: restart beacon if needed
         }
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        lanBeacon.stop()
     }
 
     // ── dynamic menu ──

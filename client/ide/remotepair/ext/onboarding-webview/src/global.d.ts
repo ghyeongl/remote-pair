@@ -7,7 +7,7 @@ export interface Peer {
   addrs: string[]
   // Canonical SSH target for install/connect: the ssh-config alias name when this peer is
   // config-known (carries IdentityFile + User → key auth), otherwise a discovered address. Always
-  // prefer this over addrs[0] for any window.remotepair call that SSHes — a bare tailnet/LAN IP
+  // prefer this over addrs[0] for any window.remotepair call that SSHes — a bare tailnet/LAN address
   // not in ssh config falls back to password auth and hangs the GUI askpass. Optional for
   // back-compat with an older CLI that did not emit it (fall back to addrs[0] || name).
   target?: string
@@ -16,9 +16,6 @@ export interface Peer {
   source: PeerSource
   sources: PeerSource[]
   fp: string | null
-  serviceInstanceID?: string
-  hostNonce?: string
-  pairPort?: number
   status: PeerStatus
 }
 
@@ -64,6 +61,15 @@ declare global {
       // and the bridge uses BatchMode/publickey-only probes. Failures return explicit recovery states
       // (host-key mismatch, key-agent/passphrase failure) instead of password or pairing-code entry.
       discover: () => Promise<{ peers: Peer[]; err: string }>
+      fetchPairingMeta: (target: string) => Promise<{
+        ok: boolean
+        fp: string
+        serviceInstanceID: string
+        hostNonce: string
+        pairPort: number
+        hostUser: string
+        err: string
+      }>
       sendPairingRequest: (opts: {
         host: string
         port: number

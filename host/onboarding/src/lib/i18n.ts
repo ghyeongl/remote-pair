@@ -33,7 +33,7 @@ const EN: Dict = {
 
   // Client Discover
   "discover.title": "Find your host",
-  "discover.desc": "Scanning your LAN and Tailscale network for XpairHost.",
+  "discover.desc": "Scanning your same network and Tailscale for XpairHost.",
   "discover.installedQ": "Is your host installed?",
   "discover.installedDesc":
     "Xpair needs XpairHost running on the Mac you want to reach. If it's already set up, it'll appear here in a moment. Otherwise, install it first and come back.",
@@ -178,7 +178,7 @@ const EN: Dict = {
   "bc.accept": "Accept",
   "bc.title": "Broadcasting",
   "bc.desc":
-    "This Mac is discoverable on your LAN and Tailscale network. Open Xpair on your client to send a pairing request.",
+    "This Mac is discoverable on your same network and Tailscale. Open Xpair on your client to send a pairing request.",
   "bc.thisMac": "This Mac",
 
   // Host Done
@@ -216,7 +216,7 @@ const KO: Dict = {
   "consent.analytics.sub": "기본은 꺼짐. 설정에서 언제든 변경할 수 있습니다.",
 
   "discover.title": "호스트 찾기",
-  "discover.desc": "LAN과 Tailscale 네트워크에서 XpairHost를 검색합니다.",
+  "discover.desc": "같은 네트워크와 Tailscale에서 XpairHost를 검색합니다.",
   "discover.installedQ": "호스트가 설치되어 있나요?",
   "discover.installedDesc":
     "연결할 Mac에 XpairHost가 실행되어 있어야 합니다. 이미 설정되어 있다면 곧 목록에 나타납니다. 아직이라면 먼저 설치하고 돌아오세요.",
@@ -353,7 +353,7 @@ const KO: Dict = {
   "bc.accept": "수락",
   "bc.title": "브로드캐스트 중",
   "bc.desc":
-    "이 Mac이 LAN과 Tailscale 네트워크에 검색 가능한 상태입니다. 클라이언트에서 Xpair를 열어 페어링 요청을 보내세요.",
+    "이 Mac이 같은 네트워크와 Tailscale에서 검색 가능한 상태입니다. 클라이언트에서 Xpair를 열어 페어링 요청을 보내세요.",
   "bc.thisMac": "이 Mac",
 
   "done.host.title": "페어링이 완료되었습니다",

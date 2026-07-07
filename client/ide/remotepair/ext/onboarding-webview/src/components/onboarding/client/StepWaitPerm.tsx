@@ -41,7 +41,14 @@ export function StepWaitPerm({
     const missingPairingFields =
       !host.hostKeyFP || !host.serviceInstanceID || !host.hostNonce || !host.pairPort;
     if (missingPairingFields) {
-      setError("Host is not broadcasting pairing details. Open Connect on the host, then rescan.");
+      if (host.pairingMetaStatus === "error") {
+        setError(
+          host.pairingMetaError ||
+            "Host is not broadcasting pairing details. Open Connect on the host, then rescan.",
+        );
+      } else {
+        setError("");
+      }
       return;
     }
 
@@ -137,6 +144,8 @@ export function StepWaitPerm({
     host?.hostKeyFP,
     host?.hostNonce,
     host?.pairPort,
+    host?.pairingMetaError,
+    host?.pairingMetaStatus,
     host?.serviceInstanceID,
     onDeny,
     retryNonce,

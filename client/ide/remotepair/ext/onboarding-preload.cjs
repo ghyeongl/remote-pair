@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('remotepair', {
   // Discovery / remote-install. Client onboarding uses key auth only and pairs against the host's
   // live broadcast metadata before persisting REMOTE_HOST.
   discover: () => rp('discover'),
+  fetchPairingMeta: (target) => rp('fetchPairingMeta', [target]),
   sendPairingRequest: (opts) => rp('sendPairingRequest', [opts]),
   pairingStatus: (opts) => rp('pairingStatus', [opts]),
   installHost: (opts) => rp('installHost', [opts]),

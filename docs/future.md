@@ -49,7 +49,7 @@ RemotePair as a single setup that *orchestrates* the best OSS. The existing low-
 
 **License**: RemotePair is **AGPL-3.0-or-later** (pure in-house code). The OSS consumed via orchestration is permissive/weak-copyleft (Syncthing = MPL-2.0, Tailscale = BSD-3, WireGuard = MIT — OK to bundle). Screen sharing uses the in-house `host/rd/screen` engine (permissive deps only) instead of an external stack. Legal review recommended before commercial distribution.
 
-> **Telemetry dependency**: the 8 reserved Phase-2 telemetry events depend on these golden-path features landing. Bonjour LAN discovery → `host_discovery_*`; Tailscale-as-fallback → `tailscale_*`; the hosted waitlist CTA → `hosted_*`. The names are frozen now (no rename between phases) but stay un-fired until each feature exists. Full catalog + privacy contract: [`.omc/specs/deep-interview-telemetry-funnel.md`](../.omc/specs/deep-interview-telemetry-funnel.md) and [requirements.md §2](requirements.md) / [logging.md §11](logging.md). Telemetry is opt-in, default OFF.
+> **Telemetry dependency**: the 8 reserved Phase-2 telemetry events depend on these golden-path features landing. Direct host discovery → `host_discovery_*`; Tailscale-as-fallback → `tailscale_*`; the hosted waitlist CTA → `hosted_*`. The names are frozen now (no rename between phases) but stay un-fired until each feature exists. Full catalog + privacy contract: [`.omc/specs/deep-interview-telemetry-funnel.md`](../.omc/specs/deep-interview-telemetry-funnel.md) and [requirements.md §2](requirements.md) / [logging.md §11](logging.md). Telemetry is opt-in, default OFF.
 
 ## 8. M6 — 2-level hot-update + AX inheritance spike (⚠️ spike must come first)
 
