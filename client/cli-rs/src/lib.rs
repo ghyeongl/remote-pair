@@ -13,10 +13,12 @@
 //! - [`transport`]: the mockable transport trait seam (mirrors the bash `tests/lib.sh`
 //!   MOCKLOG argv-capture philosophy) so logic is testable without a real host.
 
+pub mod approve;
 pub mod attach;
 pub mod config;
 pub mod discover;
 pub mod doctor;
+pub mod host;
 pub mod host_permissions;
 pub mod install_host;
 pub mod launch;

@@ -7,10 +7,12 @@
 use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
+use xpair::approve;
 use xpair::attach;
 use xpair::config;
 use xpair::discover;
 use xpair::doctor;
+use xpair::host;
 use xpair::host_permissions;
 use xpair::install_host;
 use xpair::launch;
@@ -63,6 +65,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "doctor" => doctor::run(&args[1..]),
+        "host" => host::run(&args[1..]),
+        "approve" => approve::run(&args[1..]),
         "discover" => discover::run(&args[1..]),
         "launch" => launch::run(&args[1..]),
         "open-gui" => open_gui::run(&args[1..]),
@@ -78,6 +82,12 @@ fn main() -> ExitCode {
         "mount" => tools::run_passthrough("xpair-mount", &args[1..]),
         "map" => cmd_map(&args[1..]),
         "config" => run_config(&args[1..]),
+        "onboard" => {
+            eprintln!(
+                "xpair onboard: IDE onboarding drives the flow — native CLI onboard is deferred"
+            );
+            ExitCode::from(2)
+        }
         // `roots` is a legacy alias of `map` (client/cli/xpair:2266).
         "roots" => cmd_map(&args[1..]),
         other if SUBCOMMANDS.contains(&other) => {
@@ -105,7 +115,7 @@ fn print_help() {
     }
     println!();
     println!(
-        "(native Rust client — port in progress; most verbs work today; onboard/approve/self-update remaining)"
+        "(native Rust client — port in progress; onboard deferred to IDE onboarding; self-update remaining)"
     );
 }
 
