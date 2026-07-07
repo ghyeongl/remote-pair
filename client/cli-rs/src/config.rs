@@ -563,7 +563,13 @@ fn use_legacy_host_env_stack(path: &Path) -> io::Result<bool> {
     let default_client_env = if let Some(rp_client_dir) = non_empty_env("RP_CLIENT_DIR") {
         PathBuf::from(rp_client_dir).join("client.env")
     } else {
-        default_client_dir()?.join("client.env")
+        // No resolvable home means the caller passed an explicit path that cannot be the
+        // default stack — treat as non-legacy instead of failing the whole lookup (bash
+        // parity: common.env is sourced only when its well-known location exists).
+        match default_client_dir() {
+            Ok(dir) => dir.join("client.env"),
+            Err(_) => return Ok(false),
+        }
     };
 
     if path != default_client_env {
