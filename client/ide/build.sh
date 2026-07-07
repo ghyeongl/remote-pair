@@ -141,12 +141,16 @@ echo "→ building client onboarding webview"
 # 4) relocate the packaged app out of vendor into a clean dist/. The gulp recipe hardcodes its
 #    output to ../VSCode-<os>-<arch>/ (= inside vendor/vscodium/); move it so vendor stays
 #    artifact-free and the deliverable lives at a predictable client/ide/dist/ path.
+WIN32_OUTPUTS=()
 shopt -s nullglob
 for out in "$VENDOR"/VSCode-darwin-*/ "$VENDOR"/VSCode-linux-*/ "$VENDOR"/VSCode-win32-*/; do
   mkdir -p "$HERE/dist"
   rm -rf "$HERE/dist/$(basename "$out")"
   mv "$out" "$HERE/dist/"
   echo "→ build output: client/ide/dist/$(basename "$out")"
+  case "$(basename "$out")" in
+    VSCode-win32-*) WIN32_OUTPUTS+=( "$HERE/dist/$(basename "$out")" ) ;;
+  esac
 done
 shopt -u nullglob
 
@@ -294,3 +298,56 @@ if [ "$(uname)" = "Darwin" ]; then
   done
   shopt -u nullglob
 fi
+
+# 6) Windows packaging: bundle the native Xpair CLI (when supplied) and emit a zip artifact.
+#    The mac host payloads above (mosh, XpairHost.app, lipo validation, codesign) do not apply on
+#    Windows. This pass is deliberately gated on packaged VSCode-win32-* outputs moved by THIS
+#    invocation so mac/linux builds never enter it because of stale dist/ directories. CI passes
+#    XPAIR_CLI_EXE from client/cli-rs/target/release/xpair.exe when the Rust CLI exists; branches
+#    before that merge still produce an IDE zip without the bundled CLI.
+for app in "${WIN32_OUTPUTS[@]}"; do
+  _app_name="$(basename "$app")"
+  _resource_bin="$app/resources/app/bin"
+  mkdir -p "$_resource_bin"
+
+  if [ -n "${XPAIR_CLI_EXE:-}" ]; then
+    _xpair_cli_exe="$XPAIR_CLI_EXE"
+    if [ ! -f "$_xpair_cli_exe" ] && command -v cygpath >/dev/null 2>&1; then
+      _xpair_cli_exe="$(cygpath -u "$XPAIR_CLI_EXE" 2>/dev/null || printf '%s' "$XPAIR_CLI_EXE")"
+    fi
+    if [ ! -f "$_xpair_cli_exe" ]; then
+      echo "✗ XPAIR_CLI_EXE points to a missing file: $XPAIR_CLI_EXE" >&2
+      exit 1
+    fi
+    cp "$_xpair_cli_exe" "$_resource_bin/xpair.exe"
+    chmod +x "$_resource_bin/xpair.exe" 2>/dev/null || true
+    echo "→ bundled native Xpair CLI → ${_app_name}/resources/app/bin/xpair.exe"
+  else
+    echo "⚠ XPAIR_CLI_EXE not set — building ${_app_name} without bundled xpair.exe" >&2
+  fi
+
+  _zip="$HERE/dist/Xpair-${_app_name#VSCode-}-${RP_BUILD_VER}.zip"
+  rm -f "$_zip"
+
+  _ps=""
+  for _ps_candidate in powershell.exe powershell pwsh; do
+    if command -v "$_ps_candidate" >/dev/null 2>&1; then
+      _ps="$_ps_candidate"
+      break
+    fi
+  done
+  if [ -z "$_ps" ]; then
+    echo "✗ PowerShell not found — cannot create the win32 IDE zip artifact" >&2
+    exit 1
+  fi
+
+  _zip_src="${app%/}"
+  _zip_dst="$_zip"
+  if command -v cygpath >/dev/null 2>&1; then
+    _zip_src="$(cygpath -w "$_zip_src")"
+    _zip_dst="$(cygpath -w "$_zip_dst")"
+  fi
+  WIN32_ZIP_SRC="$_zip_src" WIN32_ZIP_DST="$_zip_dst" "$_ps" -NoProfile -ExecutionPolicy Bypass -Command \
+    "\$ErrorActionPreference = 'Stop'; Compress-Archive -Path \$env:WIN32_ZIP_SRC -DestinationPath \$env:WIN32_ZIP_DST -Force"
+  echo "→ win32 zip artifact: client/ide/dist/$(basename "$_zip")"
+done

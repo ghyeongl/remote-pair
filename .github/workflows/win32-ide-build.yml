@@ -1,0 +1,79 @@
+name: win32 IDE build
+
+# Heavy packaging job for the Windows client IDE. Keep it out of normal CI; run it manually
+# when validating a branch and weekly to catch runner/toolchain drift.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: [self-hosted, Windows, X64, Win11]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: client/ide/.nvmrc
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build native Xpair CLI if present
+        shell: bash
+        run: |
+          set -e
+          if [ -d client/cli-rs ]; then
+            cargo build --release --manifest-path client/cli-rs/Cargo.toml
+            exe="$PWD/client/cli-rs/target/release/xpair.exe"
+            [ -f "$exe" ] || { echo "::error::cargo build completed but $exe is missing"; exit 1; }
+            echo "XPAIR_CLI_EXE=$exe" >> "$GITHUB_ENV"
+            echo "Built native Xpair CLI: $exe"
+          else
+            echo "::notice::client/cli-rs is absent on this branch; win32 IDE zip will be built without bundled xpair.exe"
+          fi
+
+      - name: Build win32 IDE zip
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RP_LOCAL_IDENTITY: '0'
+        run: |
+          set -e
+          cd client/ide
+          ./build.sh
+
+      - name: Verify win32 zip artifact
+        shell: bash
+        run: |
+          set -e
+          shopt -s nullglob
+          zips=(client/ide/dist/Xpair-win32-*.zip)
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "::error::client/ide/build.sh produced no client/ide/dist/Xpair-win32-*.zip artifact"
+            exit 1
+          fi
+          printf 'artifact: %s\n' "${zips[@]}"
+
+      - name: Upload win32 IDE zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpair-win32-ide
+          path: client/ide/dist/Xpair-win32-*.zip
+          if-no-files-found: error
