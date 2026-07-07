@@ -63,7 +63,8 @@ test("App gates the Update step and cannot finish while update or pairing is inc
   assert.match(app, /if \(!permAccepted \|\| permDenied\) \{[\s\S]*w\.goTo\(S\.WAIT_PERM, "prev"\)/);
   assert.match(app, /if \(!hasRealMapping\) \{[\s\S]*w\.goTo\(S\.MAPPINGS, "prev"\)/);
   assert.match(app, /if \(w\.index !== S\.UPDATE\) return;[\s\S]*if \(w\.direction === "prev"\) \{[\s\S]*w\.goTo\(S\.DISCOVER, "prev"\)/);
-  assert.match(app, /if \(!needsUpdate && !majorMismatch && updateState !== "done"\) \{[\s\S]*setTimeout\(\(\) => w\.next\(\), 650\)/);
+  // Auto-skip is gated on selectedHost.probed so a slow async host probe cannot skip an outdated host.
+  assert.match(app, /if \(selectedHost\?\.probed && !needsUpdate && !majorMismatch && updateState !== "done"\) \{[\s\S]*setTimeout\(\(\) => w\.next\(\), 650\)/);
 });
 
 test("StepUpdate force-installs below-floor hosts, re-probes, and blocks major mismatches", () => {

@@ -189,11 +189,13 @@ export default function App() {
             version: r.version || current.version,
             outdated: flags.outdated,
             majorMismatch: flags.majorMismatch,
+            probed: true,
           };
           if (
             current.version === next.version &&
             current.outdated === next.outdated &&
-            current.majorMismatch === next.majorMismatch
+            current.majorMismatch === next.majorMismatch &&
+            current.probed === next.probed
           ) {
             return current;
           }
@@ -202,6 +204,15 @@ export default function App() {
       }
       return r;
     } catch {
+      // Probe failed: we could not determine status, but mark it settled so the wizard is not
+      // stuck on Update forever — outdated/majorMismatch stay false, so progression resumes.
+      if (hostProbeId.current === probeId) {
+        setSelectedHost((current) =>
+          current && current.id === host.id && !current.probed
+            ? { ...current, probed: true }
+            : current,
+        );
+      }
       return null;
     }
   }, []);
@@ -417,11 +428,13 @@ export default function App() {
         return;
       }
     }
-    if (!needsUpdate && !majorMismatch && updateState !== "done") {
+    // Gate on probed: never skip Update until the host status probe has resolved, or a slow
+    // SSH probe lets the timer skip an outdated host on the pre-probe default (both flags false).
+    if (selectedHost?.probed && !needsUpdate && !majorMismatch && updateState !== "done") {
       const tm = setTimeout(() => w.next(), 650);
       return () => clearTimeout(tm);
     }
-  }, [w.index, w.direction, needsUpdate, majorMismatch, updateState, w]);
+  }, [w.index, w.direction, selectedHost?.probed, needsUpdate, majorMismatch, updateState, w]);
 
   const nextDisabled =
     (w.index === 3 && !selectedHost) ||

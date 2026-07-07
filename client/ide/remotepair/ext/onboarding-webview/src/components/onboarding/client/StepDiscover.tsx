@@ -20,6 +20,10 @@ export type DiscoveredHost = {
   pairingMetaError?: string;
   outdated?: boolean;
   majorMismatch?: boolean;
+  // True once probeSelectedHost has RESOLVED for this host (success or failure). The Update
+  // auto-skip must not fire on the pre-probe default (outdated/majorMismatch both false) or a
+  // slow SSH probe would skip an outdated host before its status is known.
+  probed?: boolean;
 };
 
 type BridgePeer = Awaited<ReturnType<typeof window.remotepair.discover>>["peers"][number];
