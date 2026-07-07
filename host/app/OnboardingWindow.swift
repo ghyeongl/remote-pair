@@ -61,15 +61,12 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
       window.xpair = {
         openPermissionPane: (key) => post('openPermissionPane', [key]),
         requestPermission: (key) => post('requestPermission', [key]),
-        startInstall: () => post('startInstall', []),
-        getInstallStatus: () => post('getInstallStatus', []),
         getHostInfo: () => post('getHostInfo', []),
         getStatus: () => post('getStatus', []),
         getOnboardingStep: () => post('getOnboardingStep', []),
         setOnboardingStep: (n) => post('setOnboardingStep', [n]),
         getConsent: () => post('getConsent', []),
         setConsent: (c) => post('setConsent', [c]),
-        connectedClients: () => post('connectedClients', []),
         beginPairing: (force = false) => post('beginPairing', [force]),
         pairingStatus: () => post('pairingStatus', []),
         acceptPairing: (request) => post('acceptPairing', [request]),
@@ -198,14 +195,6 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
                 "user": NSUserName(),
             ], nil)
 
-        case "getInstallStatus":
-            // Already installed (the app self-launched this onboarding), so report ready.
-            replyHandler(["appAlive": true, "launchAgentPresent": true, "serverUp": true], nil)
-
-        case "startInstall":
-            // No-op: installation already happened before onboarding is shown.
-            replyHandler(nil, nil)
-
         case "getConsent":
             // Both flags are opt-in (default OFF via AppDelegate's UserDefaults.register). The
             // onboarding reads/writes the SAME keys the rest of the host uses (Settings, startup
@@ -225,14 +214,6 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
                                           forKey: SentryBridge.consentKey)
             }
             replyHandler(nil, nil)
-
-        case "connectedClients":
-            // Read-only: the connected-client list (ts within the freshness window). Reuses the same
-            // helper the menu bar uses. Never throws to the renderer — list() returns [] on any error.
-            let clients = ConnectedClients.list().map {
-                ["name": $0.name, "user": $0.user, "ageSec": $0.ageSec] as [String: Any]
-            }
-            replyHandler(clients, nil)
 
         case "beginPairing":
             let force = args.first as? Bool ?? false

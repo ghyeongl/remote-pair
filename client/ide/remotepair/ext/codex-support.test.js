@@ -39,7 +39,7 @@ function test(name, fn) {
   }
 }
 
-test("Codex is supported by the terminal/session flow and host install/auth checks (Q0540)", () => {
+test("Codex is supported by the terminal/session flow and host-owned install/auth checks (Q0540)", () => {
   assert.match(
     picker,
     /export type SessionKind = 'claude' \| 'shell' \| 'codex' \| 'gemini';/,
@@ -56,11 +56,11 @@ test("Codex is supported by the terminal/session flow and host install/auth chec
   assert.match(bridge, /command -v codex/);
   assert.match(bridge, /codex login status/);
   assert.match(bridge, /\.codex\/auth\.json/);
-  assert.match(bridge, /codex: "bash -c 'set -o pipefail; curl -fsSL https:\/\/chatgpt\.com\/codex\/install\.sh \| CODEX_NON_INTERACTIVE=1 sh'"/);
-  assert.match(bridge, /codex login --with-api-key/);
+  assert.doesNotMatch(bridge, /\b(?:ENGINE_INSTALL|ENGINE_AUTH_WRITE)\b|codex login --with-api-key/);
   assert.match(engineGuard, /engine == "claude" \|\| engine == "codex" \|\| engine == "opencode"/);
   assert.match(engineGuard, /case "codex":[\s\S]*command -v codex[\s\S]*codex login status/);
   assert.match(engineGuard, /case "codex":[\s\S]*bash -c 'set -o pipefail; curl -fsSL https:\/\/chatgpt\.com\/codex\/install\.sh \| CODEX_NON_INTERACTIVE=1 sh'/);
+  assert.match(engineGuard, /case "codex":[\s\S]*codex login --with-api-key/);
   assert.match(launcher, /printf 'Agent engine:\\n  \[1\] Claude Code.*\[2\] Codex.*\[3\] OpenCode/s);
   assert.match(launcher, /codex\)\s+respawn_body_codex ;;/);
   assert.match(launcher, /codex --dangerously-bypass-approvals-and-sandbox resume --last/);

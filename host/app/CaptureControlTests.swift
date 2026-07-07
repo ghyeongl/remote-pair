@@ -50,7 +50,11 @@ enum CaptureControlTests {
                 return
             }
             if case let .running(active) = state, active == gen {
-                ack(.start, gen, rid, .started(cachedStartedInfo!))
+                if let info = cachedStartedInfo {
+                    ack(.start, gen, rid, .started(info))
+                } else {
+                    ack(.start, gen, rid, .error(kind: .startFailed, reason: "capture is running without cached start metadata"))
+                }
                 return
             }
             if case let .starting(active, _) = state, active == gen {
@@ -181,6 +185,7 @@ enum CaptureControlTests {
         try stop_while_starting_cancels_and_acks()
         try every_op_produces_exactly_one_ack()
         try duplicate_start_same_gen_running_reacks_started()
+        try duplicate_start_same_gen_running_without_cached_info_error_acks()
         try engine_error_while_running_emits_unsolicited_event_not_ack()
         try bitrate_while_running_retargets_engine_no_ack()
         try bitrate_when_not_active_is_ignored()
@@ -260,6 +265,23 @@ enum CaptureControlTests {
         machine.start(42, "42-2")
         try expect(machine.engine.starts.isEmpty, "duplicate running start must not start engine")
         try expect(machine.acks == [Ack(op: .start, gen: Generation(raw: 42), rid: "42-2", result: .started(info))], "duplicate running start must re-ack started")
+    }
+
+    static func duplicate_start_same_gen_running_without_cached_info_error_acks() throws {
+        var machine = Machine(state: .running(gen: Generation(raw: 42)))
+        machine.start(42, "42-3")
+        try expect(machine.engine.starts.isEmpty, "duplicate running start without metadata must not start engine")
+        try expect(
+            machine.acks == [
+                Ack(
+                    op: .start,
+                    gen: Generation(raw: 42),
+                    rid: "42-3",
+                    result: .error(kind: .startFailed, reason: "capture is running without cached start metadata")
+                )
+            ],
+            "duplicate running start without metadata must error-ack"
+        )
     }
 
     static func engine_error_while_running_emits_unsolicited_event_not_ack() throws {

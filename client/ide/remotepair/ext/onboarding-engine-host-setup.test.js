@@ -81,7 +81,7 @@ test("Q0545 host StepEngine probes, installs, authenticates, and persists suppor
   assert.match(hostStepEngine, /engine === "codex" \? "sk-\.\.\. \(OpenAI API key\)"/);
 });
 
-test("Q0545 bridge and host app engine guards still support host-side Codex setup", () => {
+test("Q0545 client bridge probes host engine readiness while host app owns install/auth", () => {
   assert.match(bridge, /const ENGINES = new Set\(\["claude", "codex", "opencode"\]\)/);
   assert.match(bridge, /const SESSION_ENGINES = new Set\(\[\.\.\.ENGINES, "shell"\]\)/);
   assert.match(bridge, /remoteHost: e\.REMOTE_HOST \|\| "",[\s\S]*engine: e\.ENGINE \|\| "",/);
@@ -89,11 +89,7 @@ test("Q0545 bridge and host app engine guards still support host-side Codex setu
   assert.match(bridge, /async hostEnvEngine\(hostArg\)[\s\S]*cat|async hostEnvEngine\(hostArg\)[\s\S]*host\.env/);
   assert.match(bridge, /const probe = ENGINE_PROBE\[e\]/);
   assert.match(bridge, /run\("ssh", \[\.\.\.sshProbeOpts\(host, 6\), host, probe\]\)/);
-  assert.match(bridge, /const PATH_PERSIST =/);
-  assert.match(bridge, /# >>> xpair PATH >>>/);
-  assert.match(bridge, /if \(!ENGINE_INSTALL\[e\]\) return \{ ok: false, err: `unknown engine: \$\{e\}` \}/);
-  assert.match(bridge, /run\("ssh", \[\.\.\.sshProbeOpts\(host, 20\), host, cmd\]/);
-  assert.match(bridge, /const r = await runSecretStdin\("ssh", \[\.\.\.sshProbeOpts\(host, 15\), host, writer\], apiKey\)/);
+  assert.doesNotMatch(bridge, /\b(?:installHostEngine|setHostEngineAuth|ENGINE_INSTALL|ENGINE_AUTH_WRITE|PATH_PERSIST)\b/);
   assert.match(globals, /getConfig: \(\) => Promise<\{[\s\S]*remoteHost: string[\s\S]*engine: string/);
 
   assert.match(hostEngineGuard, /static func isKnown\(_ engine: String\) -> Bool \{\s*engine == "claude" \|\| engine == "codex" \|\| engine == "opencode" \|\| engine == "shell"\s*\}/);

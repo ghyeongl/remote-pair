@@ -137,7 +137,7 @@ test("Q0473/Q0493/Q0494 force-onboarding sentinel reopens onboarding once withou
       true,
     );
     assert.equal(fs.existsSync(sentinel), false, "forced setup must be one-shot after onboarding opens");
-    assert.deepEqual(fake.loads[0].options.query, { startStep: "welcome", engine: "codex" });
+    assert.deepEqual(fake.loads[0].options.query, { startStep: "welcome" });
     assert.match(fs.readFileSync(path.join(rpDir, "client.env"), "utf8"), /REMOTE_HOST=host-mac/);
   });
 });

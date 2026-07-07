@@ -51,10 +51,6 @@ function initialStepFromLocation() {
   if (typeof window === "undefined") return S.WELCOME;
   const raw = new URLSearchParams(window.location.search).get("startStep") || "";
   if (Object.prototype.hasOwnProperty.call(START_STEPS, raw)) return START_STEPS[raw];
-  const numeric = Number(raw);
-  if (Number.isInteger(numeric)) {
-    return Math.max(S.WELCOME, Math.min(S.DONE, numeric));
-  }
   return S.WELCOME;
 }
 
@@ -169,27 +165,12 @@ export default function App() {
           setMappings((current) => (current.length ? current : parsedMappings));
           if (!mappingsHostRef.current) mappingsHostRef.current = remoteHost || null;
         }
-        // Resume path only: also auto-select the configured host (on the Welcome path the user picks it
-        // in Discover).
-        if (initialStep < S.UPDATE || !remoteHost) return;
-        setSelectedHost((current) =>
-          current ?? {
-            id: remoteHost,
-            name: remoteHost,
-            address: remoteHost,
-            pairingAddress: remoteHost,
-            sshTarget: remoteHost,
-            transport: "LAN",
-            version: "",
-          },
-        );
-        if (!mappingsHostRef.current) mappingsHostRef.current = remoteHost;
       })
       .catch(() => {});
     return () => {
       alive = false;
     };
-  }, [initialStep]);
+  }, []);
 
   const hostProbeId = useRef(0);
   const probeSelectedHost = useCallback(async () => {

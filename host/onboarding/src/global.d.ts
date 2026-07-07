@@ -40,8 +40,6 @@ declare global {
     xpair: {
       openPermissionPane: (key: 'login' | 'ax' | 'sr' | 'fda' | 'sharing') => Promise<void>
       requestPermission: (key: 'login' | 'ax' | 'sr' | 'fda' | 'sharing') => Promise<void>
-      startInstall: () => Promise<void>
-      getInstallStatus: () => Promise<{ appAlive: boolean; launchAgentPresent: boolean; serverUp: boolean }>
       getHostInfo: () => Promise<{ hostname: string; user: string }>
       getStatus: () => Promise<{ alive: boolean; login: boolean; ax: boolean; sr: boolean; fda: boolean; sharing: boolean }>
       getOnboardingStep: () => Promise<number>
@@ -49,8 +47,6 @@ declare global {
       // Both flags are opt-in (default OFF). Maps to UserDefaults RPTelemetryConsent / RPCrashReportConsent.
       getConsent: () => Promise<{ telemetry: boolean; crash: boolean }>
       setConsent: (c: { telemetry: boolean; crash: boolean }) => Promise<void>
-      // Read-only: clients currently connected (heartbeat ts within the freshness window). [] when none.
-      connectedClients: () => Promise<Array<{ name: string; user: string; ageSec: number }>>
       // Pairing Broadcast backend. `accepted-pending-proof` means the exact key was installed but
       // Continue stays locked; only `paired` maps to the UI's accepted state.
       // force=true opens a fresh pairing window even when a client is already paired (re-advertise).

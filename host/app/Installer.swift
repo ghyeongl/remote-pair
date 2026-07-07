@@ -3,7 +3,7 @@
 // So that an .app obtained from GitHub Releases becomes a working host even without
 // shared/install.sh, ensureInstalled() is called on every launch. If already installed it is
 // an immediate no-op (files/launchctl untouched).
-// install(force:) produces the same state as the is_host section of shared/install.sh (identical labels, plist, paths).
+// install() produces the same state as the is_host section of shared/install.sh (identical labels, plist, paths).
 //
 // SSOT note: the labels/plist shape/paths must match shared/config.sh + shared/install.sh character for character.
 
@@ -28,17 +28,16 @@ enum Installer {
     private static var versionFile: String { "\(RP_DIR)/.version" }
 
     /// Called on every launch. If "installed + same version", it is a true no-op (does not touch the running tmux server).
-    /// If installed but the version went up, only resources (skills/rules/tmux-aqua) are refreshed — this prevents
-    /// the case where only the app changes to the new version while ~/.xpair/host / ~/.claude resources remain old
-    /// (common to app replacement / in-app update).
-    /// grant / LaunchAgent / host.env (user settings) are left untouched.
+    /// If installed but the version went up, the idempotent install body runs again so bundle-backed
+    /// resources and links point at the new app. host.env user settings are preserved, and launchctl
+    /// bootstrap ignores an already loaded agent instead of restarting it.
     ///
     /// ── M6 LEVEL-1 (hot update) non-interference guarantee ──────────────────────────────────────
     /// glue/web (CLI / rules / skills / web / hooks) changes are hot-swapped on disk by the CLI
     /// (`xpair update`) — no .app/tmux restart. The app's role is **not to interfere** with that:
     ///   • Same version → true no-op. Never touches the tmux server / LaunchAgent / grant (hot-swap protection).
-    ///   • Version up → only refresh resources (tmux-aqua link / env alignment), preserving grant / LaunchAgent / host.env.
-    /// In other words, even if a LEVEL-1 hot-swap changes disk resources, the app does not revert them or trigger a restart.
+    ///   • Version up → re-run the idempotent install body so bundle-backed resources follow the new app.
+    /// Bootstrap is deliberately non-restarting for loaded agents; native restarts are handled by Updater.swift.
     /// (LEVEL-2, which requires a native restart, is handled by the gate in Updater.swift.)
     /// Is this a machine/launch where host self-install must not happen? (gh-mac-m4 incident: a client laptop opened a
     /// build/ app once and got self-installed as a host — blocking that case.) ① launched from a non-installed location
@@ -75,24 +74,23 @@ enum Installer {
         }
         if installed && stamped == APP_VERSION { return }                 // LEVEL-1: same version → true no-op (no hot-swap/tmux interference)
         if installed {
-            log(.info, "version \(stamped.isEmpty ? "(none)" : stamped) → \(APP_VERSION) — refreshing resources (grant/config preserved)")
-            install(force: false, refreshResources: true)                 // LEVEL-1: version up → refresh resources only (preserve grant/LaunchAgent)
+            log(.info, "version \(stamped.isEmpty ? "(none)" : stamped) → \(APP_VERSION) — re-running install (config preserved)")
+            install()                                                     // LEVEL-1: version up → idempotent install; bootstrap does not restart loaded agents
         } else {
             log(.info, "not fully installed (plist=\(fm.fileExists(atPath: appPlist)) host.env=\(fm.fileExists(atPath: HOST_ENV))) → installing")
-            install(force: false)
+            install()
         }
     }
 
     /// Host install steps — mirrors the is_host section of shared/install.sh.
-    /// If refreshResources=true, rules.txt is refreshed to the new bundle even without force (so resources follow on a version up).
-    static func install(force: Bool, refreshResources: Bool = false) {
+    static func install() {
         // Direct call paths such as repairInstall also refuse a non-installed location (build/) — so the LaunchAgent does not point at a dev tree.
         let bp = Bundle.main.bundlePath
         if !(bp.hasPrefix("/Applications/") || bp.hasPrefix("\(HOME)/Applications/")) {
             log(.warn, "install() refused — launched from non-installed location (\(bp))")
             return
         }
-        log(.info, "begin (force=\(force) refreshResources=\(refreshResources))")
+        log(.info, "begin")
         ensureDir(RP_DIR)
         ensureDir(LOG_DIR)
         ensureDir("\(RP_DIR)/bin")
@@ -117,7 +115,7 @@ enum Installer {
             ("LOG_FILE", LOGP),
             ("HEARTBEAT_FILE", HEARTBEAT),
             ("RULES_FILE", RULES_FILE),
-        ], onlyIfAbsent: !force)
+        ], onlyIfAbsent: true)
 
         // NOTE: rules.txt (approve config) + skills (claude harness) are not installed by the app (to keep coupling low).
         //       That is the job of the CLI/README single install (shared/install.sh). The app only brings up its own daemon.
@@ -177,7 +175,7 @@ enum Installer {
         // version stamp → so the next launch can decide no-op. If this fails, the next launch re-runs install (idempotent) instead of no-op'ing.
         do { try APP_VERSION.write(toFile: versionFile, atomically: true, encoding: .utf8) }
         catch { log(.warn, "version stamp write failed (\(versionFile)) — next launch will re-run install: \(error)") }
-        log(.info, "done (force=\(force) → version \(APP_VERSION))")
+        log(.info, "done (version \(APP_VERSION))")
     }
 
     // ── host notification hook mirror (for cask-only hosts) ────────────────────────────────────

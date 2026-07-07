@@ -2,8 +2,7 @@
 //
 // ZERO external npm deps: node stdlib (https/crypto/fs/os/path) only. This module is shared by
 // BOTH the VSCodium extension host (extension.js) and the Electron onboarding main process
-// (via onboarding-bridge.js → preload → webview). The Electron app additionally uses
-// @sentry/electron for renderer/main crash capture; this module is the PostHog transport and
+// (via onboarding-bridge.js → preload → webview). This module is the PostHog transport and
 // the extension-host Sentry path (raw HTTP envelope, no SDK, to preserve the zero-dep rule).
 //
 // HARD PRIVACY (OSS audit): NEVER transmit repo names, file paths, command contents, or IP
@@ -448,16 +447,6 @@ function crashReportConsent() {
   return envTrue(readEnv()[K_CRASH_CONSENT]);
 }
 
-/** Sentry config for SDK-based runtimes (Electron @sentry/electron). null DSN => do not init. */
-function sentryConfig() {
-  const env = readEnv();
-  return {
-    dsn: (env[K_SENTRY_DSN] || process.env.RP_SENTRY_DSN || "").trim() || null,
-    release: APP_VERSION,
-    consent: crashReportConsent(),
-  };
-}
-
 /** Read both consent flags (for the consent UI). */
 function getConsent() {
   const env = readEnv();
@@ -721,7 +710,6 @@ module.exports = {
   setTelemetryConsent,
   telemetryConsent,
   crashReportConsent,
-  sentryConfig,
   superProps,
   normalizeReason,
   normalizePath,

@@ -6,7 +6,7 @@
 // and the user's exported provider env (ANTHROPIC_API_KEY/OPENAI_API_KEY) resolve exactly as they will at
 // launch time.
 //
-// Mirrors client/ide/remotepair/ext/onboarding-bridge.js (ENGINE_PROBE / ENGINE_INSTALL / ENGINE_AUTH_WRITE):
+// Host-side engine operations:
 //   probe   — `command -v <engine>` for install; engine-specific auth check (env OR on-disk credential).
 //   install — each engine's official native installer (non-interactive), then PATH persistence.
 //   auth    — the secret is fed over the child's STDIN only (read -r KEY) — never argv/log/disk-plaintext.
@@ -125,8 +125,7 @@ enum EngineGuard {
             "touch \"$RC\"; chmod 600 \"$RC\" 2>/dev/null || true; " +
             "TMP=\"$(mktemp)\"; " +
             // Drop ONLY the prior Xpair-managed block (markers + the line between), never a user's own
-            // `export VAR=` outside our block — a blanket grep would silently delete it. (Mirror of
-            // onboarding-bridge.js rcExportWriter.)
+            // `export VAR=` outside our block — a blanket grep would silently delete it.
             "awk -v b=\"# >>> xpair \(varName) >>>\" -v e=\"# <<< xpair \(varName) <<<\" '$0==b{skip=1;next} $0==e{skip=0;next} skip!=1' \"$RC\" > \"$TMP\" || true; " +
             "mv \"$TMP\" \"$RC\"; " +
             "{ echo \"# >>> xpair \(varName) >>>\"; printf 'export \(varName)=%s\\n' \"$KEY\"; echo \"# <<< xpair \(varName) <<<\"; } >> \"$RC\"; " +
