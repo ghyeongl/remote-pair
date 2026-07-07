@@ -54,6 +54,15 @@ declare global {
       addMapping: (clientPath: string, hostPath: string, method?: "mount" | "sync") => Promise<any>
       removeMapping: (clientPath: string) => Promise<{ code: number; out: string; err: string }>
       resolveHostPath: (target: string, hostPath: string) => Promise<{ ok: boolean; path: string; err: string }>
+      listHostDir: (target: string, hostPath?: string) => Promise<{
+        ok: boolean
+        base: string
+        entries: { name: string; path: string }[]
+        truncated?: boolean
+        err: string
+        state?: string
+        action?: string
+      }>
       mount: (hostPath: string, mountpoint?: string) => Promise<{ code: number; out: string; err: string; mountpoint: string }>
       defaultMountpoint: (hostPath: string) => Promise<string>
       // Discovery / remote-install (component ⑤). Client onboarding uses SSH key auth as the primary

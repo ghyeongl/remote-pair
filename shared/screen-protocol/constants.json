@@ -24,7 +24,9 @@
   "remoteInput": {
     "supported": true,
     "policy": "Remote Desktop supports authenticated remote input. The IDE may capture pointer, wheel, text, and keyboard input only inside the RD webview and forward it over the active WebRTC session.",
-    "webrtcDataChannels": "The RD session uses rp-ctl (reliable ordered control input) and rp-move (unreliable pointer motion) WebRTC DataChannels, gated by host-side input helper readiness."
+    "webrtcDataChannels": "The RD session uses rp-ctl (reliable ordered control input) and rp-move (unreliable pointer motion) WebRTC DataChannels. New peers use the WebRTC hello handshake to create negotiated channels with fixed stream IDs; legacy peers fall back to in-band channel creation. Input remains gated by host-side input helper readiness.",
+    "webrtcHello": { "proto": 1, "type": "hello", "ack": "hello-ack", "cap": "negotiatedInput" },
+    "negotiatedChannelIds": { "rp-ctl": 0, "rp-move": 1 }
   },
   "webviewToExtMessages": ["ready", "v2Error", "v2FirstFrame"]
 }

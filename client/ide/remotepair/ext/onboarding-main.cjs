@@ -85,6 +85,7 @@ const RENDERER_METHODS = new Set([
   'addMapping',
   'removeMapping',
   'resolveHostPath',
+  'listHostDir',
   'mount',
   'defaultMountpoint',
   'discover',

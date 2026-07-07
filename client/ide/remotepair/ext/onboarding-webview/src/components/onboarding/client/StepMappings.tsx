@@ -1,5 +1,5 @@
-import { useState, type Dispatch, type SetStateAction } from "react";
-import { ChevronRight, Folder, FolderOpen, FolderTree, Home, Plus, Trash2 } from "lucide-react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { ChevronRight, Folder, FolderOpen, FolderTree, Home, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -80,41 +80,11 @@ export function isPersistedRealMapping(mapping: Mapping): boolean {
   );
 }
 
-type FsNode = { name: string; children?: FsNode[] };
-
-// TODO(US-004/host-fs): replace HOST_FS sample with a real host listing bridge.
-const HOST_FS: FsNode = {
-  name: "~",
-  children: [
-    {
-      name: "Spaces",
-      children: [
-        { name: "Work", children: [{ name: "monorepo" }, { name: "designs" }] },
-        { name: "Personal", children: [{ name: "notes" }, { name: "photos" }] },
-      ],
-    },
-    {
-      name: "Documents",
-      children: [
-        { name: "Projects", children: [{ name: "xpair" }, { name: "site" }] },
-        { name: "Invoices" },
-      ],
-    },
-    { name: "Downloads", children: [{ name: "installers" }] },
-    { name: "Developer", children: [{ name: "sandbox" }, { name: "scripts" }] },
-    { name: "Google Drive", children: [{ name: "Shared" }, { name: "My Drive" }] },
-  ],
-};
-
 type Props = {
   mappings: Mapping[];
   setMappings: Dispatch<SetStateAction<Mapping[]>>;
   hostTarget?: string;
 };
-
-function needsHostResolution(hostPath: string) {
-  return hostPath.startsWith("~") || !hostPath.startsWith("/");
-}
 
 function mappingError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -161,26 +131,22 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
     patchInternal(mapping.id, { persisting: true, error: "" });
     try {
       let resolvedHostPath = hostPath;
-      // Resolve/validate the host folder over SSH when it needs ~-expansion OR is a sync mapping. For
-      // sync, `xpair map add` only checks the LOCAL client dir, so an absolute-but-nonexistent host path
-      // would otherwise persist a broken mapping and satisfy the completion gate. (Mount mappings are
-      // validated by the mount itself, so absolute mount paths don't need this extra round-trip.)
-      if (needsHostResolution(hostPath) || mapping.mode === "sync") {
-        const target = hostTarget?.trim();
-        if (!target) {
-          patchInternal(mapping.id, { persisting: false, error: "Select a host first." });
-          return;
-        }
-        const resolved = await window.remotepair.resolveHostPath(target, hostPath);
-        if (!resolved.ok) {
-          patchInternal(mapping.id, {
-            persisting: false,
-            error: `Host folder not found: ${hostPath}`,
-          });
-          return;
-        }
-        resolvedHostPath = resolved.path;
+      // Browser picks are already absolute, but resolveHostPath remains the trust boundary before any
+      // mapping is mounted or persisted. It also expands manual ~ paths on the host.
+      const target = hostTarget?.trim();
+      if (!target) {
+        patchInternal(mapping.id, { persisting: false, error: "Select a host first." });
+        return;
       }
+      const resolved = await window.remotepair.resolveHostPath(target, hostPath);
+      if (!resolved.ok) {
+        patchInternal(mapping.id, {
+          persisting: false,
+          error: `Host folder not found: ${hostPath}`,
+        });
+        return;
+      }
+      resolvedHostPath = resolved.path;
       let persistedClientPath = clientPath;
       if (mapping.mode === "mount") {
         const mounted = await window.remotepair.mount(resolvedHostPath);
@@ -269,6 +235,7 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
             key={m.id}
             index={i}
             mapping={m}
+            hostTarget={hostTarget}
             onChange={(p) => patch(m.id, p)}
             onPersist={() => void persist(m)}
             onRemove={() => void remove(m.id)}
@@ -287,12 +254,14 @@ export function StepMappings({ mappings, setMappings, hostTarget }: Props) {
 function MappingRow({
   index,
   mapping,
+  hostTarget,
   onChange,
   onPersist,
   onRemove,
 }: {
   index: number;
   mapping: Mapping;
+  hostTarget?: string;
   onChange: (p: Partial<Mapping>) => void;
   onPersist: () => void;
   onRemove: () => void;
@@ -384,6 +353,7 @@ function MappingRow({
 
       <HostFolderBrowser
         open={browserOpen}
+        hostTarget={hostTarget}
         onClose={() => setBrowserOpen(false)}
         onConfirm={(p) => {
           onChange({ hostPath: p });
@@ -430,52 +400,130 @@ function PathButton({
   );
 }
 
-function nodeAt(path: string[]): FsNode | null {
-  let cur: FsNode = HOST_FS;
-  for (let i = 1; i < path.length; i++) {
-    const next = cur.children?.find((c) => c.name === path[i]);
-    if (!next) return null;
-    cur = next;
-  }
-  return cur;
-}
+type HostDirEntry = { name: string; path: string };
+type HostDirListing = {
+  base: string;
+  entries: HostDirEntry[];
+  err?: string;
+  truncated?: boolean;
+};
+type HostCrumb = { label: string; path: string };
+const HOST_ROOT_PATH = "~";
+const HOST_ROOT_CRUMB: HostCrumb = { label: "~", path: HOST_ROOT_PATH };
 
 function HostFolderBrowser({
   open,
+  hostTarget,
   onClose,
   onConfirm,
 }: {
   open: boolean;
+  hostTarget?: string;
   onClose: () => void;
   onConfirm: (path: string) => void;
 }) {
   const { t } = useT();
-  const [path, setPath] = useState<string[]>(["~"]);
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [crumbs, setCrumbs] = useState<HostCrumb[]>([HOST_ROOT_CRUMB]);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [manual, setManual] = useState("");
+  const [dirCache, setDirCache] = useState<Record<string, HostDirListing>>({});
+  const [loadingPaths, setLoadingPaths] = useState<Record<string, boolean>>({});
 
-  const current = nodeAt(path);
-  const children = current?.children ?? [];
+  const currentPath = crumbs[crumbs.length - 1]?.path ?? HOST_ROOT_PATH;
+  const current = dirCache[currentPath];
+  const children = current?.entries ?? [];
+  const currentLoading = !!loadingPaths[currentPath];
 
-  const selectedPath = selectedName
-    ? [...path, selectedName].join("/").replace(/^~\//, "~/")
-    : path.join("/").replace(/^~\//, "~/");
+  const selectedDisplayPath = manual.trim() || selectedPath || current?.base || currentPath;
 
-  const enterFolder = (name: string) => {
-    setPath((p) => [...p, name]);
-    setSelectedName(null);
+  const reset = () => {
+    setCrumbs([HOST_ROOT_CRUMB]);
+    setSelectedPath(null);
+    setManual("");
+    setDirCache({});
+    setLoadingPaths({});
+  };
+
+  const close = () => {
+    reset();
+    onClose();
+  };
+
+  const loadDir = async (targetPath: string, force = false) => {
+    if (!force && dirCache[targetPath]) return !dirCache[targetPath].err;
+    const target = hostTarget?.trim();
+    if (!target) {
+      setDirCache((cache) => ({
+        ...cache,
+        [targetPath]: { base: "", entries: [], err: t("map.browseNoHost") },
+      }));
+      return false;
+    }
+    setLoadingPaths((currentLoadingPaths) => ({ ...currentLoadingPaths, [targetPath]: true }));
+    try {
+      const result = await window.remotepair.listHostDir(target, targetPath);
+      if (!result.ok) {
+        setDirCache((cache) => ({
+          ...cache,
+          [targetPath]: {
+            base: "",
+            entries: [],
+            err: result.err || t("map.browseError"),
+          },
+        }));
+        return false;
+      }
+      setDirCache((cache) => ({
+        ...cache,
+        [targetPath]: {
+          base: result.base,
+          entries: result.entries,
+          truncated: result.truncated,
+        },
+      }));
+      return true;
+    } catch (error) {
+      setDirCache((cache) => ({
+        ...cache,
+        [targetPath]: {
+          base: "",
+          entries: [],
+          err: mappingError(error),
+        },
+      }));
+      return false;
+    } finally {
+      setLoadingPaths((currentLoadingPaths) => {
+        const next = { ...currentLoadingPaths };
+        delete next[targetPath];
+        return next;
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    setCrumbs([HOST_ROOT_CRUMB]);
+    setSelectedPath(null);
+    setManual("");
+    setDirCache({});
+    setLoadingPaths({});
+    void loadDir(HOST_ROOT_PATH, true);
+    // Fetch on dialog open and when the selected host changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, hostTarget]);
+
+  const enterFolder = (entry: HostDirEntry) => {
+    setCrumbs((currentCrumbs) => [...currentCrumbs, { label: entry.name, path: entry.path }]);
+    setSelectedPath(null);
+    void loadDir(entry.path);
   };
 
   return (
     <Dialog
       open={open}
       onOpenChange={(v) => {
-        if (!v) {
-          setPath(["~"]);
-          setSelectedName(null);
-          setManual("");
-          onClose();
-        }
+        if (!v) close();
       }}
     >
       <DialogContent className="max-w-md">
@@ -484,19 +532,20 @@ function HostFolderBrowser({
         </DialogHeader>
 
         <div className="flex flex-wrap items-center gap-0.5 rounded-lg border border-border bg-muted/30 px-2 py-1.5 text-xs">
-          {path.map((seg, i) => (
-            <div key={i} className="flex items-center gap-0.5">
+          {crumbs.map((crumb, i) => (
+            <div key={`${crumb.path}-${i}`} className="flex items-center gap-0.5">
               <button
                 type="button"
                 onClick={() => {
-                  setPath(path.slice(0, i + 1));
-                  setSelectedName(null);
+                  setCrumbs(crumbs.slice(0, i + 1));
+                  setSelectedPath(null);
+                  void loadDir(crumb.path);
                 }}
                 className="rounded px-1.5 py-0.5 font-mono text-foreground hover:bg-accent"
               >
-                {seg === "~" ? <Home className="inline h-3 w-3" /> : seg}
+                {crumb.label === "~" ? <Home className="inline h-3 w-3" /> : crumb.label}
               </button>
-              {i < path.length - 1 && (
+              {i < crumbs.length - 1 && (
                 <ChevronRight className="h-3 w-3 text-muted-foreground" />
               )}
             </div>
@@ -504,19 +553,29 @@ function HostFolderBrowser({
         </div>
 
         <div className="max-h-64 min-h-32 overflow-y-auto rounded-lg border border-border bg-background">
-          {children.length === 0 ? (
+          {currentLoading && !current ? (
+            <div className="flex items-center justify-center gap-2 p-6 text-center text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {t("map.browseLoading")}
+            </div>
+          ) : current?.err ? (
+            <div className="p-6 text-center text-xs">
+              <p className="font-medium text-destructive">{t("map.browseError")}</p>
+              <p className="mt-1 break-words text-muted-foreground">{current.err}</p>
+            </div>
+          ) : children.length === 0 ? (
             <div className="p-6 text-center text-xs text-muted-foreground">
               {t("map.emptyFolder")}
             </div>
           ) : (
             children.map((c) => {
-              const hasKids = !!c.children?.length;
-              const isSelected = selectedName === c.name;
+              const isSelected = selectedPath === c.path;
+              const isLoading = !!loadingPaths[c.path];
               return (
                 <div
-                  key={c.name}
-                  onClick={() => setSelectedName(c.name)}
-                  onDoubleClick={() => hasKids && enterFolder(c.name)}
+                  key={c.path}
+                  onClick={() => setSelectedPath(c.path)}
+                  onDoubleClick={() => enterFolder(c)}
                   className={
                     "flex w-full cursor-pointer items-center gap-2 border-b border-border/50 px-3 py-2 text-left text-xs last:border-b-0 " +
                     (isSelected
@@ -530,29 +589,35 @@ function HostFolderBrowser({
                     <Folder className="h-3.5 w-3.5 text-primary/70" />
                   )}
                   <span className="flex-1 font-mono">{c.name}</span>
-                  {hasKids && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        enterFolder(c.name);
-                      }}
-                      className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-                      title={t("map.openFolder")}
-                    >
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      enterFolder(c);
+                    }}
+                    disabled={isLoading}
+                    className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:cursor-wait"
+                    title={t("map.openFolder")}
+                  >
+                    {isLoading ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
                       <ChevronRight className="h-3 w-3" />
-                    </button>
-                  )}
+                    )}
+                  </button>
                 </div>
               );
             })
           )}
         </div>
+        {current?.truncated ? (
+          <p className="text-[11px] text-muted-foreground">{t("map.browseTruncated")}</p>
+        ) : null}
 
         <div className="space-y-1">
           <div className="text-xs text-muted-foreground">
             {t("map.selected")}{" "}
-            <span className="font-mono text-foreground">{manual.trim() || selectedPath}</span>
+            <span className="break-all font-mono text-foreground">{selectedDisplayPath}</span>
           </div>
           <input
             value={manual}
@@ -564,16 +629,14 @@ function HostFolderBrowser({
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onClose}>
+          <Button variant="ghost" size="sm" onClick={close}>
             {t("map.cancel")}
           </Button>
           <Button
             size="sm"
             onClick={() => {
-              onConfirm(manual.trim() || selectedPath);
-              setPath(["~"]);
-              setSelectedName(null);
-              setManual("");
+              onConfirm(selectedDisplayPath);
+              reset();
             }}
           >
             {t("map.chooseThis")}

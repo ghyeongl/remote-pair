@@ -25,8 +25,8 @@ test("Remote Desktop forwards click and keyboard input and can request a fresh f
   assert.match(extension, /msg\.type === "refresh"[\s\S]*this\._stopAll\(\);[\s\S]*this\._startStream\(\);/);
 
   assert.match(hostReadme, /rp-ctl[\s\S]*rp-move[\s\S]*rp-input-inject/);
-  assert.match(webview, /createDataChannel\(["']rp-ctl["']/);
-  assert.match(webview, /createDataChannel\(["']rp-move["']/);
+  assert.match(webview, /createDataChannel\(["']rp-ctl["'],\s*\{ negotiated: true, id: 0 \}\)/);
+  assert.match(webview, /createDataChannel\(["']rp-move["'],\s*\{ negotiated: true, id: 1, ordered: false, maxRetransmits: 0 \}\)/);
   assert.match(webview, /addEventListener\(["']pointerdown["'][\s\S]*\bt:\s*["']d["']/);
   assert.match(webview, /addEventListener\(["']pointermove["'][\s\S]*\bt:\s*["']m["']/);
   assert.match(webview, /addEventListener\(["']pointerup["'][\s\S]*\bt:\s*["']u["']/);
