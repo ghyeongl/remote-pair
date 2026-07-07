@@ -163,14 +163,23 @@ fn render_status_json(raw: &str, now_ts: i64) -> String {
 
 fn resolve_host(args: &[String], client_env_path: Option<&Path>) -> String {
     if let Some(host) = parse_host_arg(args) {
-        return host;
+        return valid_host_or_empty(host);
     }
     if let Some(host) = non_empty_env("REMOTE_HOST") {
-        return host;
+        return valid_host_or_empty(host);
     }
     client_env_path
         .and_then(|path| config::get_cli(path, "host").ok())
+        .filter(|host| config::valid_host(host))
         .unwrap_or_default()
+}
+
+fn valid_host_or_empty(host: String) -> String {
+    if config::valid_host(&host) {
+        host
+    } else {
+        String::new()
+    }
 }
 
 fn parse_host_arg(args: &[String]) -> Option<String> {
@@ -198,11 +207,22 @@ fn build_ssh_argv(os: platform::Os, host: &str, remote_cmd: &str) -> Vec<String>
         "-o".to_string(),
         "ConnectionAttempts=1".to_string(),
     ]);
-    argv.extend(
-        os.ssh_mux_neutralizer_args()
-            .iter()
-            .map(|arg| arg.to_string()),
-    );
+    if os.supports_multiplexing() {
+        argv.extend([
+            "-o".to_string(),
+            "ControlMaster=auto".to_string(),
+            "-o".to_string(),
+            format!("ControlPath={}", ssh_control_path()),
+            "-o".to_string(),
+            "ControlPersist=300".to_string(),
+        ]);
+    } else {
+        argv.extend(
+            os.ssh_mux_neutralizer_args()
+                .iter()
+                .map(|arg| arg.to_string()),
+        );
+    }
     argv.extend([
         "-o".to_string(),
         "PreferredAuthentications=publickey".to_string(),
@@ -216,6 +236,11 @@ fn build_ssh_argv(os: platform::Os, host: &str, remote_cmd: &str) -> Vec<String>
         remote_cmd.to_string(),
     ]);
     argv
+}
+
+fn ssh_control_path() -> String {
+    let tag = non_empty_env("RP_SSH_CM_TAG").unwrap_or_else(|| "x".to_string());
+    format!("/tmp/rp-cm-{tag}-%C")
 }
 
 fn command_substitution_empty(raw: &str) -> bool {
@@ -795,5 +820,22 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(rp_host_dir);
+    }
+
+    #[test]
+    fn unix_ssh_argv_reuses_onboarding_control_master() {
+        with_env(&[("RP_SSH_CM_TAG", Some("bridge"))], || {
+            let argv = build_ssh_argv(Os::Mac, "mac-mini", build_status_remote_cmd());
+
+            assert!(argv
+                .windows(2)
+                .any(|args| args == ["-o", "ControlMaster=auto"]));
+            assert!(argv
+                .windows(2)
+                .any(|args| args == ["-o", "ControlPath=/tmp/rp-cm-bridge-%C"]));
+            assert!(argv
+                .windows(2)
+                .any(|args| args == ["-o", "ControlPersist=300"]));
+        });
     }
 }

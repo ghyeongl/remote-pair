@@ -222,8 +222,14 @@ mod tests {
     fn identity_fallback_when_no_map_matches() {
         let maps = parse_maps("/client::/host");
         assert_eq!(
-            map_to_host("/other/project", &maps).unwrap(),
+            map_to_host_for_os("/other/project", &maps, Os::Mac).unwrap(),
             "/other/project"
+        );
+        assert_eq!(
+            map_to_host_for_os(r"C:\other\project", &maps, Os::Windows),
+            Err(MapError::MappingRequired {
+                path: "C:/other/project".to_string(),
+            })
         );
     }
 
@@ -257,7 +263,18 @@ mod tests {
     #[test]
     fn prefix_match_requires_path_boundary() {
         let maps = parse_maps("/sbx/a::/x");
-        assert_eq!(map_to_host("/sbx/ab", &maps).unwrap(), "/sbx/ab");
+        assert_eq!(
+            map_to_host_for_os("/sbx/ab", &maps, Os::Mac).unwrap(),
+            "/sbx/ab"
+        );
+
+        let maps = parse_maps(r"C:\sbx\a::/x");
+        assert_eq!(
+            map_to_host_for_os(r"C:\sbx\ab", &maps, Os::Windows),
+            Err(MapError::MappingRequired {
+                path: "C:/sbx/ab".to_string(),
+            })
+        );
     }
 
     #[test]

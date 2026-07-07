@@ -4,6 +4,7 @@
 //! The interactive terminal handoff remains a small process-spawn shim; argument parsing,
 //! target selection, SSH argv construction, and remote session probing stay pure/testable.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -16,6 +17,8 @@ use crate::transport::Transport;
 const USAGE: &str = "attach <session-name>";
 const REMOTE_BIN: &str = "$HOME/.local/bin";
 const TMUX_AQUA: &str = "tmux-aqua";
+const MOSH_SERVER: &str = "$HOME/.local/bin/mosh-server";
+const MOSH_TMUX_AQUA: &str = "$HOME/.local/bin/tmux-aqua";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -94,6 +97,52 @@ pub(crate) fn build_remote_attach_argv_with_identity(
     );
     argv.push(host.to_string());
     argv.push(remote_attach_cmd(aqua_sock, session));
+    argv
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoshCommand {
+    pub program: String,
+    pub client_arg: Option<String>,
+}
+
+pub fn build_mosh_attach_argv(
+    mosh: &MoshCommand,
+    host: &str,
+    session: &str,
+    aqua_sock: &str,
+    identity_args: &[String],
+    remote_home: Option<&str>,
+) -> Vec<String> {
+    let remote_home = remote_home.map(|home| home.trim_end_matches('/'));
+    let server = non_empty_env("MOSH_SERVER").unwrap_or_else(|| match remote_home {
+        Some(home) if !home.is_empty() => format!("{home}/.local/bin/mosh-server"),
+        _ => MOSH_SERVER.to_string(),
+    });
+    let tmux_aqua = match remote_home {
+        Some(home) if !home.is_empty() => format!("{home}/.local/bin/tmux-aqua"),
+        _ => MOSH_TMUX_AQUA.to_string(),
+    };
+
+    let mut argv = vec![
+        mosh.program.clone(),
+        format!("--ssh={}", ssh_command_for_mosh(identity_args)),
+    ];
+    if let Some(client_arg) = &mosh.client_arg {
+        argv.push(format!("--client={client_arg}"));
+    }
+    argv.extend([
+        format!("--server={server}"),
+        host.to_string(),
+        "--".to_string(),
+        tmux_aqua,
+        "-S".to_string(),
+        aqua_sock.to_string(),
+        "attach".to_string(),
+        "-d".to_string(),
+        "-t".to_string(),
+        format!("={session}"),
+    ]);
     argv
 }
 
@@ -247,12 +296,56 @@ fn run_remote_attach(
     }
 
     emit_terminal_title(session);
-    spawn_and_wait(&build_remote_attach_argv_with_identity(
+    run_remote_attach_handoff(
+        path,
         Os::current(),
         host,
         session,
         aqua_sock,
         &session::pairing_identity_args(),
+        None,
+    )
+}
+
+pub(crate) fn run_remote_attach_handoff(
+    path: &Path,
+    os: Os,
+    host: &str,
+    session: &str,
+    aqua_sock: &str,
+    identity_args: &[String],
+    remote_home: Option<&str>,
+) -> ExitCode {
+    if os == Os::Windows {
+        // Win32 stays SSH-only: there is no supported bundled mosh-client/mosh-server story
+        // for the native Windows client yet, and SSH mux is neutralized separately.
+        return spawn_and_wait(&build_remote_attach_argv_with_identity(
+            os,
+            host,
+            session,
+            aqua_sock,
+            identity_args,
+        ));
+    }
+
+    if let Some(mosh) = probe_mosh(path) {
+        let argv =
+            build_mosh_attach_argv(&mosh, host, session, aqua_sock, identity_args, remote_home);
+        let code = spawn_and_wait_code(&argv);
+        if code == 0 {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("mosh attach failed (rc={code}) -> falling back to ssh -t ...");
+    } else {
+        println!("mosh not found -> falling back to ssh -t (attach tmux \"{session}\") ...");
+    }
+
+    spawn_and_wait(&build_remote_attach_argv_with_identity(
+        os,
+        host,
+        session,
+        aqua_sock,
+        identity_args,
     ))
 }
 
@@ -272,15 +365,29 @@ fn has_local_session(tmux_aqua_bin: &str, aqua_sock: &str, session: &str) -> boo
 }
 
 fn spawn_and_wait(argv: &[String]) -> ExitCode {
+    ExitCode::from(exit_code_from_i32(spawn_and_wait_code(argv)))
+}
+
+fn spawn_and_wait_code(argv: &[String]) -> i32 {
     let Some((program, args)) = argv.split_first() else {
-        return ExitCode::from(1);
+        return 1;
     };
     match Command::new(program).args(args).status() {
-        Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+        Ok(status) => status.code().unwrap_or(1),
         Err(err) => {
             eprintln!("{program}: {err}");
-            ExitCode::from(1)
+            1
         }
+    }
+}
+
+fn exit_code_from_i32(code: i32) -> u8 {
+    if code == 0 {
+        0
+    } else if (1..=255).contains(&code) {
+        code as u8
+    } else {
+        1
     }
 }
 
@@ -290,6 +397,7 @@ fn emit_terminal_title(session: &str) {
 
 fn resolve_host(path: &Path) -> std::io::Result<String> {
     if let Some(host) = non_empty_env("REMOTE_HOST") {
+        config::require_valid_host(&host)?;
         return Ok(host);
     }
     config::get_cli(path, "host")
@@ -329,6 +437,83 @@ fn resolve_tmux_aqua_bin(path: &Path) -> std::io::Result<String> {
     Ok(normalize_windows_exe(local_bin.join(TMUX_AQUA))
         .to_string_lossy()
         .into_owned())
+}
+
+fn resolve_local_bin(path: &Path) -> std::io::Result<PathBuf> {
+    if let Some(local_bin) = non_empty_env("LOCAL_BIN") {
+        return Ok(PathBuf::from(local_bin));
+    }
+    if let Some(local_bin) = config::get(path, "LOCAL_BIN")?.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(local_bin));
+    }
+    Ok(home_dir()?.join(".local").join("bin"))
+}
+
+fn probe_mosh(path: &Path) -> Option<MoshCommand> {
+    let mosh = find_on_path("mosh")?;
+    let local_bin = resolve_local_bin(path).ok()?;
+    let client_arg = if let Some(client) = non_empty_env("MOSH_CLIENT") {
+        Some(client)
+    } else {
+        let local_mosh = local_bin.join("mosh");
+        let local_client = local_bin.join("mosh-client");
+        let local_mosh_s = path_string(&local_mosh);
+        if !is_symlink(&local_mosh) && mosh == local_mosh_s && program_present(&local_client) {
+            Some(path_string(local_client))
+        } else {
+            None
+        }
+    };
+
+    Some(MoshCommand {
+        program: mosh,
+        client_arg,
+    })
+}
+
+fn find_on_path(program: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if program_present(&candidate) {
+            return Some(path_string(candidate));
+        }
+        #[cfg(windows)]
+        {
+            let exe = candidate.with_extension("exe");
+            if program_present(&exe) {
+                return Some(path_string(exe));
+            }
+        }
+    }
+    None
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn ssh_command_for_mosh(identity_args: &[String]) -> String {
+    let mut parts = vec!["ssh".to_string()];
+    parts.extend(identity_args.iter().map(|arg| local_shell_word(arg)));
+    parts.join(" ")
+}
+
+fn local_shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | '='))
+    {
+        return value.to_string();
+    }
+    remote_quote::posix_single_quote(value)
+}
+
+fn path_string(path: impl AsRef<Path>) -> String {
+    path.as_ref().to_string_lossy().into_owned()
 }
 
 fn normalize_windows_exe(path: PathBuf) -> PathBuf {
@@ -391,6 +576,47 @@ fn non_empty_env(key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::transport::MockTransport;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(values: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let saved = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn with_env<T>(values: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = EnvGuard::set(values);
+        f()
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_string()).collect()
@@ -559,5 +785,42 @@ mod tests {
             "$HOME/.local/bin/tmux-aqua -S '/tmp/aqua sock' has-session -t '=alpha'"
         );
         assert_eq!(calls[1], calls[0]);
+    }
+
+    #[test]
+    fn builds_mosh_attach_argv_with_remote_home_and_identity() {
+        with_env(&[("MOSH_SERVER", None)], || {
+            let mosh = MoshCommand {
+                program: "/opt/xpair/bin/mosh".to_string(),
+                client_arg: Some("/opt/xpair/bin/mosh-client".to_string()),
+            };
+            let argv = build_mosh_attach_argv(
+                &mosh,
+                "alice@mac.local",
+                "alpha_1",
+                "/tmp/aqua sock",
+                &strings(&["-i", "/Users/me/.xpair/host/pairing key"]),
+                Some("/Users/alice/"),
+            );
+
+            assert_eq!(
+                argv,
+                strings(&[
+                    "/opt/xpair/bin/mosh",
+                    "--ssh=ssh -i '/Users/me/.xpair/host/pairing key'",
+                    "--client=/opt/xpair/bin/mosh-client",
+                    "--server=/Users/alice/.local/bin/mosh-server",
+                    "alice@mac.local",
+                    "--",
+                    "/Users/alice/.local/bin/tmux-aqua",
+                    "-S",
+                    "/tmp/aqua sock",
+                    "attach",
+                    "-d",
+                    "-t",
+                    "=alpha_1",
+                ])
+            );
+        });
     }
 }

@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
@@ -134,6 +134,13 @@ fn parse_install_args_with_default_host(
         ));
     }
     normalize_user_qualified_host(&mut host, &mut account);
+    let target = match account.as_deref().filter(|account| !account.is_empty()) {
+        Some(account) => format!("{account}@{host}"),
+        None => host.clone(),
+    };
+    if !config::valid_host(&target) {
+        return Err((format!("invalid host: {target}"), 2));
+    }
     if bootstrap && sha256.as_deref().unwrap_or_default().is_empty() {
         return Err((
             "--bootstrap requires --sha256 <hex> (no unverified curl|bash)".to_string(),
@@ -356,7 +363,7 @@ pub fn run(args: &[String]) -> ExitCode {
     };
 
     let os = Os::current();
-    let transport = SshTransport::new(os, &settings, askpass.as_ref().map(|helper| helper.path()));
+    let transport = SshTransport::new(os, &settings, askpass.as_ref());
     let io = LocalInstallIo;
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
@@ -893,6 +900,8 @@ fn contains_auth_denied(output: &str) -> bool {
 struct AskpassTemp {
     path: PathBuf,
     data_path: Option<PathBuf>,
+    fifo_path: Option<PathBuf>,
+    writer: Option<Child>,
 }
 
 impl AskpassTemp {
@@ -903,6 +912,7 @@ impl AskpassTemp {
             timestamp_nanos()
         ));
         fs::create_dir_all(&dir)?;
+        chmod_best_effort(&dir, 0o700);
         #[cfg(windows)]
         let path = dir.join("askpass.cmd");
         #[cfg(not(windows))]
@@ -910,6 +920,8 @@ impl AskpassTemp {
 
         #[cfg(windows)]
         let data_path = {
+            // Windows has no portable FIFO primitive for SSH_ASKPASS. Keep the secret in a
+            // private temp file only on this platform and scrub it aggressively on drop.
             let data_path = dir.join(WINDOWS_ASKPASS_DATA_FILE);
             if let Err(error) = fs::write(&data_path, windows_askpass_data(password)) {
                 let _ = fs::remove_dir_all(&dir);
@@ -920,44 +932,160 @@ impl AskpassTemp {
         };
         #[cfg(not(windows))]
         let data_path = None;
+        #[cfg(not(windows))]
+        let fifo_path = {
+            let fifo_path = dir.join("pw.fifo");
+            let status = Command::new("mkfifo")
+                .arg("-m")
+                .arg("600")
+                .arg(&fifo_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(_) => {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(io::Error::other("mkfifo failed"));
+                }
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(error);
+                }
+            }
+            Some(fifo_path)
+        };
+        #[cfg(windows)]
+        let fifo_path = None;
 
         #[cfg(windows)]
         let body = windows_askpass_cmd_body().to_string();
         #[cfg(not(windows))]
-        let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' {}\n",
-            remote_quote::posix_single_quote(password)
-        );
+        let body = unix_askpass_sh_body(fifo_path.as_ref().expect("unix fifo path is set"));
 
         if let Err(error) = fs::write(&path, body) {
             #[cfg(windows)]
             if let Some(data_path) = &data_path {
                 let _ = fs::remove_file(data_path);
             }
+            if let Some(fifo_path) = &fifo_path {
+                let _ = fs::remove_file(fifo_path);
+            }
             let _ = fs::remove_dir_all(&dir);
             return Err(error);
         }
         chmod_best_effort(&path, 0o700);
-        Ok(AskpassTemp { path, data_path })
+        #[cfg(not(windows))]
+        let writer = match spawn_unix_fifo_writer(
+            fifo_path.as_ref().expect("unix fifo path is set"),
+            password,
+        ) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                if let Some(fifo_path) = &fifo_path {
+                    let _ = fs::remove_file(fifo_path);
+                }
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_dir_all(&dir);
+                return Err(error);
+            }
+        };
+        #[cfg(windows)]
+        let writer = None;
+        Ok(AskpassTemp {
+            path,
+            data_path,
+            fifo_path,
+            writer,
+        })
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
+
+    fn fifo_path(&self) -> Option<&Path> {
+        self.fifo_path.as_deref()
+    }
 }
 
 impl Drop for AskpassTemp {
     fn drop(&mut self) {
+        if let Some(mut writer) = self.writer.take() {
+            match writer.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    let _ = writer.kill();
+                    let _ = writer.wait();
+                }
+                Err(_) => {}
+            }
+        }
         chmod_best_effort(&self.path, 0o600);
         if let Some(data_path) = &self.data_path {
             chmod_best_effort(data_path, 0o600);
             let _ = fs::remove_file(data_path);
+        }
+        if let Some(fifo_path) = &self.fifo_path {
+            let _ = fs::remove_file(fifo_path);
         }
         let _ = fs::remove_file(&self.path);
         if let Some(parent) = self.path.parent() {
             let _ = fs::remove_dir(parent);
         }
     }
+}
+
+#[cfg(not(windows))]
+fn spawn_unix_fifo_writer(fifo_path: &Path, password: &str) -> io::Result<Child> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("cat > \"$1\"")
+        .arg("xpair-askpass-fifo-writer")
+        .arg(fifo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let write_result = child.stdin.as_mut().map_or_else(
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "writer stdin unavailable",
+            ))
+        },
+        |stdin| {
+            stdin.write_all(password.as_bytes())?;
+            stdin.write_all(b"\n")
+        },
+    );
+    child.stdin.take();
+
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    Ok(child)
+}
+
+#[cfg(not(windows))]
+fn unix_askpass_sh_body(fifo_path: &Path) -> String {
+    format!(
+        concat!(
+            "#!/bin/sh\n",
+            "fifo=${{RP_ASKPASS_FIFO:-{fifo}}}\n",
+            "[ -p \"$fifo\" ] || exit 2\n",
+            "_secret=\n",
+            "IFS= read -r _secret < \"$fifo\" || exit 3\n",
+            "[ -n \"$_secret\" ] || exit 3\n",
+            "printf '%s\\n' \"$_secret\"\n"
+        ),
+        fifo = remote_quote::posix_single_quote(&path_string(fifo_path)),
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -1168,12 +1296,17 @@ struct SshTransport {
     os: platform::Os,
     control_path: Option<PathBuf>,
     askpass: Option<PathBuf>,
+    askpass_fifo: Option<PathBuf>,
     password_phase: Cell<bool>,
     pairing_key: Option<PathBuf>,
 }
 
 impl SshTransport {
-    fn new(os: platform::Os, settings: &RuntimeSettings, askpass: Option<&Path>) -> SshTransport {
+    fn new(
+        os: platform::Os,
+        settings: &RuntimeSettings,
+        askpass: Option<&AskpassTemp>,
+    ) -> SshTransport {
         let control_path = if os.supports_multiplexing() {
             Some(temp_control_path())
         } else {
@@ -1187,7 +1320,8 @@ impl SshTransport {
         SshTransport {
             os,
             control_path,
-            askpass: askpass.map(Path::to_path_buf),
+            askpass: askpass.map(|helper| helper.path().to_path_buf()),
+            askpass_fifo: askpass.and_then(|helper| helper.fifo_path().map(Path::to_path_buf)),
             password_phase: Cell::new(askpass.is_some()),
             pairing_key,
         }
@@ -1200,6 +1334,9 @@ impl SshTransport {
             if let Some(askpass) = &self.askpass {
                 command.env("SSH_ASKPASS", askpass);
                 command.env("SSH_ASKPASS_REQUIRE", "force");
+                if let Some(fifo) = &self.askpass_fifo {
+                    command.env("RP_ASKPASS_FIFO", fifo);
+                }
                 if std::env::var_os("DISPLAY").is_none() {
                     command.env("DISPLAY", ":0");
                 }
@@ -1637,11 +1774,47 @@ mod tests {
         let helper = AskpassTemp {
             path: script.clone(),
             data_path: Some(data.clone()),
+            fifo_path: None,
+            writer: None,
         };
         drop(helper);
 
         assert!(!script.exists());
         assert!(!data.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_askpass_script_reads_fifo_without_embedding_secret() {
+        let fifo = PathBuf::from("/tmp/xpair-test-fifo");
+        let body = unix_askpass_sh_body(&fifo);
+
+        assert!(body.contains("RP_ASKPASS_FIFO"));
+        assert!(body.contains("/tmp/xpair-test-fifo"));
+        assert!(!body.contains("correct horse battery staple"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_askpass_create_uses_fifo_without_password_file() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let password = "correct horse battery staple";
+        let helper = AskpassTemp::create(password).unwrap();
+        let script = helper.path.clone();
+        let fifo = helper.fifo_path.clone().unwrap();
+        let parent = script.parent().unwrap().to_path_buf();
+
+        assert!(script.is_file());
+        assert!(fs::metadata(&fifo).unwrap().file_type().is_fifo());
+        assert!(helper.data_path.is_none());
+        assert!(!fs::read_to_string(&script).unwrap().contains(password));
+
+        drop(helper);
+
+        assert!(!script.exists());
+        assert!(!fifo.exists());
+        assert!(!parent.exists());
     }
 
     #[test]

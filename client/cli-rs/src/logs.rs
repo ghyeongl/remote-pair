@@ -297,7 +297,8 @@ impl RuntimeSettings {
         if local_host_capable(&host_dir, &app_name, FORWARD_APP) {
             local_log_dirs.push(host_dir.join("logs"));
         }
-        let remote_host = non_empty_value(client_env_path, "REMOTE_HOST");
+        let remote_host =
+            non_empty_value(client_env_path, "REMOTE_HOST").filter(|host| config::valid_host(host));
 
         RuntimeSettings {
             local_log_dirs,

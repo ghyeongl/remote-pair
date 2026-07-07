@@ -117,6 +117,12 @@ pub fn session_name_for(host_dir: &str) -> String {
     normalize_session_name(&proj_base(host_dir))
 }
 
+/// Runtime variant of [`session_name_for`] that mirrors the bash `_readable` pipeline for
+/// non-ASCII basenames without invoking network-backed translation.
+fn session_name_for_local_tools(host_dir: &str) -> String {
+    normalize_session_name(&proj_base_with_exec(host_dir, &RealNameExec))
+}
+
 /// Derive the default remote tmux session name for the mapped host dir.
 ///
 /// The bash launcher computes `REMOTE_PROJ="${REMOTE_HOST}_$(_proj_base "$HOST_DIR")"`
@@ -124,6 +130,16 @@ pub fn session_name_for(host_dir: &str) -> String {
 /// `_N` when `_1` already has attached clients.
 pub fn remote_session_name_for(host: &str, host_dir: &str) -> String {
     format!("{}_1", remote_session_base_for(host, host_dir))
+}
+
+fn remote_session_name_for_local_tools(host: &str, host_dir: &str) -> String {
+    format!(
+        "{}_1",
+        normalize_session_name(&format!(
+            "{host}_{}",
+            proj_base_with_exec(host_dir, &RealNameExec)
+        ))
+    )
 }
 
 fn remote_session_base_for(host: &str, host_dir: &str) -> String {
@@ -136,6 +152,13 @@ fn remote_session_base_for(host: &str, host_dir: &str) -> String {
 /// and then normalizes `.`/`:` in `client/cli/xpair-launch:504-509`.
 pub fn local_session_base_for(local_host: &str, project_dir: &str) -> String {
     normalize_session_name(&format!("{local_host}_{}", session_name_for(project_dir)))
+}
+
+fn local_session_base_for_local_tools(local_host: &str, project_dir: &str) -> String {
+    normalize_session_name(&format!(
+        "{local_host}_{}",
+        session_name_for_local_tools(project_dir)
+    ))
 }
 
 /// Choose the local tmux-aqua session using the launcher's `_local_next_n` policy.
@@ -217,22 +240,6 @@ pub fn build_remote_launch_attach_argv(
     crate::attach::build_remote_attach_argv(os, host, session, aqua_sock)
 }
 
-fn build_remote_launch_attach_argv_with_identity(
-    os: Os,
-    host: &str,
-    aqua_sock: &str,
-    session: &str,
-    identity_args: &[String],
-) -> Vec<String> {
-    crate::attach::build_remote_attach_argv_with_identity(
-        os,
-        host,
-        session,
-        aqua_sock,
-        identity_args,
-    )
-}
-
 /// Build the local argv for the macOS tmux-aqua attach handoff.
 pub fn build_local_launch_attach_argv(
     tmux_aqua_bin: &str,
@@ -274,6 +281,26 @@ pub fn ensure_remote_session(
     fresh: bool,
     engine: Engine,
 ) -> Result<String, String> {
+    Ok(
+        ensure_remote_session_info(transport, host, aqua_sock, session, host_dir, fresh, engine)?
+            .session,
+    )
+}
+
+struct RemoteSessionInfo {
+    session: String,
+    remote_home: Option<String>,
+}
+
+fn ensure_remote_session_info(
+    transport: &dyn Transport,
+    host: &str,
+    aqua_sock: &str,
+    session: &str,
+    host_dir: &str,
+    fresh: bool,
+    engine: Engine,
+) -> Result<RemoteSessionInfo, String> {
     let remote_cmd = build_ensure_session_remote_cmd_for_engine(
         engine, aqua_sock, session, host_dir, fresh, !fresh,
     );
@@ -282,7 +309,10 @@ pub fn ensure_remote_session(
         .map_err(|err| format!("remote launch setup failed: {err}"))?;
 
     if out.code == 0 {
-        Ok(extract_session_marker(&out.stdout).unwrap_or_else(|| session.to_string()))
+        Ok(RemoteSessionInfo {
+            session: extract_session_marker(&out.stdout).unwrap_or_else(|| session.to_string()),
+            remote_home: extract_home_marker(&out.stdout),
+        })
     } else if setup_output_without_markers(&out.stdout).is_empty() {
         Err(format!("remote launch setup failed (exit={})", out.code))
     } else {
@@ -385,7 +415,7 @@ fn run_local_macos(path: &Path, host: &str, req: &LaunchReq) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let proj = local_session_base_for(&local_host, &project_dir);
+    let proj = local_session_base_for_local_tools(&local_host, &project_dir);
     let existing = list_local_sessions(&tmux_aqua_bin, &aqua_sock);
     let plan = pick_local_session(&proj, &existing, req.fresh);
 
@@ -468,7 +498,7 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
             return ExitCode::from(1);
         }
     };
-    let session = remote_session_name_for(host, &host_dir);
+    let session = remote_session_name_for_local_tools(host, &host_dir);
     let transport = SshTransport;
     let engine = match resolve_remote_engine(path, req, host, &transport) {
         Ok(engine) => engine,
@@ -482,10 +512,10 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         eprintln!("{message}");
         return ExitCode::from(code);
     }
-    let session = match ensure_remote_session(
+    let remote_info = match ensure_remote_session_info(
         &transport, host, &aqua_sock, &session, &host_dir, req.fresh, engine,
     ) {
-        Ok(session) => session,
+        Ok(info) => info,
         Err(err) => {
             eprintln!("xpair launch: {err}");
             return ExitCode::from(1);
@@ -495,14 +525,16 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         let _ = config::set(path, "LOCAL_MODE", "0");
     }
 
-    emit_terminal_title(&session);
-    spawn_and_wait(&build_remote_launch_attach_argv_with_identity(
+    emit_terminal_title(&remote_info.session);
+    crate::attach::run_remote_attach_handoff(
+        path,
         Os::current(),
         host,
+        &remote_info.session,
         &aqua_sock,
-        &session,
         &session::pairing_identity_args(),
-    ))
+        remote_info.remote_home.as_deref(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -940,7 +972,11 @@ fn build_remote_respawn_script(engine: Engine, session: &str, cl_continue: bool)
 
 fn wrap_remote_setup_cmd(aqua_sock: &str, body: &str) -> String {
     let sock = remote_quote::posix_single_quote(aqua_sock);
-    format!("{}{}", remote_setup_preamble(&sock), body)
+    format!(
+        "{}{}; printf '__HOME__:%s\\n' \"$HOME\"",
+        remote_setup_preamble(&sock),
+        body
+    )
 }
 
 fn remote_setup_preamble(sock_q: &str) -> String {
@@ -1072,6 +1108,15 @@ fn extract_session_marker(stdout: &str) -> Option<String> {
         .filter(|session| !session.is_empty())
 }
 
+fn extract_home_marker(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("__HOME__:"))
+        .next_back()
+        .map(str::to_string)
+        .filter(|home| !home.is_empty())
+}
+
 fn setup_output_without_markers(stdout: &str) -> String {
     stdout
         .lines()
@@ -1164,11 +1209,117 @@ fn local_session_attached(existing: &[(String, bool)], proj: &str, n: usize) -> 
 
 fn proj_base(host_dir: &str) -> String {
     let basename = posix_basename(host_dir);
-    let mut name = sanitize_readable_name(&basename);
+    proj_base_with_readable(host_dir, &basename)
+}
+
+fn proj_base_with_exec(host_dir: &str, exec: &dyn NameExec) -> String {
+    let basename = posix_basename(host_dir);
+    let readable = readable_basename(&basename, exec);
+    proj_base_with_readable(host_dir, &readable)
+}
+
+fn proj_base_with_readable(host_dir: &str, readable: &str) -> String {
+    let mut name = sanitize_readable_name(readable);
     if name.is_empty() {
         name = "session".to_string();
     }
     format!("{}_{}", name, sha256_hex_prefix(host_dir, 5))
+}
+
+trait NameExec {
+    fn output(&self, program: &Path, arg: &str) -> Option<String>;
+}
+
+struct RealNameExec;
+
+impl NameExec for RealNameExec {
+    fn output(&self, program: &Path, arg: &str) -> Option<String> {
+        let out = Command::new(program)
+            .arg(arg)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+}
+
+fn readable_basename(basename: &str, exec: &dyn NameExec) -> String {
+    if readable_fast_path(basename) {
+        return basename.to_string();
+    }
+
+    let cache_file = readable_cache_file(basename);
+    if let Some(cache_file) = &cache_file {
+        if let Ok(value) = fs::read_to_string(cache_file) {
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+
+    if let Some(romanizer) = romanizer_path().filter(|path| program_present(path)) {
+        if let Some(value) = exec.output(&romanizer, basename) {
+            if let Some(cache_file) = &cache_file {
+                write_readable_cache(cache_file, &value);
+            }
+            return value;
+        }
+    }
+
+    if let Some(cache_file) = &cache_file {
+        write_readable_cache(cache_file, basename);
+    }
+    basename.to_string()
+}
+
+fn readable_fast_path(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+fn readable_cache_file(basename: &str) -> Option<PathBuf> {
+    let client_dir = client_dir_for_tools()?;
+    Some(
+        client_dir
+            .join("session-names")
+            .join(sha256_hex_prefix(basename, 12)),
+    )
+}
+
+fn romanizer_path() -> Option<PathBuf> {
+    if let Some(path) = non_empty_env("HROMANIZE") {
+        return Some(PathBuf::from(path));
+    }
+    Some(client_dir_for_tools()?.join("bin").join("hangul-romanize"))
+}
+
+fn client_dir_for_tools() -> Option<PathBuf> {
+    if let Some(dir) = non_empty_env("RP_CLIENT_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    config::default_client_env_path()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+fn write_readable_cache(path: &Path, value: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, value);
 }
 
 fn posix_basename(path: &str) -> String {
@@ -1347,6 +1498,7 @@ fn absolutize_existing_dir(dir: &str) -> std::io::Result<PathBuf> {
 
 fn resolve_host(path: &Path) -> std::io::Result<String> {
     if let Some(host) = non_empty_env("REMOTE_HOST") {
+        config::require_valid_host(&host)?;
         return Ok(host);
     }
     config::get_cli(path, "host")
@@ -1606,6 +1758,11 @@ fn spawn_and_wait(argv: &[String]) -> ExitCode {
 mod tests {
     use super::*;
     use crate::transport::MockTransport;
+    use std::cell::RefCell;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct TestPath {
         path: PathBuf,
@@ -1629,6 +1786,106 @@ mod tests {
     impl Drop for TestPath {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> TestDir {
+            let path = std::env::temp_dir()
+                .join(format!("xpair-launch-test-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            TestDir { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(values: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let saved = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn with_env<T>(values: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = EnvGuard::set(values);
+        f()
+    }
+
+    fn path_string(path: impl AsRef<Path>) -> String {
+        path.as_ref().to_string_lossy().into_owned()
+    }
+
+    struct FakeNameExec {
+        outputs: RefCell<Vec<Option<String>>>,
+        calls: RefCell<Vec<(String, String)>>,
+    }
+
+    impl FakeNameExec {
+        fn new(outputs: Vec<Option<&str>>) -> FakeNameExec {
+            FakeNameExec {
+                outputs: RefCell::new(
+                    outputs
+                        .into_iter()
+                        .map(|value| value.map(str::to_string))
+                        .collect(),
+                ),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl NameExec for FakeNameExec {
+        fn output(&self, program: &Path, arg: &str) -> Option<String> {
+            self.calls
+                .borrow_mut()
+                .push((path_string(program), arg.to_string()));
+            self.outputs.borrow_mut().remove(0)
+        }
+    }
+
+    fn make_executable(path: &Path) {
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
         }
     }
 
@@ -1898,6 +2155,67 @@ mod tests {
         assert_eq!(
             remote_session_name_for("alice@mac.local", "/Users/me/project"),
             "alice_mac_local_project_8779b_1"
+        );
+    }
+
+    #[test]
+    fn readable_cache_wins_before_romanizer_for_non_ascii_basename() {
+        let tmp = TestDir::new("readable-cache");
+        let cache_dir = tmp.path.join("session-names");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(
+            cache_dir.join(sha256_hex_prefix("프로젝트", 12)),
+            "cached-project",
+        )
+        .unwrap();
+        let exec = FakeNameExec::new(vec![Some("romanized-project")]);
+        let client_dir = path_string(&tmp.path);
+
+        with_env(
+            &[("RP_CLIENT_DIR", Some(&client_dir)), ("HROMANIZE", None)],
+            || {
+                assert_eq!(
+                    proj_base_with_exec("/Users/me/프로젝트", &exec),
+                    format!(
+                        "cached-project_{}",
+                        sha256_hex_prefix("/Users/me/프로젝트", 5)
+                    )
+                );
+            },
+        );
+
+        assert!(exec.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn romanizer_runs_after_cache_miss_and_populates_cache() {
+        let tmp = TestDir::new("readable-romanizer");
+        let bin_dir = tmp.path.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let romanizer = bin_dir.join("hangul-romanize");
+        make_executable(&romanizer);
+        let exec = FakeNameExec::new(vec![Some("hanguk-project")]);
+        let client_dir = path_string(&tmp.path);
+
+        with_env(
+            &[("RP_CLIENT_DIR", Some(&client_dir)), ("HROMANIZE", None)],
+            || {
+                assert_eq!(readable_basename("한국 프로젝트", &exec), "hanguk-project");
+            },
+        );
+
+        assert_eq!(
+            exec.calls.borrow().as_slice(),
+            &[(path_string(&romanizer), "한국 프로젝트".to_string())]
+        );
+        assert_eq!(
+            fs::read_to_string(
+                tmp.path
+                    .join("session-names")
+                    .join(sha256_hex_prefix("한국 프로젝트", 12))
+            )
+            .unwrap(),
+            "hanguk-project"
         );
     }
 

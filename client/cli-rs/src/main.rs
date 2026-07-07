@@ -407,6 +407,7 @@ fn render_map_list(pairs: &[(String, String)]) -> String {
 
 fn resolve_host(path: &Path) -> std::io::Result<String> {
     if let Some(host) = non_empty_env("REMOTE_HOST") {
+        config::require_valid_host(&host)?;
         return Ok(host);
     }
     config::get_cli(path, "host")
@@ -651,6 +652,9 @@ fn infer_map_method(client: &str) -> String {
     let Some(host) = non_empty_env("REMOTE_HOST") else {
         return "sync".to_string();
     };
+    if !config::valid_host(&host) {
+        return "sync".to_string();
+    }
     let host = host.rsplit('@').next().unwrap_or(&host);
     let output = std::process::Command::new("mount").output().ok();
     let Some(output) = output else {
@@ -815,6 +819,47 @@ fn run_config(args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(values: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let saved = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn with_env<T>(values: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = EnvGuard::set(values);
+        f()
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_string()).collect()
@@ -906,5 +951,13 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(validate_map_add_args_for_os(&add, Os::Windows), Ok(()));
+    }
+
+    #[test]
+    fn resolve_host_rejects_option_like_env_host_before_ssh_use() {
+        with_env(&[("REMOTE_HOST", Some("-oProxyCommand=touch-pwn"))], || {
+            let err = resolve_host(Path::new("/tmp/unused-client.env")).unwrap_err();
+            assert_eq!(err.to_string(), "invalid host: -oProxyCommand=touch-pwn");
+        });
     }
 }

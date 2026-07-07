@@ -501,6 +501,14 @@ pub fn valid_host(target: &str) -> bool {
     valid_host_part(host)
 }
 
+pub fn require_valid_host(target: &str) -> io::Result<()> {
+    if target.is_empty() || valid_host(target) {
+        Ok(())
+    } else {
+        Err(invalid_input(format!("invalid host: {target}")))
+    }
+}
+
 fn valid_host_part(part: &str) -> bool {
     !part.is_empty()
         && !part.starts_with('-')

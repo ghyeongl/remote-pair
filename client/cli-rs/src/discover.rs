@@ -406,7 +406,15 @@ pub fn build_peers(
         } else {
             name.clone()
         };
-        let status = status_for(&name, &addr, &p.role, aliases, remote_host, &present);
+        let status = status_for(
+            &name,
+            &addr,
+            &p.role,
+            &target,
+            aliases,
+            remote_host,
+            &present,
+        );
         out.push(OutPeer {
             name,
             addrs: p.addrs.clone(),
@@ -444,6 +452,7 @@ fn status_for(
     name: &str,
     addr: &str,
     role: &str,
+    target: &str,
     aliases: &BTreeSet<String>,
     remote_host: &str,
     present: &impl Fn(&str) -> Option<bool>,
@@ -451,9 +460,16 @@ fn status_for(
     let known = aliases.contains(name)
         || aliases.contains(addr)
         || name == remote_host
-        || addr == remote_host;
+        || addr == remote_host
+        || target == remote_host;
     if known {
-        let probe_target = if aliases.contains(name) { name } else { addr };
+        let probe_target = if aliases.contains(name) {
+            name
+        } else if aliases.contains(addr) {
+            addr
+        } else {
+            target
+        };
         return if present(probe_target) == Some(true) {
             "reconnect".to_string()
         } else {
@@ -880,12 +896,17 @@ fn ssh_host_app_present(os: Os, target: &str) -> Option<bool> {
 
 fn resolve_remote_host() -> String {
     if let Some(host) = non_empty_env("REMOTE_HOST") {
-        return host;
+        return if config::valid_host(&host) {
+            host
+        } else {
+            String::new()
+        };
     }
 
     config::default_client_env_path()
         .ok()
         .and_then(|path| config::get_cli(path, "host").ok())
+        .filter(|host| config::valid_host(host))
         .unwrap_or_default()
 }
 
@@ -1743,6 +1764,25 @@ mod tests {
         let peers = build_peers(&recs, &aliases(&[]), "", |_| None);
         assert_eq!(peers[0].target, "alice@100.64.0.5");
         assert_eq!(peers[0].host_user.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn status_known_when_computed_target_matches_remote_host() {
+        let recs = vec![rec_user(
+            "peer",
+            "100.64.0.5",
+            "tailscale",
+            "SHA256:z",
+            "host",
+            "alice",
+        )];
+        let peers = build_peers(&recs, &aliases(&[]), "alice@100.64.0.5", |target| {
+            assert_eq!(target, "alice@100.64.0.5");
+            Some(false)
+        });
+
+        assert_eq!(peers[0].target, "alice@100.64.0.5");
+        assert_eq!(peers[0].status, "setup");
     }
 
     #[test]
