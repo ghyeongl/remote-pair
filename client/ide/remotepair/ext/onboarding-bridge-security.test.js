@@ -5,6 +5,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+process.on("exit", () => {
+  if (originalPlatformDescriptor) Object.defineProperty(process, "platform", originalPlatformDescriptor);
+});
+
 const bridge = require("./onboarding-bridge.js");
 const onboardingMain = fs.readFileSync(path.join(__dirname, "onboarding-main.cjs"), "utf8");
 const extension = fs.readFileSync(path.join(__dirname, "extension.js"), "utf8");

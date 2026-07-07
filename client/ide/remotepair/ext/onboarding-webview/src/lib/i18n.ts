@@ -13,6 +13,7 @@ const EN: Dict = {
   "discover.installedDesc":
     "Xpair needs XpairHost running on the Mac you want to reach. If it's already set up, it'll appear here in a moment. Otherwise, install it first and come back.",
   "discover.openHost": "Open host onboarding",
+  "discover.downloadCli": "Download Xpair CLI",
   "discover.engineRecovery.title": "Finish host engine setup",
   "discover.engineRecovery.desc":
     "Your host is paired, but its coding agent still needs to be installed or signed in. Open host onboarding on that Mac to finish — re-selecting the host here won't fix it.",
@@ -105,6 +106,7 @@ const KO: Dict = {
   "discover.installedDesc":
     "연결할 Mac에 XpairHost가 실행되어 있어야 합니다. 이미 설정되어 있다면 곧 목록에 나타납니다. 아직이라면 먼저 설치하고 돌아오세요.",
   "discover.openHost": "호스트 온보딩 열기",
+  "discover.downloadCli": "Xpair CLI 다운로드",
   "discover.engineRecovery.title": "호스트 엔진 설정을 마치세요",
   "discover.engineRecovery.desc":
     "호스트는 페어링되었지만 코딩 에이전트가 아직 설치되지 않았거나 로그인되지 않았습니다. 해당 Mac에서 호스트 온보딩을 열어 마무리하세요. 여기서 호스트를 다시 선택해도 해결되지 않습니다.",
