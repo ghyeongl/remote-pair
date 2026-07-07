@@ -9,8 +9,8 @@ import {
   Network,
   Terminal,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { StepHeader } from "@/components/onboarding/StepHero";
+import { Button } from "@shared/components/ui/button";
+import { StepHeader } from "@shared/components/onboarding/StepHero";
 import { useT } from "@/lib/i18n";
 
 export type PermKey = "login" | "ax" | "sr" | "fda" | "sharing";

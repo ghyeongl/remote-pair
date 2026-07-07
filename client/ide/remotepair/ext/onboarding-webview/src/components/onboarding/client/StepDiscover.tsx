@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, Download, ExternalLink, Loader2, RefreshCw, Wifi } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@shared/components/ui/button";
 import { useT } from "@/lib/i18n";
 
 export type DiscoveredHost = {

@@ -1,5 +1,6 @@
 @import "tailwindcss" source(none);
-@source "../src";
+@source ".";
+@source "../../../shared/onboarding-ui";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
