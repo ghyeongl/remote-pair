@@ -253,7 +253,7 @@ need_app_guidance() {
    • App binary only: ${APP_NAME}.zip from Releases → ~/Applications → open once (daemon only;
      run the host setup above for approve rules + the approve skill).
        https://github.com/${GH_REPO:-x10lab/xpair}/releases/latest
-   Then grant Accessibility + Screen Recording once. Verify with: xpair status
+   Then grant Accessibility, Screen Recording, Full Disk Access (Privacy & Security) + File Sharing (General → Sharing). Verify with: xpair status
    (This client/CLI maps/launches/attaches; approve & host run where the app lives.)
 EOF
 }
@@ -865,12 +865,16 @@ cmd_onboard() {
   local _sj_local=""
   [ -f "$STATUS_FILE" ] && _sj_local="$(cat "$STATUS_FILE" 2>/dev/null || true)"
   if [ -n "$_sj_local" ]; then
-    local _ax _sr
+    local _ax _sr _fda _sharing _serving
     _ax="$(_jget "$_sj_local" ax)"; _sr="$(_jget "$_sj_local" sr)"
-    if [ "$_ax" = true ] && [ "$_sr" = true ]; then
-      ok "Onboarding complete. AX✓ SR✓ — computer-use ready. Edit later with 'xpair config' / 'xpair map'."
+    _fda="$(_jget "$_sj_local" fda)"; _sharing="$(_jget "$_sj_local" sharing)"; _serving="$(_jget "$_sj_local" serving)"
+    # Gate on the host's own serving verdict; hosts that predate it omit the field → fall back to AX+SR.
+    if [ "$_serving" = true ]; then
+      ok "Onboarding complete. AX✓ SR✓ FDA✓ Remote Login✓ File Sharing✓ — ready to serve. Edit later with 'xpair config' / 'xpair map'."
+    elif [ -z "$_serving" ] && [ "$_ax" = true ] && [ "$_sr" = true ]; then
+      ok "Onboarding complete. AX✓ SR✓ — computer-use ready (older host: it does not report the File Sharing/serving gate). Edit later with 'xpair config' / 'xpair map'."
     else
-      warn "Not done yet: System Settings → Privacy & Security → turn $APP_NAME ON for Accessibility (AX=$_ax) and Screen Recording (SR=$_sr). Re-run 'xpair onboard' to confirm."
+      warn "Not done yet (AX=$_ax SR=$_sr FDA=$_fda Sharing=$_sharing): grant Accessibility, Screen Recording, Full Disk Access (System Settings → Privacy & Security) AND File Sharing (System Settings → General → Sharing) for $APP_NAME. Re-run 'xpair onboard' to confirm."
     fi
   else
     ok "Onboarding complete. Edit later with 'xpair config' / 'xpair map'."
@@ -1058,11 +1062,13 @@ cmd_status() {
   if [ -f "$STATUS_FILE" ]; then
     local s sage sts; s="$(cat "$STATUS_FILE" 2>/dev/null)"
     sts="$(_jget "$s" ts)"; sage=$(( $(date +%s) - ${sts:-0} ))
-    printf '%-14s AX %s  SR %s  FDA %s   (status.json, %ss ago%s)\n' "permissions" \
-      "$(_mark "$(_jget "$s" ax)")" "$(_mark "$(_jget "$s" sr)")" "$(_mark "$(_jget "$s" fda)")" \
+    printf '%-14s AX %s  SR %s  FDA %s  Sharing %s   (status.json, %ss ago%s)\n' "permissions" \
+      "$(_mark "$(_jget "$s" ax)")" "$(_mark "$(_jget "$s" sr)")" "$(_mark "$(_jget "$s" fda)")" "$(_mark "$(_jget "$s" sharing)")" \
       "$sage" "$([ "$sage" -gt 15 ] && echo ' — STALE, app may be down')"
-    [ "$(_jget "$s" ax)" = true ] && [ "$(_jget "$s" sr)" = true ] || \
-      printf '%-14s %s\n' "" "⚠ computer-use gated: AX+SR must both be ✓. If ✗, the app is running but NOT granted → grant in System Settings (this is NOT 'host down')."
+    # `serving` (host allGranted) is the real gate; hosts that predate it omit the field → fall back to AX+SR.
+    _srv="$(_jget "$s" serving)"
+    { [ "$_srv" = true ] || { [ -z "$_srv" ] && [ "$(_jget "$s" ax)" = true ] && [ "$(_jget "$s" sr)" = true ]; }; } || \
+      printf '%-14s %s\n' "" "⚠ not serving: Accessibility, Screen Recording, Full Disk Access (Privacy & Security) + Remote Login and File Sharing (General → Sharing) must ALL be ✓. The app is running but a required grant is off (this is NOT 'host down')."
   elif [ -n "$p" ] || host_up; then
     printf '%-14s %s\n' "permissions" "unknown (no status.json yet — update host app)"
   fi
@@ -2013,8 +2019,9 @@ cmd_install_host() {
   if [ -n "$account" ] && [ -n "$guiuser" ] && [ "$account" != "$guiuser" ]; then
     warn "target account '$account' ≠ host GUI-session account '$guiuser' — TCC grant must be done while logged in as the GUI user on the host's screen."
   fi
-  c "Next, on the HOST's physical screen: System Settings → Privacy & Security →"
-  printf '   turn %s ON for Accessibility + Screen Recording (macOS cannot grant these remotely).\n' "$APP_NAME"
+  c "Next, on the HOST's physical screen (macOS cannot grant these remotely):"
+  printf '   • System Settings → Privacy & Security → turn %s ON for Accessibility, Screen Recording, Full Disk Access\n' "$APP_NAME"
+  printf '   • System Settings → General → Sharing → turn File Sharing ON (required for SMB folder mounts)\n'
   ok "install-host complete for $target"
 }
 
@@ -2030,7 +2037,7 @@ cmd_host_permissions() {
     --host) host="${2:-}"; shift 2 ;;
     *) shift ;;
   esac; done
-  [ -n "$host" ] || { printf '{"alive":false,"ax":false,"sr":false,"fda":false,"err":"no host"}\n'; return 0; }
+  [ -n "$host" ] || { printf '{"alive":false,"ax":false,"sr":false,"fda":false,"sharing":false,"err":"no host"}\n'; return 0; }
   local raw
   local cm; cm="$(rp_ssh_control_path)"
   raw="$(ssh -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 \
@@ -2039,7 +2046,7 @@ cmd_host_permissions() {
              -o StrictHostKeyChecking=yes -T -n "$host" \
              'cat ~/.xpair/host/logs/status.json 2>/dev/null' </dev/null 2>/dev/null)" || true
   if [ -z "$raw" ]; then
-    printf '{"alive":false,"ax":false,"sr":false,"fda":false,"err":"no status.json (host app not running?)"}\n'
+    printf '{"alive":false,"ax":false,"sr":false,"fda":false,"sharing":false,"err":"no status.json (host app not running?)"}\n'
     return 0
   fi
   printf '%s' "$raw" | python3 -c '
@@ -2047,11 +2054,11 @@ import json, sys, time
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print(json.dumps({"alive": False, "ax": False, "sr": False, "fda": False, "err": "bad status.json"})); sys.exit(0)
+    print(json.dumps({"alive": False, "ax": False, "sr": False, "fda": False, "sharing": False, "err": "bad status.json"})); sys.exit(0)
 ts = d.get("ts", 0) or 0
 # The host rewrites status.json every ~1s while alive; treat a stamp within 10s as live.
 alive = bool(d.get("pid")) and (time.time() - ts) < 10
-print(json.dumps({"alive": alive, "ax": bool(d.get("ax")), "sr": bool(d.get("sr")), "fda": bool(d.get("fda")), "err": ""}))
+print(json.dumps({"alive": alive, "ax": bool(d.get("ax")), "sr": bool(d.get("sr")), "fda": bool(d.get("fda")), "sharing": bool(d.get("sharing")), "serving": d.get("serving"), "err": ""}))
 '
 }
 

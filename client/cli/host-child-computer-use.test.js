@@ -37,7 +37,7 @@ test("Q0025 Q0101 Q0245 child sessions use the host tmux-aqua subtree for comput
   assert.match(launcher, /\n  ssh \$SSH_ID -t "\$REMOTE_HOST" "\$REMOTE_BIN\/tmux-aqua -S \$\{AQUA_SOCK_Q\} attach -d -t/);
 
   assert.match(cli, /in_host_session\(\) \{ case "\$\{TMUX:-\}" in \*aqua-tmux\.sock\*\) return 0/);
-  assert.match(cli, /computer-use gated: AX\+SR must both be/);
+  assert.match(cli, /not serving: Accessibility, Screen Recording, Full Disk Access .* Remote Login and File Sharing/);
   assert.match(cli, /INSIDE Xpair host.*computer-use available here/);
 });
 

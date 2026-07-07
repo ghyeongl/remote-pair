@@ -1096,6 +1096,21 @@ function cliSupportsPasswordStdin() {
   }
 }
 
+/* Does the INSTALLED CLI convey the host's serving verdict? The guard trusts `serving` from a modern
+ * host but falls back to ax/sr when it is absent (older HOST). A stale ~/.local/bin/xpair, however,
+ * would DROP the field even from a modern host, letting a not-serving host through the ax/sr fallback.
+ * Feature-detect the installed CLI's source (same conservative pattern as cliSupportsPasswordStdin):
+ * unreadable/old ⇒ false ⇒ the guard routes to WELCOME to reinstall the bundled CLI. */
+function cliSupportsServing() {
+  const bin = rpBinAbs();
+  if (!bin) return false;
+  try {
+    return fs.readFileSync(bin, "utf8").includes('d.get("serving")');
+  } catch {
+    return false;
+  }
+}
+
 // --- Engine constants (claude | codex | opencode | shell) -------------------------------------
 // Agent engines run ON THE HOST; these drive the host-side install/auth-check/auth-set guards.
 // `shell` is a valid session engine (plain login shell, no install/auth guard), so it is only a
@@ -1203,8 +1218,15 @@ const bridge = {
         : `xpair status exited ${r.code}: ${r.err || "no output"}`;
       return { ready: false, bin, err: why };
     }
+    // Runnable is not enough: a CLI too old to convey the host's `serving` verdict would drop it
+    // even from a modern host and slip a not-serving host past the guard's ax/sr fallback. Treat
+    // that as not-ready so the existing installCli path reinstalls the bundled CLI.
+    if (!cliSupportsServing()) {
+      return { ready: false, bin, err: "installed xpair CLI is out of date — reinstall the bundled client CLI" };
+    }
     return { ready: true, bin, err: "" };
   },
+
 
   // CLI auto-install (component ⓪ — the "no dead end" path). cliReady===false used to be a hard wall;
   // instead the onboarding calls this to install the BUNDLED client CLI to ~/.local/bin and proceed.
@@ -1814,11 +1836,11 @@ const bridge = {
   // Recording / Full Disk Access remotely (macOS blocks it); the user must toggle them on the host's
   // own screen. This SSH-reads the status.json the host app writes (LOG_DIR/status.json) so the
   // onboarding can show "permissions granted ✓" vs "waiting for you to grant on the host". Returns
-  // {alive, ax, sr, fda} (booleans; all false when the file is absent/unreadable) + {err}.
+  // {alive, ax, sr, fda, sharing} (booleans; all false when the file is absent/unreadable) + {err}.
   async hostPermissions({ host } = {}) {
-    if (!host) return { alive: false, ax: false, sr: false, fda: false, err: "no host" };
+    if (!host) return { alive: false, ax: false, sr: false, fda: false, sharing: false, err: "no host" };
     // `host-permissions` SSH-reads the host app's status.json (key auth, bounded, never prompts) and
-    // emits {alive,ax,sr,fda} as JSON.
+    // emits {alive,ax,sr,fda,sharing} as JSON.
     const r = await cli(["host-permissions", "--host", String(host)]);
     if (r.code !== 0) {
       const s = sshResult(r, "could not read host status");
@@ -1827,6 +1849,7 @@ const bridge = {
         ax: false,
         sr: false,
         fda: false,
+        sharing: false,
         err: s.err,
         state: s.state,
         action: s.action,
@@ -1839,10 +1862,14 @@ const bridge = {
         ax: !!j.ax,
         sr: !!j.sr,
         fda: !!j.fda,
+        sharing: !!j.sharing,
+        // The host's OWN serving verdict (Permissions.allGranted). undefined on hosts that
+        // predate the field — the guard falls back to ax/sr for those (their actual gate).
+        serving: typeof j.serving === "boolean" ? j.serving : undefined,
         err: "",
       };
     } catch (e) {
-      return { alive: false, ax: false, sr: false, fda: false, err: "host-permissions: bad JSON" };
+      return { alive: false, ax: false, sr: false, fda: false, sharing: false, err: "host-permissions: bad JSON" };
     }
   },
 

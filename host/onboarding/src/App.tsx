@@ -72,7 +72,7 @@ export default function App() {
   const resumeAllowed = injectedMode() === "runGate";
   const w = useWizard(TOTAL, requestedDeepLink);
   const [hydrated, setHydrated] = useState(false);
-  const [crashReports, setCrashReports] = useState(true);
+  const [crashReports, setCrashReports] = useState(false);
   const [analytics, setAnalytics] = useState(false);
   const [consentLoaded, setConsentLoaded] = useState(false);
   const [consentDirty, setConsentDirty] = useState(false);
@@ -462,6 +462,7 @@ export default function App() {
           <StepConsent
             kind="crash"
             value={crashReports}
+            disabled={!consentLoaded}
             onChange={(v) => {
               setConsentDirty(true);
               setCrashReports(v);
@@ -472,6 +473,7 @@ export default function App() {
           <StepConsent
             kind="analytics"
             value={analytics}
+            disabled={!consentLoaded}
             onChange={(v) => {
               setConsentDirty(true);
               setAnalytics(v);

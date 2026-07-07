@@ -29,21 +29,23 @@ function test(name, fn) {
 }
 
 test("US-003 host onboarding shows crash and analytics consent as separate persisted steps", () => {
-  assert.match(app, /const \[crashReports, setCrashReports\] = useState\(true\)/);
+  assert.match(app, /const \[crashReports, setCrashReports\] = useState\(false\)/);
   assert.match(app, /const \[analytics, setAnalytics\] = useState\(false\)/);
   assert.match(app, /const \[consentLoaded, setConsentLoaded\] = useState\(false\)/);
   assert.match(app, /const \[consentDirty, setConsentDirty\] = useState\(false\)/);
   assert.match(app, /window\.xpair[\s\S]*\.getConsent\(\)[\s\S]*setAnalytics\(\!\!c\.telemetry\)[\s\S]*setCrashReports\(\!\!c\.crash\)[\s\S]*setConsentLoaded\(true\)/);
   assert.match(app, /if \(!consentLoaded \|\| !consentDirty\) return;[\s\S]*window\.xpair\.setConsent\(\{ telemetry: analytics, crash: crashReports \}\)/);
-  assert.match(app, /w\.index === 1 && \([\s\S]*kind="crash"[\s\S]*setConsentDirty\(true\)[\s\S]*setCrashReports\(v\)/);
-  assert.match(app, /w\.index === CONSENT_ANALYTICS_IDX && \([\s\S]*kind="analytics"[\s\S]*setConsentDirty\(true\)[\s\S]*setAnalytics\(v\)/);
+  assert.match(app, /w\.index === 1 && \([\s\S]*kind="crash"[\s\S]*disabled=\{!consentLoaded\}[\s\S]*setConsentDirty\(true\)[\s\S]*setCrashReports\(v\)/);
+  assert.match(app, /w\.index === CONSENT_ANALYTICS_IDX && \([\s\S]*kind="analytics"[\s\S]*disabled=\{!consentLoaded\}[\s\S]*setConsentDirty\(true\)[\s\S]*setAnalytics\(v\)/);
   assert.match(app, /window\.xpair\.setConsent\(\{ telemetry: analytics, crash: crashReports \}\)/);
 
   assert.match(stepConsent, /export type ConsentKind = "crash" \| "analytics"/);
   assert.match(stepConsent, /kind === "crash"/);
+  assert.match(stepConsent, /disabled\?: boolean/);
+  assert.match(stepConsent, /disabled=\{disabled\}/);
   assert.match(stepConsent, /t\(`consent\.\$\{kind\}\.title`\)/);
   assert.match(stepConsent, /role="switch"/);
-  assert.match(stepConsent, /t\("consent\.recommended"\)/);
+  assert.doesNotMatch(stepConsent, /t\("consent\.recommended"\)/);
 
   assert.match(globalTypes, /getConsent: \(\) => Promise<\{ telemetry: boolean; crash: boolean \}>/);
   assert.match(globalTypes, /setConsent: \(c: \{ telemetry: boolean; crash: boolean \}\) => Promise<void>/);

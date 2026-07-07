@@ -83,13 +83,14 @@ test("US-003 widened permission bridge probes real login/sharing facts", () => {
   assert.match(onboardingWindow, /"sharing": Permissions\.sharingGranted\(\)/);
   assert.match(permissionsSwift, /static func loginGranted\(\)\s*-> Bool/);
   assert.match(permissionsSwift, /static func sharingGranted\(\)\s*-> Bool/);
-  // The native gate must require the SAME set the React flow marks required (REQUIRED_PERMS =
-  // login, ax, sr) — Remote Login is the transport every session rides on, so allGranted() includes it.
-  assert.match(permissionsSwift, /static func allGranted\(\) -> Bool \{ axTrusted\(\) && srGranted\(\) && loginGranted\(\) \}/);
+  // The native gate must require the SAME set the React flow marks required. File Sharing is
+  // mount-mandatory for /Volumes mappings, so allGranted() includes fdaGranted() + sharingGranted().
+  assert.match(permissionsSwift, /static func allGranted\(\) -> Bool \{ axTrusted\(\) && srGranted\(\) && loginGranted\(\) && fdaGranted\(\) && sharingGranted\(\) \}/);
 });
 
 test("US-003 gates block required permissions only, then >=1 ready engine and persisted consent", () => {
-  assert.match(singlePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr"\]/);
+  // File Sharing is mount-mandatory for /Volumes mappings, so React must require it.
+  assert.match(singlePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr", "fda", "sharing"\]/);
   assert.match(singlePerm, /export function isRequiredPerm/);
   assert.match(app, /inPerms && isRequiredPerm\(currentPermKey\) && !currentPermGranted/);
   assert.match(
@@ -101,7 +102,7 @@ test("US-003 gates block required permissions only, then >=1 ready engine and pe
   assert.match(i18n, /"perm\.recommendedContinue": "Recommended — you can continue"/);
   assert.match(i18n, /"perm\.recommendedContinue": "권장 항목입니다 — 계속 진행할 수 있습니다"/);
   assert.match(app, /w\.index === ENGINE_IDX && engines\.size === 0/);
-  assert.match(app, /const \[crashReports, setCrashReports\] = useState\(true\)/);
+  assert.match(app, /const \[crashReports, setCrashReports\] = useState\(false\)/);
   assert.match(app, /const \[analytics, setAnalytics\] = useState\(false\)/);
   assert.match(app, /window\.xpair[\s\S]*\.getConsent\(\)[\s\S]*setConsentLoaded\(true\)/);
   assert.match(app, /if \(!consentLoaded \|\| !consentDirty\) return;[\s\S]*window\.xpair\.setConsent\(\{ telemetry: analytics, crash: crashReports \}\)/);

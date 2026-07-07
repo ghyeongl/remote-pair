@@ -75,13 +75,14 @@ function hasRequiredTccGateBeforeCompletionSideEffects(source) {
 test("Q0443 host onboarding must not proceed/complete while required TCC permissions are unresolved", () => {
   assert.match(
     permissions,
-    /static func allGranted\(\) -> Bool \{\s*axTrusted\(\) && srGranted\(\) && loginGranted\(\)\s*\}/,
-    "required native gate must mean Accessibility, Screen Recording, and Remote Login",
+    /static func allGranted\(\) -> Bool \{\s*axTrusted\(\) && srGranted\(\) && loginGranted\(\) && fdaGranted\(\) && sharingGranted\(\)\s*\}/,
+    "required native gate must mean Accessibility, Screen Recording, Remote Login, Full Disk Access, and File Sharing",
   );
+  // File Sharing is mount-mandatory for /Volumes mappings, so React must require it.
   assert.match(
     singlePerm,
-    /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr"\]/,
-    "React permissions readiness must require Remote Login, AX, and SR",
+    /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr", "fda", "sharing"\]/,
+    "React permissions readiness must require Remote Login, AX, SR, and File Sharing",
   );
   assert.match(
     app,
@@ -90,7 +91,7 @@ test("Q0443 host onboarding must not proceed/complete while required TCC permiss
   );
   assert.ok(
     hasRequiredTccGateBeforeCompletionSideEffects(onboardingWindow),
-    "WK complete bridge can finish/onComplete without re-checking Permissions.allGranted(), so setup may complete while AX/SR is unresolved",
+    "WK complete bridge can finish/onComplete without re-checking Permissions.allGranted(), so setup may complete while required permissions are unresolved",
   );
 });
 

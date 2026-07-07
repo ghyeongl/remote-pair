@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var menu: NSMenu!
     var hostTimer: Timer?
     var tickTimer: Timer?
-    var onboarding: OnboardingWindow?   // shown while Screen Recording is ungranted (hard run-gate)
+    var onboarding: OnboardingWindow?   // shown while required host permissions are ungranted
     var grantWindow: OnboardingWindow?  // menu-bar "Grant Permissions…" — onboarding deep-linked to the Permissions step
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -60,8 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         log("launched (XpairHost v\(APP_VERSION), repo=\(GH_REPO))")
 
         // The tick loop (heartbeat + writeStatus + approve/onboarding triggers) ALWAYS runs — even while
-        // gated — because writeStatus() drives status.json, which the onboarding WKWebView polls for the
-        // Screen Recording grant. Serving (HostManager/ScreenServer/pairing/advertising) is gated below.
+        // gated — because writeStatus() drives status.json, which the onboarding WKWebView polls for
+        // grant status. Serving (HostManager/ScreenServer/pairing/advertising) is gated below.
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.poll() }
         // (legacy v0 InputServer 0.1s main-thread polling removed — screencapture's synchronous blocking froze the menu bar.
         //  Screen sharing is replaced by v1/v2 (xpair-screen serve-webrtc, view-only, no remote input).)
@@ -72,14 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // (onboarding completes only after a client pairs). Secret-free hint; safe pre-grant.
         if isHostRole { lanBeacon.ensureAdvertising() }
 
-        // Hard run-gate. The host needs BOTH Accessibility (approve auto-click via cliclick/System
-        // Events) AND Screen Recording (screen-share + approve OCR). If either is ungranted, show the
-        // in-process onboarding window and DO NOT start serving until the React flow completes (both
-        // granted). Dismissing the window while still ungranted terminates the app (enforced in
-        // OnboardingWindow.windowWillClose). `allGranted()` = axTrusted() && srGranted() && loginGranted()
-        // (Remote Login must be on — it's the transport every client session rides on).
+        // Hard run-gate. The host needs Accessibility (approve auto-click via cliclick/System Events),
+        // Screen Recording (screen-share + approve OCR), Remote Login, and File Sharing. If any required
+        // permission is ungranted, show the in-process onboarding window and DO NOT start serving until
+        // the React flow completes. Dismissing the window while still ungranted terminates the app
+        // (enforced in OnboardingWindow.windowWillClose).
         if !Permissions.allGranted() {
-            log(.warn, "Accessibility/Screen Recording not granted — showing onboarding (serving gated)")
+            log(.warn, "required host permissions not granted — showing onboarding (serving gated)")
             // Pre-register the app in the Accessibility + Screen Recording TCC lists so the user only
             // has to flip the toggle ON in System Settings (no "+"/drag-in). request() calls
             // AXIsProcessTrustedWithOptions / CGRequestScreenCaptureAccess, which add the (off) entries.
@@ -87,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Permissions.request("sr")
             let ob = OnboardingWindow(onComplete: { [weak self] in
                 self?.onboarding = nil
-                // Dismissing the run gate after AX/SR are granted but BEFORE a client pairs must still
+                // Dismissing the run gate after required permissions are granted but BEFORE a client pairs must still
                 // leave the host pairable: start serving AND (re)open a Connect/Broadcast pairing window
                 // exactly like the already-granted launch path. windowWillClose called endWindow(), so
                 // without this the host advertises presence but no live pairing metadata and every client
@@ -115,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Begins the serving path: tmux host, screen sidecar (via HostManager), LAN advertising, and the 5 s
-    /// watchdog. Called at launch when Screen Recording is already granted, or from the onboarding
+    /// watchdog. Called at launch when required permissions are already granted, or from the onboarding
     /// onComplete once the user grants it. Idempotent enough to call once per launch.
     private func startServing() {
         host.ensureServer()
@@ -149,7 +148,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(permHeader)
         for (name, granted) in [("Accessibility", Permissions.axTrusted()),
                                 ("Screen Recording", Permissions.srGranted()),
-                                ("Full Disk", Permissions.fdaGranted())] {
+                                ("Full Disk", Permissions.fdaGranted()),
+                                ("Remote Login", Permissions.loginGranted()),
+                                ("File Sharing", Permissions.sharingGranted())] {
             let row = NSMenuItem(title: "   \(name)  \(granted ? "✓" : "✗")", action: nil, keyEquivalent: "")
             row.isEnabled = false
             menu.addItem(row)

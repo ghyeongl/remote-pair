@@ -18,7 +18,9 @@ export type PermStatus = "pending" | "opening" | "granted";
 export type PermState = Record<PermKey, PermStatus>;
 
 export const PERM_ORDER: PermKey[] = ["login", "ax", "sr", "fda", "sharing"];
-export const REQUIRED_PERMS: PermKey[] = ["login", "ax", "sr"];
+// All five are required: ax/sr/login gate serving, and both Full Disk Access and File Sharing
+// are needed for the SMB /Volumes mount path — allGranted() gates serving on the full set.
+export const REQUIRED_PERMS: PermKey[] = ["login", "ax", "sr", "fda", "sharing"];
 
 export function isRequiredPerm(k: PermKey | null): k is PermKey {
   return k !== null && REQUIRED_PERMS.includes(k);

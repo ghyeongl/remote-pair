@@ -44,7 +44,7 @@ test("§1.2 Q0441 Host onboarding exists for permissions, engine, and connect se
   assert.match(
     appDelegate,
     /if !Permissions\.allGranted\(\) \{[\s\S]*Permissions\.request\("ax"\)[\s\S]*Permissions\.request\("sr"\)[\s\S]*let ob = OnboardingWindow/,
-    "launch must show Host onboarding and pre-register required TCC permissions when AX/SR are unresolved",
+    "launch must show Host onboarding and pre-register requestable TCC permissions when required permissions are unresolved",
   );
   assert.match(
     appDelegate,
@@ -105,7 +105,8 @@ test("§1.2 Q0441 Host onboarding exists for permissions, engine, and connect se
   assert.match(i18n, /"host\.welcome\.title": "Set up XpairHost"/);
   assert.match(i18n, /accept connections from your client/);
   assert.match(stepSinglePerm, /export const PERM_ORDER: PermKey\[\] = \["login", "ax", "sr", "fda", "sharing"\]/);
-  assert.match(stepSinglePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr"\]/);
+  // File Sharing is mount-mandatory for /Volumes mappings, so React must require it.
+  assert.match(stepSinglePerm, /export const REQUIRED_PERMS: PermKey\[\] = \["login", "ax", "sr", "fda", "sharing"\]/);
   assert.match(hostApp, /await window\.xpair\.requestPermission\(key\)/);
   assert.match(hostApp, /await window\.xpair\.openPermissionPane\(key\)/);
   assert.match(stepEngine, /window\.xpair\.engineStatus\(e\)/);
