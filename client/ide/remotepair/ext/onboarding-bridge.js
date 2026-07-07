@@ -1776,11 +1776,11 @@ const bridge = {
   // Recording / Full Disk Access remotely (macOS blocks it); the user must toggle them on the host's
   // own screen. This SSH-reads the status.json the host app writes (LOG_DIR/status.json) so the
   // onboarding can show "permissions granted ✓" vs "waiting for you to grant on the host". Returns
-  // {alive, ax, sr, fda} (booleans; all false when the file is absent/unreadable) + {err}.
+  // {alive, ax, sr, fda, sharing} (booleans; all false when the file is absent/unreadable) + {err}.
   async hostPermissions({ host } = {}) {
-    if (!host) return { alive: false, ax: false, sr: false, fda: false, err: "no host" };
+    if (!host) return { alive: false, ax: false, sr: false, fda: false, sharing: false, err: "no host" };
     // `host-permissions` SSH-reads the host app's status.json (key auth, bounded, never prompts) and
-    // emits {alive,ax,sr,fda} as JSON.
+    // emits {alive,ax,sr,fda,sharing} as JSON.
     const r = await cli(["host-permissions", "--host", String(host)]);
     if (r.code !== 0) {
       const s = sshResult(r, "could not read host status");
@@ -1789,6 +1789,7 @@ const bridge = {
         ax: false,
         sr: false,
         fda: false,
+        sharing: false,
         err: s.err,
         state: s.state,
         action: s.action,
@@ -1801,10 +1802,11 @@ const bridge = {
         ax: !!j.ax,
         sr: !!j.sr,
         fda: !!j.fda,
+        sharing: !!j.sharing,
         err: "",
       };
     } catch (e) {
-      return { alive: false, ax: false, sr: false, fda: false, err: "host-permissions: bad JSON" };
+      return { alive: false, ax: false, sr: false, fda: false, sharing: false, err: "host-permissions: bad JSON" };
     }
   },
 
