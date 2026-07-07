@@ -252,7 +252,7 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 
 ## WS13 — `fix/win32-gates` — **UNPARKED** (superseded: see docs/win32-client-roadmap.md, phase P3)
 
-**Findings**: F19, F20 — accepted as known-latent. **Decision D2 (resolved)**: Windows support arrives via the Rust CLI (PR #37); until it merges, the product is mac-only and no win32 gating work is done. Do not start this WS; the plan below is kept so the findings aren't lost when PR #37 lands:
+**Findings**: F19, F20. **Decision D2 (superseded by docs/win32-client-roadmap.md)**: Windows support arrives via the Rust CLI (PR #37), which the roadmap now actively drives to merge; this WS starts once #37 lands (roadmap phase P3, whose design refines the sketch below against as-built line refs):
 - F19 — `extension.js:1625` `runXpairCli`: branch on `process.platform` — win32 spawns the executable argv-style (no login-shell wrapper, no `shSingleQuote`); gate `sshControlPath`/`sshRun`/`spawnTunnel` ControlMaster usage behind `!== 'win32'`.
 - F20 — skip the pre-workbench onboarding gate on `process.platform !== 'darwin'` (open the workbench normally, show a "host setup requires the CLI — coming to Windows" notice) until a win32 CLI exists. Long-term: platform-branch `rpBin`/`installCli`/`openHostOnboarding`.
 

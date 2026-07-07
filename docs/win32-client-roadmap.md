@@ -24,12 +24,12 @@ Rebase `feat/rust-cli` onto `develop` (textually clean — cli-rs is additive). 
 
 ## Phase P1 — `feat/rust-cli`: remaining verbs (PR #37 completes)
 
-- **doctor host rows** — fits `Transport::ssh_exec` directly: host tmux-aqua, host app dir, host server has-session, approve skill file, approve hook grep, notify hook grep, AX+SR from `status.json` (bash `cmd_doctor` refs in the P0-refreshed comments).
+- **doctor host rows** — fits `Transport::ssh_exec` directly: host tmux-aqua, host app dir, host server has-session, approve skill file, approve hook grep, notify hook grep, and the permission grants from `status.json` — **all five** of the current TCC model (login item, AX, SR, FDA, File Sharing; #81), not the audit-era AX+SR pair (bash `cmd_doctor` refs in the P0-refreshed comments).
 - **`host`** — port the probe (`tmux-aqua has-session` locally); the `open -a`/`launchctl` app-start half is darwin-gated (rule 3). On win32: probe still works when co-located host is impossible → always the "host is remote" path; app-start arm exits 2 with guidance.
 - **`approve`** — NOT the ssh seam: local FS trigger (`/tmp/xpair.approve-request` + `.label`/`.type`) + poll `~/.xpair/host/logs/xpair.log` for `router:` lines. Port as darwin-gated machine-local verb (it only means something on a machine running the privileged host app).
 - **`onboard`** stays deferred (D8 — the IDE bridge drives individual verbs).
 
-**Acceptance**: 22/22 verbs wired in dispatch (darwin-gated ones included); parity tests per verb via MockTransport/temp-dir fixtures; #37 marked ready for review → merge via the standard Codex gate. **Merging #37 unparks WS13.**
+**Acceptance**: 21/22 verbs implemented in dispatch (darwin-gated ones included); `onboard` is the sole remaining stub — deferred by design (D8, IDE-bridge-driven) and wired to exit 2 with guidance, not silently absent. Parity tests per verb via MockTransport/temp-dir fixtures; #37 marked ready for review → merge via the standard Codex gate. **Merging #37 unparks WS13.**
 
 ## Phase P2 — `feat/win-release-channel`: MSI on the release, Rust self-update
 
