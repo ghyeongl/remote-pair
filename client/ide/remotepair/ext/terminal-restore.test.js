@@ -64,8 +64,13 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     sessionManager,
-    /const liveNames = new Set\(cachedSessionNames\(\)\);[\s\S]*const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => reattach\(name\)\)/,
-    "History must be persisted last-seen names minus every currently live tmux session, and entries must still reattach",
+    /const liveNames = new Set\(cachedSessionNames\(\)\);[\s\S]*const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => validateAndReattach\(name, this\.commandService\)\)/,
+    "History must be persisted last-seen names minus every currently live tmux session, and clicks must validate before reattach",
+  );
+  assert.match(
+    sessionManager,
+    /CommandsRegistry\.registerCommand\(\{[\s\S]*id: 'remotepair\.terminalSidebar\.syncOpenedSessions'[\s\S]*writeOpenedSessions\(accessor\.get\(ICommandService\)\)/,
+    "frontend must expose a post-restore sync command that rewrites the current opened-session set",
   );
   assert.match(
     sessionManager,
@@ -104,13 +109,13 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     extension,
-    /\/\/ 5a\) Warm the Sessions sidebar[\s\S]*if \(clientServicesLock\) \{[\s\S]*restoreOpenedSessionsOnActivation\(\)[\s\S]*\} else \{\n    log\("opened sessions: restore skipped in non-owner extension host", "debug"\);\n  \}/,
-    "startup restore must run only in the extension host that owns the services lock",
+    /\/\/ 5a\) Warm the Sessions sidebar in every window[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar"\)[\s\S]*if \(clientServicesLock\) \{[\s\S]*return restoreOpenedSessionsOnActivation\(\);[\s\S]*opened sessions: restore skipped in non-owner extension host[\s\S]*return 0;/,
+    "startup warmup and Browser default must run in every window while restore stays owner-gated",
   );
   assert.match(
     extension,
-    /restoreOpenedSessionsOnActivation\(\)[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*\}/,
-    "restore must keep the opened-session write gate and enable writes only after restore completes",
+    /restoreOpenedSessionsOnActivation\(\)[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
+    "restore must enable writes before requesting the frontend to sync the current opened-session set",
   );
   assert.doesNotMatch(
     extension,

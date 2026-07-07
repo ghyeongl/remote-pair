@@ -2599,7 +2599,7 @@ index 0000000..6e5d586
 +import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js';
 +import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 +import { Emitter, Event } from '../../../../base/common/event.js';
-+import { ICommandService } from '../../../../platform/commands/common/commands.js';
++import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 +import { KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 +import { DisposableStore } from '../../../../base/common/lifecycle.js';
 +import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -2819,6 +2819,13 @@ index 0000000..6e5d586
 +	});
 +}
 +
++CommandsRegistry.registerCommand({
++	id: 'remotepair.terminalSidebar.syncOpenedSessions',
++	handler(accessor: ServicesAccessor): void {
++		writeOpenedSessions(accessor.get(ICommandService));
++	}
++});
++
 +/** Reattach a session by name into the Sessions sidebar (wired by the sidebar view). */
 +export type SessionReattacher = (name: string) => void;
 +
@@ -2875,7 +2882,7 @@ index 0000000..6e5d586
 +			reattach(name);
 +			return;
 +		}
-+		setSessionCardCause(cause ?? localize('remotepairSessionAttachCheckFailed', "Session is no longer available. The list was refreshed; choose another session or start a new one."));
++		setSessionCardCause(cause ?? localize('remotepairSessionAttachCheckFailed', "Session no longer exists. The list was refreshed; choose another session or start a new one."));
 +		scheduleSessionRefresh(commandService, SESSION_REFRESH_RETRY_MS);
 +	}, (error) => {
 +		rpLog('warn', `session attach check failed for ${name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -3113,7 +3120,7 @@ index 0000000..6e5d586
 +			this.addEmpty(sessionCardCause);
 +		}
 +		for (const name of persisted) {
-+			this.addCard(name, () => reattach(name));
++			this.addCard(name, () => validateAndReattach(name, this.commandService));
 +		}
 +	}
 +

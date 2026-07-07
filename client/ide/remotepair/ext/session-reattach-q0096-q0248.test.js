@@ -123,8 +123,13 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
   );
   assert.match(
     patch,
-    /const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => reattach\(name\)\)/,
-    "persisted real session names must reattach through xpair attach",
+    /const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => validateAndReattach\(name, this\.commandService\)\)/,
+    "persisted History names must validate through checkAttach before any reattach",
+  );
+  assert.match(
+    patch,
+    /function validateAndReattach\(name: string, commandService: ICommandService\): void \{[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.checkAttach', name\)[\s\S]*if \(isRecord\(value\) && value\.ok === true\)[\s\S]*reattach\(name\)/,
+    "History validation must use the existing checkAttach path and only reattach when ok",
   );
 
   const attach = extract(cli, "cmd_attach() {", "\ncmd_host() {");

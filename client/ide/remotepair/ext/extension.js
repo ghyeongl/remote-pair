@@ -1844,10 +1844,6 @@ async function restoreOpenedSessionsOnActivation() {
   let restored = 0;
 
   try {
-    // Warm the Sessions sidebar first. This constructs the frontend view that owns the
-    // same launchReattach flow used by Detached card clicks.
-    await vscode.commands.executeCommand("remotepair.terminalSidebar");
-
     if (!host || openedNames.length === 0) {
       return 0;
     }
@@ -1876,6 +1872,11 @@ async function restoreOpenedSessionsOnActivation() {
     return restored;
   } finally {
     enableOpenedSessionWrites();
+    try {
+      await vscode.commands.executeCommand("remotepair.terminalSidebar.syncOpenedSessions");
+    } catch (e) {
+      log(`opened sessions: post-restore sync failed: ${e && e.message ? e.message : e}`, "debug");
+    }
   }
 }
 
@@ -2376,21 +2377,23 @@ function activate(context) {
     clientServiceDisposables.push({ dispose: () => notifier.stop() });
   }
 
-  // 5a) Warm the Sessions sidebar, restore the last-quit opened set, then default to Browser only
-  //     when nothing was restored. The restore path uses the same frontend reattach command as
-  //     Detached card clicks, and it gives up quietly if the host/session list is unavailable.
-  if (clientServicesLock) {
-    restoreOpenedSessionsOnActivation()
-      .then((restored) => {
-        if (restored === 0) {
-          return vscode.commands.executeCommand("workbench.view.explorer");
-        }
-        return undefined;
-      })
-      .then(undefined, (e) => log(`startup session restore / Browser default: ${e && e.message ? e.message : e}`, "warn"));
-  } else {
-    log("opened sessions: restore skipped in non-owner extension host", "debug");
-  }
+  // 5a) Warm the Sessions sidebar in every window so the frontend reattacher/provider hooks are
+  //     wired. Only the client-services owner restores and writes the last-opened snapshot.
+  vscode.commands.executeCommand("remotepair.terminalSidebar")
+    .then(() => {
+      if (clientServicesLock) {
+        return restoreOpenedSessionsOnActivation();
+      }
+      log("opened sessions: restore skipped in non-owner extension host", "debug");
+      return 0;
+    })
+    .then((restored) => {
+      if (restored === 0) {
+        return vscode.commands.executeCommand("workbench.view.explorer");
+      }
+      return undefined;
+    })
+    .then(undefined, (e) => log(`startup session restore / Browser default: ${e && e.message ? e.message : e}`, "warn"));
 
   // 5) Open the RD editor tab on startup (Remote Desktop is this client's
   //    primary surface), then apply the one-time workbench layout. Chained so

@@ -23,7 +23,7 @@ function unavailableSessionList() {
 }
 
 function sessionUnavailableCause(name) {
-  return `Session "${name}" is no longer available. The list was refreshed; choose another session or start a new one.`;
+  return `Session "${name}" no longer exists. The list was refreshed; choose another session or start a new one.`;
 }
 
 function sessionListUnavailableCause() {
