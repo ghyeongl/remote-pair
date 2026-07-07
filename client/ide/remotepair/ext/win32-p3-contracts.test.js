@@ -336,29 +336,79 @@ test("P3 installCli on win32 sends broken MSI users to reinstall", async () => {
   });
 });
 
-test("P3 cliReady on win32 requires the serving-capable CLI surface", async () => {
+test("P3 cliReady on win32 trusts the MSI status probe without source-scanning the exe", async () => {
   await withWin32InstalledExe(async () => {
     const realReadFileSync = fs.readFileSync;
     await withPatched(childProcess, "spawn", spawnStub({ code: 0 }), async () => {
       await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
-        if (candidate === WIN32_XPAIR) return 'print(json.dumps({"serving": d.get("serving")}))';
+        if (candidate === WIN32_XPAIR) throw new Error("win32 cliReady must not UTF-8 scan xpair.exe");
         return realReadFileSync.call(fs, candidate, encoding);
       }, async () => {
         assert.deepEqual(await bridge.cliReady(), { ready: true, bin: WIN32_XPAIR, err: "" });
       });
+    });
+  });
+});
 
-      await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
-        if (candidate === WIN32_XPAIR) return "old host-permissions output";
-        return realReadFileSync.call(fs, candidate, encoding);
-      }, async () => {
-        assert.deepEqual(await bridge.cliReady(), {
-          ready: false,
-          bin: WIN32_XPAIR,
-          err: "installed xpair CLI is out of date — reinstall the bundled client CLI",
+test("P3 cliReady still source-scans script CLIs for the serving surface", async () => {
+  await withPlatform("darwin", async () => {
+    const darwinXpair = path.join(os.homedir(), ".local", "bin", "xpair");
+    const realAccessSync = fs.accessSync;
+    const realReadFileSync = fs.readFileSync;
+    await withPatched(fs, "accessSync", function accessSync(candidate, mode) {
+      if (candidate === darwinXpair) return undefined;
+      return realAccessSync.call(fs, candidate, mode);
+    }, async () => {
+      await withPatched(childProcess, "spawn", spawnStub({ code: 0 }), async () => {
+        await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
+          if (candidate === darwinXpair) return "old host-permissions output";
+          return realReadFileSync.call(fs, candidate, encoding);
+        }, async () => {
+          assert.deepEqual(await bridge.cliReady(), {
+            ready: false,
+            bin: darwinXpair,
+            err: "installed xpair CLI is out of date — reinstall the bundled client CLI",
+          });
+        });
+
+        await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
+          if (candidate === darwinXpair) return 'print(json.dumps({"serving": d.get("serving")}))';
+          return realReadFileSync.call(fs, candidate, encoding);
+        }, async () => {
+          assert.deepEqual(await bridge.cliReady(), { ready: true, bin: darwinXpair, err: "" });
         });
       });
     });
   });
+});
+
+test("P3 openExternal only allows Xpair GitHub URLs", async () => {
+  const opened = [];
+  const realLoad = Module._load;
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === "electron") {
+      return { shell: { openExternal: async (url) => { opened.push(url); } } };
+    }
+    return realLoad.call(this, request, parent, isMain);
+  };
+  try {
+    assert.deepEqual(
+      await bridge.openExternal("https://github.com/x10lab/xpair/releases/latest"),
+      { ok: true, err: "" },
+    );
+    assert.deepEqual(opened, ["https://github.com/x10lab/xpair/releases/latest"]);
+    assert.deepEqual(
+      await bridge.openExternal("https://github.com/x10lab/xpair.evil/releases/latest"),
+      { ok: false, err: "unsupported external URL" },
+    );
+    assert.deepEqual(
+      await bridge.openExternal("http://github.com/x10lab/xpair/releases/latest"),
+      { ok: false, err: "unsupported external URL" },
+    );
+    assert.deepEqual(opened, ["https://github.com/x10lab/xpair/releases/latest"]);
+  } finally {
+    Module._load = realLoad;
+  }
 });
 
 test("P3 runXpairCli uses argv spawn, not sh -lc", async () => {

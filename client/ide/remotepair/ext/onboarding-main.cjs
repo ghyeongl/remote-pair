@@ -79,6 +79,7 @@ const RENDERER_METHODS = new Set([
   'getConfig',
   'cliReady',
   'installCli',
+  'openExternal',
   'openHostOnboarding',
   'hostAppStatus',
   'setHost',

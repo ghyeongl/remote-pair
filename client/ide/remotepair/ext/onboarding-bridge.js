@@ -42,8 +42,9 @@ const HOST_RE = /^(?!-)[A-Za-z0-9._-]+$/;
 const ACCOUNT_RE = /^(?!-)[A-Za-z0-9._-]+$/;
 const SSH_TARGET_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
 const TAILNET_PAIRING_METADATA_PORT = 8891;
+const GITHUB_XPAIR_URL_PREFIX = "https://github.com/x10lab/xpair/";
 const HOST_SETUP_URL = "https://github.com/x10lab/xpair#host-setup";
-const CLI_DOWNLOAD_URL = "https://github.com/x10lab/xpair/releases/latest";
+const CLI_DOWNLOAD_URL = `${GITHUB_XPAIR_URL_PREFIX}releases/latest`;
 const EFFECTIVE_KNOWN_HOSTS_FILES = new Map();
 let sshEphemeralKnownHostsDir;
 
@@ -1202,15 +1203,21 @@ function cliSupportsPasswordStdin() {
   }
 }
 
-/* Does the INSTALLED CLI convey the host's serving verdict? The guard trusts `serving` from a modern
- * host but falls back to ax/sr when it is absent (older HOST). A stale ~/.local/bin/xpair, however,
- * would DROP the field even from a modern host, letting a not-serving host through the ax/sr fallback.
- * Feature-detect the installed CLI's source/binary (same conservative pattern as
+/* Does the INSTALLED script CLI convey the host's serving verdict? The guard trusts `serving` from a
+ * modern host but falls back to ax/sr when it is absent (older HOST). A stale ~/.local/bin/xpair,
+ * however, would DROP the field even from a modern host, letting a not-serving host through the ax/sr
+ * fallback. Feature-detect non-Windows script source (same conservative pattern as
  * cliSupportsPasswordStdin): unreadable/old ⇒ false ⇒ the guard routes to WELCOME to reinstall the
- * bundled CLI/MSI. */
+ * bundled CLI. */
 function cliSupportsServing() {
   const bin = rpBinAbs();
   if (!bin) return false;
+  if (process.platform === "win32") {
+    // Do not UTF-8 source-scan the native Rust MSI binary. The Rust CLI has shipped the five-TCC
+    // host-permissions surface, including `serving`, since the first MSI; roadmap P1 predates any
+    // MSI release. If a real MSI capability gap appears, add a dedicated capability verb.
+    return true;
+  }
   try {
     return fs.readFileSync(bin, "utf8").includes('d.get("serving")');
   } catch {
@@ -1326,9 +1333,9 @@ const bridge = {
         : `xpair status exited ${r.code}: ${r.err || "no output"}`;
       return { ready: false, bin, err: why };
     }
-    // Runnable is not enough: a CLI too old to convey the host's `serving` verdict would drop it
-    // even from a modern host and slip a not-serving host past the guard's ax/sr fallback. Treat
-    // that as not-ready so the existing installCli path reinstalls the bundled CLI.
+    // Runnable is not enough on script CLIs: a CLI too old to convey the host's `serving` verdict
+    // would drop it even from a modern host and slip a not-serving host past the guard's ax/sr
+    // fallback. Treat that as not-ready so the existing installCli path reinstalls the bundled CLI.
     if (!cliSupportsServing()) {
       return { ready: false, bin, err: "installed xpair CLI is out of date — reinstall the bundled client CLI" };
     }
@@ -1390,6 +1397,23 @@ const bridge = {
       return { ok: false, err: "installer ran but ~/.local/bin/xpair is still missing" };
     }
     return { ok: true, err: "" };
+  },
+
+  async openExternal(url) {
+    const target = String(url || "").trim();
+    if (!target.startsWith(GITHUB_XPAIR_URL_PREFIX)) {
+      return { ok: false, err: "unsupported external URL" };
+    }
+    try {
+      const { shell } = require("electron");
+      await shell.openExternal(target);
+      return { ok: true, err: "" };
+    } catch (error) {
+      return {
+        ok: false,
+        err: `could not open external URL: ${error && error.message ? error.message : String(error)}`,
+      };
+    }
   },
 
   async openHostOnboarding() {

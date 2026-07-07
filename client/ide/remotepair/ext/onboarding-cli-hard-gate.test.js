@@ -30,13 +30,13 @@ function test(name, fn) {
 test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a native pre-workbench hard gate", () => {
   assert.match(
     bridge,
-    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*%ProgramFiles%\\\\Xpair\\\\xpair\.exe[\s\S]*~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)[\s\S]*cliSupportsServing\(\)/,
-    "cliReady must resolve a real xpair binary, prove it with xpair status, and reject CLIs that drop serving",
+    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*%ProgramFiles%\\\\Xpair\\\\xpair\.exe[\s\S]*~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)[\s\S]*if \(!cliSupportsServing\(\)\)/,
+    "cliReady must resolve a real xpair binary, prove it with xpair status, and keep the script-CLI serving guard",
   );
   assert.match(
     bridge,
-    /function cliSupportsServing\(\)[\s\S]*rpBinAbs\(\)[\s\S]*readFileSync\(bin, "utf8"\)\.includes\('d\.get\("serving"\)'\)/,
-    "cliReady must feature-detect the serving field surface instead of accepting old win32 CLIs",
+    /function cliSupportsServing\(\)[\s\S]*process\.platform === "win32"[\s\S]*native Rust MSI binary[\s\S]*return true;[\s\S]*readFileSync\(bin, "utf8"\)\.includes\('d\.get\("serving"\)'\)/,
+    "cliReady must skip MSI source scans while preserving script CLI serving detection",
   );
   assert.match(
     bridge,
@@ -63,6 +63,16 @@ test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a native pre-workbench h
     stepDiscover,
     /const cli = await window\.remotepair\.cliReady\(\)[\s\S]*if \(!cli\.ready\)[\s\S]*window\.remotepair\.installCli\(\)[\s\S]*const res = await window\.remotepair\.discover\(\)/,
     "the renderer must install/gate the CLI before discovery so fresh clients do not see a false empty scan",
+  );
+  assert.match(
+    stepDiscover,
+    /setDownloadUrl\([\s\S]*installed\.action === "OPEN_DOWNLOAD" && installed\.url[\s\S]*\)/,
+    "the renderer must retain the MSI download action returned by installCli",
+  );
+  assert.match(
+    stepDiscover,
+    /window\.remotepair\.openExternal\(downloadUrl\)[\s\S]*discover\.downloadCli/,
+    "the renderer must expose an actionable MSI download button next to the install error",
   );
   assert.match(stepDiscover, /setScanError\(res\.err\)/, "discover errors must be surfaced");
   assert.doesNotMatch(app, /CLI_DEPENDENT_STEPS|cliGateActive|installCliNow|StepConnect/);
