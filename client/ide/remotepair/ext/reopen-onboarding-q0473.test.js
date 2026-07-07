@@ -60,7 +60,7 @@ const greenBridge = {
   cliReady: async () => ({ ready: true, bin: "/tmp/xpair", err: "" }),
   sshReachable: async () => ({ reachable: true, err: "" }),
   hostAppStatus: async () => ({ installed: true, version: "0.5.0a99", compatible: true, incompatibleKind: "", err: "" }),
-  hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
+  hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: true, sharing: true, err: "" }),
   hostEnvEngine: async () => ({ engine: "codex", err: "" }),
   hostEngineStatus: async () => ({ installed: true, authed: true, version: "ok", err: "" }),
 };

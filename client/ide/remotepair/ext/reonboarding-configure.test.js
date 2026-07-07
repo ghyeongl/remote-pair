@@ -100,7 +100,7 @@ function greenBridge(overrides = {}) {
       incompatibleKind: "",
       err: "",
     }),
-    hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
+    hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: true, sharing: true, err: "" }),
     hostEnvEngine: async () => ({ engine: "codex", err: "" }),
     hostEngineStatus: async () => ({ installed: true, authed: true, version: "ok", err: "" }),
     ...overrides,

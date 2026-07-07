@@ -2030,7 +2030,7 @@ cmd_host_permissions() {
     --host) host="${2:-}"; shift 2 ;;
     *) shift ;;
   esac; done
-  [ -n "$host" ] || { printf '{"alive":false,"ax":false,"sr":false,"fda":false,"err":"no host"}\n'; return 0; }
+  [ -n "$host" ] || { printf '{"alive":false,"ax":false,"sr":false,"fda":false,"sharing":false,"err":"no host"}\n'; return 0; }
   local raw
   local cm; cm="$(rp_ssh_control_path)"
   raw="$(ssh -o BatchMode=yes -o ConnectTimeout=6 -o ConnectionAttempts=1 \
@@ -2039,7 +2039,7 @@ cmd_host_permissions() {
              -o StrictHostKeyChecking=yes -T -n "$host" \
              'cat ~/.xpair/host/logs/status.json 2>/dev/null' </dev/null 2>/dev/null)" || true
   if [ -z "$raw" ]; then
-    printf '{"alive":false,"ax":false,"sr":false,"fda":false,"err":"no status.json (host app not running?)"}\n'
+    printf '{"alive":false,"ax":false,"sr":false,"fda":false,"sharing":false,"err":"no status.json (host app not running?)"}\n'
     return 0
   fi
   printf '%s' "$raw" | python3 -c '
@@ -2047,11 +2047,11 @@ import json, sys, time
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print(json.dumps({"alive": False, "ax": False, "sr": False, "fda": False, "err": "bad status.json"})); sys.exit(0)
+    print(json.dumps({"alive": False, "ax": False, "sr": False, "fda": False, "sharing": False, "err": "bad status.json"})); sys.exit(0)
 ts = d.get("ts", 0) or 0
 # The host rewrites status.json every ~1s while alive; treat a stamp within 10s as live.
 alive = bool(d.get("pid")) and (time.time() - ts) < 10
-print(json.dumps({"alive": alive, "ax": bool(d.get("ax")), "sr": bool(d.get("sr")), "fda": bool(d.get("fda")), "err": ""}))
+print(json.dumps({"alive": alive, "ax": bool(d.get("ax")), "sr": bool(d.get("sr")), "fda": bool(d.get("fda")), "sharing": bool(d.get("sharing")), "err": ""}))
 '
 }
 
