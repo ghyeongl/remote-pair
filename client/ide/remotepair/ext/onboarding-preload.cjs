@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('remotepair', {
   // No dead end: when cliReady is false, the onboarding installs the bundled CLI (install.sh
   // --role client) instead of hard-blocking; only an install failure blocks (with Retry).
   installCli: () => rp('installCli'),
+  openExternal: (url) => rp('openExternal', [url]),
   openHostOnboarding: () => rp('openHostOnboarding'),
   hostAppStatus: (host) => rp('hostAppStatus', [host]),
   setHost: (host) => rp('setHost', [host]),

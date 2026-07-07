@@ -5,6 +5,11 @@ const path = require("node:path");
 const root = __dirname;
 const extension = fs.readFileSync(path.join(root, "extension.js"), "utf8");
 const onboardingMain = fs.readFileSync(path.join(root, "onboarding-main.cjs"), "utf8");
+const onboardingApp = fs.readFileSync(path.join(root, "onboarding-webview/src/App.tsx"), "utf8");
+const onboardingStepConsent = fs.readFileSync(
+  path.join(root, "onboarding-webview/src/components/onboarding/client/StepConsent.tsx"),
+  "utf8",
+);
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 
 let failures = 0;
@@ -42,6 +47,21 @@ check("settings mirror reads telemetry.env on activation and writes only TELEMET
     /function syncTelemetryConsentFromSettingChange\(\) \{[\s\S]*telemetry\.setTelemetryConsent\(enabled\);[\s\S]*\}/,
   );
   assert.doesNotMatch(extension, /telemetry\.setConsent\(enabled,\s*enabled\)/);
+});
+
+check("client onboarding consent UI defaults off and only persists after user changes", () => {
+  assert.match(onboardingApp, /const \[crashReports, setCrashReports\] = useState\(false\)/);
+  assert.match(onboardingApp, /const \[analytics, setAnalytics\] = useState\(false\)/);
+  assert.match(onboardingApp, /const \[consentLoaded, setConsentLoaded\] = useState\(false\)/);
+  assert.match(onboardingApp, /const \[consentDirty, setConsentDirty\] = useState\(false\)/);
+  assert.match(onboardingApp, /tGetConsent\(\)[\s\S]*setAnalytics\(\!\!r\.telemetry\)[\s\S]*setCrashReports\(\!\!r\.crashReport\)[\s\S]*setConsentLoaded\(true\)/);
+  assert.match(onboardingApp, /if \(!consentLoaded \|\| !consentDirty\) return;[\s\S]*window\.remotepair\.tSetConsent\(analytics, crashReports\)/);
+  assert.match(onboardingApp, /kind="crash"[\s\S]*disabled=\{!consentLoaded\}[\s\S]*setConsentDirty\(true\)[\s\S]*setCrashReports\(v\)/);
+  assert.match(onboardingApp, /kind="analytics"[\s\S]*disabled=\{!consentLoaded\}[\s\S]*setConsentDirty\(true\)[\s\S]*setAnalytics\(v\)/);
+
+  assert.match(onboardingStepConsent, /disabled\?: boolean/);
+  assert.match(onboardingStepConsent, /disabled=\{disabled\}/);
+  assert.doesNotMatch(onboardingStepConsent, /t\("consent\.recommended"\)/);
 });
 
 check("app_first_launch uses the persisted consent-aware claim and no globalState install key remains", () => {

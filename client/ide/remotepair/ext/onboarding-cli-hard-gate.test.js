@@ -30,29 +30,49 @@ function test(name, fn) {
 test("Q0533/Q0534/Q0536/Q0537 xpair CLI availability is a native pre-workbench hard gate", () => {
   assert.match(
     bridge,
-    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*if \(!bin\)[\s\S]*xpair CLI not found at ~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)/,
-    "cliReady must resolve a real xpair binary and prove it with xpair status",
+    /async cliReady\(\)[\s\S]*const bin = rpBinAbs\(\);[\s\S]*%ProgramFiles%\\\\Xpair\\\\xpair\.exe[\s\S]*~\/\.local\/bin\/xpair[\s\S]*run\(bin, \["status"\]\)[\s\S]*if \(!cliSupportsServing\(\)\)/,
+    "cliReady must resolve a real xpair binary, prove it with xpair status, and keep the script-CLI serving guard",
   );
   assert.match(
     bridge,
-    /async installCli\(\)[\s\S]*shared", "install\.sh"[\s\S]*run\("bash", \[installer, "--role", "client"\][\s\S]*if \(!rpBinAbs\(\)\)/,
-    "installCli must use the bundled installer and re-check that xpair actually landed",
+    /function cliSupportsServing\(\)[\s\S]*process\.platform === "win32"[\s\S]*native Rust MSI binary[\s\S]*return true;[\s\S]*readFileSync\(bin, "utf8"\)\.includes\('d\.get\("serving"\)'\)/,
+    "cliReady must skip MSI source scans while preserving script CLI serving detection",
+  );
+  assert.match(
+    bridge,
+    /async installCli\(\)[\s\S]*process\.platform === "win32"[\s\S]*const bin = rpBinAbs\(\)[\s\S]*Install the Xpair CLI \(\.msi\) first[\s\S]*run\(bin, \["status"\]\)[\s\S]*Xpair CLI found but not working[\s\S]*OPEN_DOWNLOAD[\s\S]*CLI_DOWNLOAD_URL[\s\S]*shared", "install\.sh"[\s\S]*run\("bash", \[installer, "--role", "client"\][\s\S]*if \(!rpBinAbs\(\)\)/,
+    "installCli must return MSI guidance on Windows, probe existing MSI usability, and use the bundled installer elsewhere",
   );
 
   assert.match(
     onboardingMain,
-    /const cli = await probeBridge\.cliReady\(\)[\s\S]*if \(!cli \|\| cli\.ready !== true\) return START_STEP\.WELCOME/,
+    /const clientEnv = readClientEnv\(\)[\s\S]*const host = configuredRemoteHost\(clientEnv\)[\s\S]*if \(!host\) return START_STEP\.WELCOME[\s\S]*if \(!\(await cliProbeReady\(probeBridge\)\)\) return START_STEP\.WELCOME[\s\S]*if \(process\.platform !== 'darwin'\)[\s\S]*return null/,
+    "non-Darwin pre-workbench gating must require a configured host and usable CLI before skipping Darwin-only probes",
+  );
+  assert.match(
+    onboardingMain,
+    /if \(!\(await cliProbeReady\(probeBridge\)\)\) return START_STEP\.WELCOME/,
     "firstFailingGuard must stop at Welcome when the CLI is missing",
   );
   assert.match(
     onboardingMain,
-    /catch \{\s*return START_STEP\.WELCOME\s*\}[\s\S]*probeBridge\.sshReachable\(host\)/,
+    /if \(!\(await cliProbeReady\(probeBridge\)\)\) return START_STEP\.WELCOME[\s\S]*probeBridge\.sshReachable\(host\)/,
     "CLI probe failures must happen before any remote host probe",
   );
   assert.match(
     stepDiscover,
     /const cli = await window\.remotepair\.cliReady\(\)[\s\S]*if \(!cli\.ready\)[\s\S]*window\.remotepair\.installCli\(\)[\s\S]*const res = await window\.remotepair\.discover\(\)/,
     "the renderer must install/gate the CLI before discovery so fresh clients do not see a false empty scan",
+  );
+  assert.match(
+    stepDiscover,
+    /setDownloadUrl\([\s\S]*installed\.action === "OPEN_DOWNLOAD" && installed\.url[\s\S]*\)/,
+    "the renderer must retain the MSI download action returned by installCli",
+  );
+  assert.match(
+    stepDiscover,
+    /window\.remotepair\.openExternal\(downloadUrl\)[\s\S]*discover\.downloadCli/,
+    "the renderer must expose an actionable MSI download button next to the install error",
   );
   assert.match(stepDiscover, /setScanError\(res\.err\)/, "discover errors must be surfaced");
   assert.doesNotMatch(app, /CLI_DEPENDENT_STEPS|cliGateActive|installCliNow|StepConnect/);

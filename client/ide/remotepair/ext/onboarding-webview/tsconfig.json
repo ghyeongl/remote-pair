@@ -12,9 +12,21 @@
     "allowImportingTsExtensions": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/components/ui/*": ["../../../../../shared/onboarding-ui/components/ui/*"],
+      "@/hooks/use-locale": ["../../../../../shared/onboarding-ui/hooks/use-locale"],
+      "@/lib/utils": ["../../../../../shared/onboarding-ui/lib/utils"],
+      "@/*": ["src/*"],
+      "@shared/*": ["../../../../../shared/onboarding-ui/*"],
+      "@radix-ui/react-slot": ["node_modules/@radix-ui/react-slot"],
+      "class-variance-authority": ["node_modules/class-variance-authority"],
+      "clsx": ["node_modules/clsx"],
+      "lucide-react": ["node_modules/lucide-react"],
+      "react": ["node_modules/@types/react"],
+      "react-dom": ["node_modules/@types/react-dom"],
+      "react/jsx-runtime": ["node_modules/@types/react/jsx-runtime"],
+      "tailwind-merge": ["node_modules/tailwind-merge"]
     },
     "types": ["vite/client"]
   },
-  "include": ["src"]
+  "include": ["src", "../../../../../shared/onboarding-ui"]
 }

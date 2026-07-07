@@ -11,10 +11,12 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "xpair-q0473-"));
 const oldHome = process.env.HOME;
 const oldUserProfile = process.env.USERPROFILE;
 const oldForce = process.env.RP_FORCE_ONBOARDING;
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 delete process.env.RP_FORCE_ONBOARDING;
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 
 const clientDir = path.join(tmpHome, ".xpair", "client");
 fs.mkdirSync(clientDir, { recursive: true });
@@ -60,7 +62,7 @@ const greenBridge = {
   cliReady: async () => ({ ready: true, bin: "/tmp/xpair", err: "" }),
   sshReachable: async () => ({ reachable: true, err: "" }),
   hostAppStatus: async () => ({ installed: true, version: "0.5.0a99", compatible: true, incompatibleKind: "", err: "" }),
-  hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
+  hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: true, sharing: true, err: "" }),
   hostEnvEngine: async () => ({ engine: "codex", err: "" }),
   hostEngineStatus: async () => ({ installed: true, authed: true, version: "ok", err: "" }),
 };
@@ -112,6 +114,7 @@ test("Q0473 Settings Configure can reopen first-run onboarding without ending se
   } else {
     process.env.RP_FORCE_ONBOARDING = oldForce;
   }
+  if (originalPlatformDescriptor) Object.defineProperty(process, "platform", originalPlatformDescriptor);
   fs.rmSync(tmpHome, { recursive: true, force: true });
 
   if (failures > 0) {

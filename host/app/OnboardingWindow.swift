@@ -11,8 +11,8 @@
 // setEngineAuth/setEngine execute locally via EngineGuard (login-shell Process). The chosen engine is
 // persisted to ~/.xpair/host/host.env (the host-side counterpart of the client's client.env ENGINE).
 //
-// This window is shown by AppDelegate ONLY while Screen Recording is not granted (the hard run-gate).
-// onComplete fires when the React Done → complete() posts; closing it before SR is granted quits the app.
+// This window is shown by AppDelegate while required host permissions are not granted (the hard run-gate).
+// onComplete fires when the React Done → complete() posts; closing it before they are granted quits the app.
 
 import Cocoa
 import WebKit
@@ -301,7 +301,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
 
         case "complete":
             guard Permissions.allGranted() else {
-                log(.warn, "onboarding complete ignored — Accessibility/Screen Recording still not granted")
+                log(.warn, "onboarding complete ignored — required host permissions still not granted")
                 replyHandler(["ok": false, "err": "permissions not granted"], nil)
                 return
             }
@@ -390,17 +390,18 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         tearDownWebViewBridge()
         switch mode {
         case .runGate:
-            // Launch gate: AX/SR are the hard serving gate. If they are granted, closing the window
-            // before pairing must still start serving so the host becomes pairable; pairing can finish
-            // later from the Connect flow/menu. If AX/SR are missing, keep failing closed.
+            // Launch gate: required permissions are the hard serving gate. If they are granted, closing
+            // the window before pairing must still start serving so the host becomes pairable; pairing
+            // can finish later from the Connect flow/menu. If any required permission is missing, keep
+            // failing closed.
             if !completed && Permissions.allGranted() {
                 completed = true
                 SentryBridge.setupIfConsented()
-                log(.info, "onboarding dismissed after Accessibility+Screen Recording — starting serving")
+                log(.info, "onboarding dismissed after required permissions — starting serving")
                 NSApp.setActivationPolicy(.accessory)
                 onComplete()
             } else if !completed {
-                log(.warn, "onboarding dismissed without Accessibility+Screen Recording — quitting (hard gate)")
+                log(.warn, "onboarding dismissed without required host permissions — quitting (hard gate)")
                 NSApp.terminate(nil)
             }
         case .grantOnly:

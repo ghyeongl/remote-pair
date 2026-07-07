@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { WizardShell } from "@/components/onboarding/WizardShell";
-import { AnimatedStep } from "@/components/onboarding/AnimatedStep";
-import { useWizard } from "@/components/onboarding/useWizard";
-import { Button } from "@/components/ui/button";
+import { WizardShell } from "@shared/components/onboarding/WizardShell";
+import { AnimatedStep } from "@shared/components/onboarding/AnimatedStep";
+import { useWizard } from "@shared/components/onboarding/useWizard";
+import { Button } from "@shared/components/ui/button";
 import { StepWelcome } from "@/components/onboarding/client/StepWelcome";
 import { StepConsent } from "@/components/onboarding/client/StepConsent";
 import {
@@ -84,9 +84,10 @@ export default function App() {
     capture(EVENTS.ONBOARDING_STARTED);
   }, []);
 
-  const [crashReports, setCrashReports] = useState(true);
+  const [crashReports, setCrashReports] = useState(false);
   const [analytics, setAnalytics] = useState(false);
   const [consentLoaded, setConsentLoaded] = useState(false);
+  const [consentDirty, setConsentDirty] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -107,9 +108,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!consentLoaded) return;
+    if (!consentLoaded || !consentDirty) return;
     void window.remotepair.tSetConsent(analytics, crashReports).catch(() => {});
-  }, [analytics, crashReports, consentLoaded]);
+  }, [analytics, crashReports, consentDirty, consentLoaded]);
 
   const [selectedHost, setSelectedHost] = useState<DiscoveredHost | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
@@ -476,10 +477,26 @@ export default function App() {
         <AnimatedStep stepKey={w.index} direction={w.direction}>
           {w.index === 0 && <StepWelcome />}
           {w.index === 1 && (
-            <StepConsent kind="crash" value={crashReports} onChange={setCrashReports} />
+            <StepConsent
+              kind="crash"
+              value={crashReports}
+              disabled={!consentLoaded}
+              onChange={(v) => {
+                setConsentDirty(true);
+                setCrashReports(v);
+              }}
+            />
           )}
           {w.index === 2 && (
-            <StepConsent kind="analytics" value={analytics} onChange={setAnalytics} />
+            <StepConsent
+              kind="analytics"
+              value={analytics}
+              disabled={!consentLoaded}
+              onChange={(v) => {
+                setConsentDirty(true);
+                setAnalytics(v);
+              }}
+            />
           )}
           {w.index === 3 && (
             <StepDiscover

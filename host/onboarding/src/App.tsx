@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { WizardShell } from "@/components/onboarding/WizardShell";
-import { AnimatedStep } from "@/components/onboarding/AnimatedStep";
-import { useWizard } from "@/components/onboarding/useWizard";
-import { Button } from "@/components/ui/button";
+import { WizardShell } from "@shared/components/onboarding/WizardShell";
+import { AnimatedStep } from "@shared/components/onboarding/AnimatedStep";
+import { useWizard } from "@shared/components/onboarding/useWizard";
+import { Button } from "@shared/components/ui/button";
 import { StepWelcome } from "@/components/onboarding/host/StepWelcome";
 import { StepConsent } from "@/components/onboarding/host/StepConsent";
 import {
@@ -72,7 +72,7 @@ export default function App() {
   const resumeAllowed = injectedMode() === "runGate";
   const w = useWizard(TOTAL, requestedDeepLink);
   const [hydrated, setHydrated] = useState(false);
-  const [crashReports, setCrashReports] = useState(true);
+  const [crashReports, setCrashReports] = useState(false);
   const [analytics, setAnalytics] = useState(false);
   const [consentLoaded, setConsentLoaded] = useState(false);
   const [consentDirty, setConsentDirty] = useState(false);
@@ -462,6 +462,7 @@ export default function App() {
           <StepConsent
             kind="crash"
             value={crashReports}
+            disabled={!consentLoaded}
             onChange={(v) => {
               setConsentDirty(true);
               setCrashReports(v);
@@ -472,6 +473,7 @@ export default function App() {
           <StepConsent
             kind="analytics"
             value={analytics}
+            disabled={!consentLoaded}
             onChange={(v) => {
               setConsentDirty(true);
               setAnalytics(v);

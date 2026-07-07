@@ -1,5 +1,5 @@
 import { Sparkles, MenuSquare } from "lucide-react";
-import { StepHero, StepHeader } from "../StepHero";
+import { StepHero, StepHeader } from "@shared/components/onboarding/StepHero";
 import { useT } from "@/lib/i18n";
 
 export function StepDone() {

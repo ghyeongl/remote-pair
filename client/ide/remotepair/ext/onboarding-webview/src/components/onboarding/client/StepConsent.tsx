@@ -1,5 +1,5 @@
 import { ShieldCheck, BarChart3 } from "lucide-react";
-import { StepHeader } from "@/components/onboarding/StepHero";
+import { StepHeader } from "@shared/components/onboarding/StepHero";
 import { useT } from "@/lib/i18n";
 
 export type ConsentKind = "crash" | "analytics";
@@ -7,10 +7,11 @@ export type ConsentKind = "crash" | "analytics";
 type Props = {
   kind: ConsentKind;
   value: boolean;
+  disabled?: boolean;
   onChange: (v: boolean) => void;
 };
 
-export function StepConsent({ kind, value, onChange }: Props) {
+export function StepConsent({ kind, value, disabled = false, onChange }: Props) {
   const { t } = useT();
   const icon =
     kind === "crash" ? (
@@ -18,7 +19,6 @@ export function StepConsent({ kind, value, onChange }: Props) {
     ) : (
       <BarChart3 className="h-6 w-6" />
     );
-  const recommended = kind === "crash";
   const title = t(`consent.${kind}.title`);
   const desc = t(`consent.${kind}.desc`);
   const label = t(`consent.${kind}.label`);
@@ -30,8 +30,12 @@ export function StepConsent({ kind, value, onChange }: Props) {
 
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onChange(!value)}
-        className="mt-8 flex w-full items-center gap-4 rounded-2xl border border-border bg-card p-5 text-left transition-colors hover:bg-accent/40"
+        className={
+          "mt-8 flex w-full items-center gap-4 rounded-2xl border border-border bg-card p-5 text-left transition-colors " +
+          (disabled ? "cursor-not-allowed opacity-60" : "hover:bg-accent/40")
+        }
       >
         <div
           className={
@@ -44,11 +48,6 @@ export function StepConsent({ kind, value, onChange }: Props) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <div className="text-base font-medium text-foreground">{label}</div>
-            {recommended && (
-              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                {t("consent.recommended")}
-              </span>
-            )}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">{sub}</div>
         </div>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, Download, ExternalLink, Loader2, RefreshCw, Wifi } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@shared/components/ui/button";
 import { useT } from "@/lib/i18n";
 
 export type DiscoveredHost = {
@@ -67,13 +67,16 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
   const [hosts, setHosts] = useState<BridgePeer[]>([]);
   const [scanNonce, setScanNonce] = useState(0);
   const [scanError, setScanError] = useState("");
+  const [downloadUrl, setDownloadUrl] = useState("");
   const [openingHost, setOpeningHost] = useState(false);
+  const [openingDownload, setOpeningDownload] = useState(false);
 
   const rescan = useCallback(() => {
     setSelected(null);
     setScanning(true);
     setHosts([]);
     setScanError("");
+    setDownloadUrl("");
     setScanNonce((nonce) => nonce + 1);
   }, [setSelected]);
 
@@ -82,6 +85,7 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
     const scan = async () => {
       setScanning(true);
       setScanError("");
+      setDownloadUrl("");
       try {
         const cli = await window.remotepair.cliReady();
         if (!cli.ready) {
@@ -90,6 +94,9 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
             if (!stopped) {
               setHosts([]);
               setScanError(installed.err || cli.err || "Could not install the xpair CLI.");
+              setDownloadUrl(
+                installed.action === "OPEN_DOWNLOAD" && installed.url ? installed.url : "",
+              );
             }
             return;
           }
@@ -104,6 +111,7 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
         }
         const res = await window.remotepair.discover();
         if (stopped) return;
+        setDownloadUrl("");
         if (res.err) setScanError(res.err);
         const byId = new Map<string, BridgePeer>();
         for (const peer of res.peers || []) {
@@ -119,6 +127,7 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
         if (!stopped) {
           setHosts([]);
           setScanError(error instanceof Error ? error.message : String(error));
+          setDownloadUrl("");
         }
       } finally {
         if (!stopped) setScanning(false);
@@ -146,6 +155,19 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
       setOpeningHost(false);
     }
   }, []);
+
+  const openDownload = useCallback(async () => {
+    if (!downloadUrl) return;
+    setOpeningDownload(true);
+    try {
+      const res = await window.remotepair.openExternal(downloadUrl);
+      if (!res.ok) setScanError(res.err || "Could not open the download page.");
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOpeningDownload(false);
+    }
+  }, [downloadUrl]);
 
   const empty = !scanning && hosts.length === 0;
 
@@ -228,9 +250,25 @@ export function StepDiscover({ selected, setSelected, engineRecovery }: Props) {
         )}
 
         {scanError ? (
-          <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-            {scanError}
-          </p>
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2">
+            <p className="text-xs text-destructive">{scanError}</p>
+            {downloadUrl ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-2"
+                onClick={openDownload}
+                disabled={openingDownload}
+              >
+                {t("discover.downloadCli")}
+                {openingDownload ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
+                )}
+              </Button>
+            ) : null}
+          </div>
         ) : null}
 
         {hosts.map((peer) => {

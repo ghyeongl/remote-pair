@@ -11,6 +11,11 @@ const extension = fs.readFileSync(path.join(extRoot, "extension.js"), "utf8");
 const onboardingMainPath = path.join(extRoot, "onboarding-main.cjs");
 const appDelegate = fs.readFileSync(path.join(repoRoot, "host/app/AppDelegate.swift"), "utf8");
 const onboardingWindow = fs.readFileSync(path.join(repoRoot, "host/app/OnboardingWindow.swift"), "utf8");
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+process.on("exit", () => {
+  if (originalPlatformDescriptor) Object.defineProperty(process, "platform", originalPlatformDescriptor);
+});
 
 let passed = 0;
 let failed = 0;
@@ -100,7 +105,7 @@ function greenBridge(overrides = {}) {
       incompatibleKind: "",
       err: "",
     }),
-    hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
+    hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: true, sharing: true, serving: true, err: "" }),
     hostEnvEngine: async () => ({ engine: "codex", err: "" }),
     hostEngineStatus: async () => ({ installed: true, authed: true, version: "ok", err: "" }),
     ...overrides,
@@ -194,6 +199,16 @@ test("Q0473/Q0493/Q0494 per-launch guard parachutes to the first failing step", 
     assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
       hostPermissions: async () => ({ alive: true, ax: false, sr: true, fda: false, err: "" }),
     })), "grant");
+    // A modern host that is alive but not serving (stuck on its own permission step, e.g. File
+    // Sharing off) reports serving:false — the client must route to GRANT despite alive:true.
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, sharing: false, serving: false, err: "" }),
+    })), "grant");
+    // Version skew: an older host predates the `serving`/File Sharing gate and omits the field.
+    // The client must fall back to the ax/sr gate it actually enforced — NOT block on fda/sharing.
+    assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
+      hostPermissions: async () => ({ alive: true, ax: true, sr: true, fda: false, err: "" }),
+    })), null);
     assert.equal(await onboardingMain.firstFailingGuard([], greenBridge({
       hostEngineStatus: async (engine) => {
         assert.equal(engine, "codex", "guard must use the host.env engine status path");

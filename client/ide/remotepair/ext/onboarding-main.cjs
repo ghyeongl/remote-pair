@@ -79,6 +79,7 @@ const RENDERER_METHODS = new Set([
   'getConfig',
   'cliReady',
   'installCli',
+  'openExternal',
   'openHostOnboarding',
   'hostAppStatus',
   'setHost',
@@ -140,6 +141,15 @@ function forcedOnboardingRequested(argv = process.argv) {
   return forceOnboardingSentinelExists()
 }
 
+async function cliProbeReady(probeBridge = bridge) {
+  try {
+    const cli = await probeBridge.cliReady()
+    return !!cli && cli.ready === true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Evaluate the launch guard in wizard order and return the first step that needs attention.
  * Folder mappings are not a launch guard; every other runtime precondition is rechecked per launch.
@@ -154,11 +164,12 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   const host = configuredRemoteHost(clientEnv)
   if (!host) return START_STEP.WELCOME
 
-  try {
-    const cli = await probeBridge.cliReady()
-    if (!cli || cli.ready !== true) return START_STEP.WELCOME
-  } catch {
-    return START_STEP.WELCOME
+  // cliReady is false for a missing, broken, OR out-of-date CLI (one too old to convey the host's
+  // serving verdict) — all route to WELCOME, which reinstalls the bundled CLI via installCli.
+  if (!(await cliProbeReady(probeBridge))) return START_STEP.WELCOME
+
+  if (process.platform !== 'darwin') {
+    return null
   }
 
   try {
@@ -179,7 +190,15 @@ async function firstFailingGuard(argv = process.argv, probeBridge = bridge) {
   try {
     const perms = await probeBridge.hostPermissions({ host })
     if (!perms || perms.alive !== true) return START_STEP.CONNECT
-    if (perms.ax !== true || perms.sr !== true) return START_STEP.GRANT
+    // Trust the host's OWN serving verdict (Permissions.allGranted, reported as `serving`):
+    // the host tick loop writes status.json even while serving is gated, so `alive` alone
+    // doesn't catch a host stuck on its permission step. Hosts that predate the field fall
+    // back to the ax/sr gate they actually enforced — so an upgraded client against an older
+    // host isn't wrongly blocked on fda/File Sharing the old host never gated on.
+    const hostReady = typeof perms.serving === "boolean"
+      ? perms.serving
+      : (perms.ax === true && perms.sr === true)
+    if (!hostReady) return START_STEP.GRANT
   } catch {
     return START_STEP.CONNECT
   }
