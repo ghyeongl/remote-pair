@@ -7,7 +7,7 @@
 //! session-selection core stays pure and tested.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,8 @@ const REMOTE_AGENT_PATH_EXPORT: &str =
     "export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"";
 const DEFAULT_APP_NAME: &str = "XpairHost";
 const DEFAULT_BUNDLE_PREFIX: &str = "com.x10lab.xpair-host";
+const DEFAULT_FORWARD_APP: &str = "Xpair";
+const DEFAULT_FORWARD_BUNDLE: &str = "com.x10lab.xpair";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchReq {
@@ -43,6 +45,25 @@ pub struct LocalLaunchPlan {
     pub session: String,
     pub create: bool,
     pub cont: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppIdentity {
+    app_name: String,
+    bundle_prefix: String,
+    forward_app: String,
+    forward_bundle: String,
+}
+
+impl Default for AppIdentity {
+    fn default() -> Self {
+        Self {
+            app_name: DEFAULT_APP_NAME.to_string(),
+            bundle_prefix: DEFAULT_BUNDLE_PREFIX.to_string(),
+            forward_app: DEFAULT_FORWARD_APP.to_string(),
+            forward_bundle: DEFAULT_FORWARD_BUNDLE.to_string(),
+        }
+    }
 }
 
 /// Parse `xpair launch` args with the bash exit-code contract.
@@ -215,6 +236,26 @@ pub fn build_ensure_session_remote_cmd_for_engine(
     fresh: bool,
     cl_continue: bool,
 ) -> String {
+    build_ensure_session_remote_cmd_for_engine_and_identity(
+        engine,
+        aqua_sock,
+        session,
+        host_dir,
+        fresh,
+        cl_continue,
+        &AppIdentity::default(),
+    )
+}
+
+fn build_ensure_session_remote_cmd_for_engine_and_identity(
+    engine: Engine,
+    aqua_sock: &str,
+    session: &str,
+    host_dir: &str,
+    fresh: bool,
+    cl_continue: bool,
+    identity: &AppIdentity,
+) -> String {
     let body = if let Some((base, n)) = split_numbered_session(session) {
         build_numbered_session_remote_cmd(engine, aqua_sock, &base, n, host_dir, fresh, cl_continue)
     } else {
@@ -227,7 +268,7 @@ pub fn build_ensure_session_remote_cmd_for_engine(
             cl_continue,
         )
     };
-    wrap_remote_setup_cmd(aqua_sock, &body)
+    wrap_remote_setup_cmd(aqua_sock, engine, identity, &body)
 }
 
 /// Build the local argv for the remote SSH attach handoff.
@@ -281,10 +322,17 @@ pub fn ensure_remote_session(
     fresh: bool,
     engine: Engine,
 ) -> Result<String, String> {
-    Ok(
-        ensure_remote_session_info(transport, host, aqua_sock, session, host_dir, fresh, engine)?
-            .session,
-    )
+    Ok(ensure_remote_session_info(
+        transport,
+        host,
+        aqua_sock,
+        session,
+        host_dir,
+        fresh,
+        engine,
+        &AppIdentity::default(),
+    )?
+    .session)
 }
 
 struct RemoteSessionInfo {
@@ -292,6 +340,7 @@ struct RemoteSessionInfo {
     remote_home: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_remote_session_info(
     transport: &dyn Transport,
     host: &str,
@@ -300,9 +349,10 @@ fn ensure_remote_session_info(
     host_dir: &str,
     fresh: bool,
     engine: Engine,
+    identity: &AppIdentity,
 ) -> Result<RemoteSessionInfo, String> {
-    let remote_cmd = build_ensure_session_remote_cmd_for_engine(
-        engine, aqua_sock, session, host_dir, fresh, !fresh,
+    let remote_cmd = build_ensure_session_remote_cmd_for_engine_and_identity(
+        engine, aqua_sock, session, host_dir, fresh, !fresh, identity,
     );
     let out = transport
         .ssh_exec(host, &remote_cmd)
@@ -455,14 +505,14 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         return ExitCode::from(1);
     }
 
-    let raw_maps = match resolve_raw_maps(path) {
+    let mut raw_maps = match resolve_raw_maps(path) {
         Ok(raw_maps) => raw_maps,
         Err(err) => {
             eprintln!("xpair launch: {err}");
             return ExitCode::from(1);
         }
     };
-    let raw_modes = match resolve_raw_modes(path) {
+    let mut raw_modes = match resolve_raw_modes(path) {
         Ok(raw_modes) => raw_modes,
         Err(err) => {
             eprintln!("xpair launch: {err}");
@@ -479,17 +529,35 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
             return ExitCode::from(1);
         }
     };
-    let pairs = parse_maps(&mount_state.raw_maps);
+    raw_maps = mount_state.raw_maps;
+    let pairs = parse_maps(&raw_maps);
     let client_dir = dir.to_string_lossy().into_owned();
-    let host_dir = match map_to_host_for_os(&client_dir, &pairs, Os::current()) {
+    let os = Os::current();
+    let mut host_dir = match map_to_host_for_os(&client_dir, &pairs, os) {
         Ok(host_dir) => host_dir,
         Err(err) => {
             eprintln!("{err}");
             return ExitCode::from(2);
         }
     };
-    // Deferred: the interactive unmapped-dir host probe from `client/cli/xpair:919-953`.
-    // The Rust path maps deterministically and lets the remote tmux setup surface failures.
+    let transport = SshTransport;
+    match prompt_unmapped_folder_if_needed(
+        path,
+        &transport,
+        host,
+        &client_dir,
+        &mut raw_maps,
+        &mut raw_modes,
+        req.yes,
+        os,
+    ) {
+        Ok(Some(mapped_host_dir)) => host_dir = mapped_host_dir,
+        Ok(None) => {}
+        Err((message, code)) => {
+            eprintln!("{message}");
+            return ExitCode::from(code);
+        }
+    }
 
     let aqua_sock = match resolve_aqua_sock(path) {
         Ok(aqua_sock) => aqua_sock,
@@ -498,8 +566,14 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
             return ExitCode::from(1);
         }
     };
+    let identity = match resolve_app_identity(path) {
+        Ok(identity) => identity,
+        Err(err) => {
+            eprintln!("xpair launch: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let session = remote_session_name_for_local_tools(host, &host_dir);
-    let transport = SshTransport;
     let engine = match resolve_remote_engine(path, req, host, &transport) {
         Ok(engine) => engine,
         Err(err) => {
@@ -513,7 +587,7 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         return ExitCode::from(code);
     }
     let remote_info = match ensure_remote_session_info(
-        &transport, host, &aqua_sock, &session, &host_dir, req.fresh, engine,
+        &transport, host, &aqua_sock, &session, &host_dir, req.fresh, engine, &identity,
     ) {
         Ok(info) => info,
         Err(err) => {
@@ -535,6 +609,302 @@ fn run_remote(path: &Path, host: &str, local_mode: bool, req: &LaunchReq) -> Exi
         &session::pairing_identity_args(),
         remote_info.remote_home.as_deref(),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prompt_unmapped_folder_if_needed(
+    path: &Path,
+    transport: &dyn Transport,
+    host: &str,
+    client_dir: &str,
+    raw_maps: &mut String,
+    raw_modes: &mut String,
+    yes: bool,
+    os: Os,
+) -> Result<Option<String>, (String, u8)> {
+    let stdin = io::stdin();
+    let mut input = stdin.lock();
+    let mut out = io::stdout();
+    let mut err = io::stderr();
+    prompt_unmapped_folder_if_needed_with(
+        path, transport, host, client_dir, raw_maps, raw_modes, yes, os, &mut input, &mut out,
+        &mut err,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prompt_unmapped_folder_if_needed_with<R, W, E>(
+    path: &Path,
+    transport: &dyn Transport,
+    host: &str,
+    client_dir: &str,
+    raw_maps: &mut String,
+    raw_modes: &mut String,
+    yes: bool,
+    os: Os,
+    input: &mut R,
+    out: &mut W,
+    err: &mut E,
+) -> Result<Option<String>, (String, u8)>
+where
+    R: BufRead,
+    W: Write,
+    E: Write,
+{
+    if yes || os == Os::Windows || mapping_for_dir(client_dir, raw_maps).is_some() {
+        return Ok(None);
+    }
+    if !remote_reachable(transport, host) {
+        return Ok(None);
+    }
+
+    let host_dir = map_to_host_for_os(client_dir, &parse_maps(raw_maps), os)
+        .map_err(|err| (err.to_string(), 2))?;
+    print_unmapped_folder(out, client_dir, &host_dir);
+    if remote_dir_exists_once(transport, host, &host_dir) {
+        let _ = writeln!(out, "exists on {host}");
+        let ans = prompt_answer(out, input, "  Register this mapping for next time? [Y/n]: ");
+        if !ans.starts_with(['n', 'N']) {
+            add_folder_mapping(path, raw_maps, raw_modes, client_dir, &host_dir, host, out)
+                .map_err(|err| (format!("xpair launch: {err}"), 1))?;
+        }
+        let _ = writeln!(out, "  Edit later with 'xpair config' / 'xpair map'.");
+        return Ok(Some(host_dir));
+    }
+
+    let _ = writeln!(
+        err,
+        "not found on {host} — usually this folder should also exist on the host via sync."
+    );
+    let ans = prompt_answer(
+        out,
+        input,
+        concat!(
+            "  [m] map to the host path that actually has this content\n",
+            "  [c] create an empty dir on host (new project only — content will not be synced here)\n",
+            "  [N] cancel\n",
+            "  choose: "
+        ),
+    );
+    let host_dir = match ans.as_str() {
+        "m" | "M" => map_register_interactive(
+            path, transport, host, client_dir, raw_maps, raw_modes, input, out, err,
+        )?,
+        "c" | "C" => match transport.ssh_exec(host, &build_remote_mkdir_cmd(&host_dir)) {
+            Ok(result) if result.code == 0 => {
+                let _ = writeln!(out, "created on {host}: {host_dir}");
+                host_dir
+            }
+            _ => return Err((format!("mkdir failed on {host}"), 1)),
+        },
+        _ => return Err(("cancelled.".to_string(), 1)),
+    };
+    let _ = writeln!(out, "  Edit later with 'xpair config' / 'xpair map'.");
+    Ok(Some(host_dir))
+}
+
+fn print_unmapped_folder(out: &mut impl Write, client_dir: &str, host_dir: &str) {
+    let _ = writeln!(out, "This folder is outside any registered mapping:");
+    let _ = writeln!(out, "  client: {client_dir}");
+    let _ = writeln!(out, "  host:   {host_dir}");
+}
+
+fn prompt_answer<R: BufRead>(out: &mut impl Write, input: &mut R, prompt: &str) -> String {
+    let _ = write!(out, "{prompt}");
+    let _ = out.flush();
+    let mut answer = String::new();
+    if input.read_line(&mut answer).is_err() {
+        return String::new();
+    }
+    answer.trim_end_matches(['\r', '\n']).to_string()
+}
+
+fn remote_reachable(transport: &dyn Transport, host: &str) -> bool {
+    transport
+        .ssh_exec(host, "true")
+        .map(|out| out.code == 0)
+        .unwrap_or(false)
+}
+
+fn remote_dir_exists_once(transport: &dyn Transport, host: &str, host_dir: &str) -> bool {
+    transport
+        .ssh_exec(host, &build_remote_host_dir_check_cmd(host_dir))
+        .map(|out| out.code == 0 && out.stdout.contains("__YES__"))
+        .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_register_interactive<R, W, E>(
+    path: &Path,
+    transport: &dyn Transport,
+    host: &str,
+    seed_client_dir: &str,
+    raw_maps: &mut String,
+    raw_modes: &mut String,
+    input: &mut R,
+    out: &mut W,
+    err: &mut E,
+) -> Result<String, (String, u8)>
+where
+    R: BufRead,
+    W: Write,
+    E: Write,
+{
+    let client_dir = absolutize_existing_dir(seed_client_dir)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|_| (format!("client path not found: {seed_client_dir}"), 1))?;
+    let mut host_dir;
+    loop {
+        let ans = prompt_answer(
+            out,
+            input,
+            &format!("Host path that has this content [{client_dir}]: "),
+        );
+        host_dir = if ans.is_empty() {
+            client_dir.clone()
+        } else {
+            ans
+        };
+        if remote_dir_exists_once(transport, host, &host_dir) {
+            let _ = writeln!(out, "exists on {host}: {host_dir}");
+            break;
+        }
+        let _ = writeln!(err, "not found on {host}: {host_dir}");
+        let ans = prompt_answer(
+            out,
+            input,
+            "  [r] re-enter path  [c] create it on host  [N] cancel: ",
+        );
+        match ans.as_str() {
+            "c" | "C" => match transport.ssh_exec(host, &build_remote_mkdir_cmd(&host_dir)) {
+                Ok(result) if result.code == 0 => {
+                    let _ = writeln!(out, "created on {host}: {host_dir}");
+                    break;
+                }
+                _ => {
+                    let _ = writeln!(err, "mkdir failed on {host}");
+                }
+            },
+            "r" | "R" => {}
+            _ => return Err(("cancelled.".to_string(), 1)),
+        }
+    }
+
+    let ans = prompt_answer(
+        out,
+        input,
+        "Map this folder only, or a parent sync root? [t]his / [p]arent root: ",
+    );
+    if matches!(ans.as_str(), "p" | "P") {
+        let default_client_root = path_dirname(&client_dir);
+        let ans = prompt_answer(
+            out,
+            input,
+            &format!("  Parent client root [{default_client_root}]: "),
+        );
+        let client_root = if ans.is_empty() {
+            default_client_root
+        } else {
+            absolutize_existing_dir(&ans)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or(ans)
+        };
+        let default_host_root = posix_dirname(&host_dir);
+        let ans = prompt_answer(
+            out,
+            input,
+            &format!("  Parent host root [{default_host_root}]: "),
+        );
+        let host_root = if ans.is_empty() {
+            default_host_root
+        } else {
+            ans
+        };
+        add_folder_mapping(
+            path,
+            raw_maps,
+            raw_modes,
+            &client_root,
+            &host_root,
+            host,
+            out,
+        )
+        .map_err(|err| (format!("xpair launch: {err}"), 1))?;
+        let _ = writeln!(out, "  All subfolders under {client_root} are now covered.");
+    } else {
+        add_folder_mapping(path, raw_maps, raw_modes, &client_dir, &host_dir, host, out)
+            .map_err(|err| (format!("xpair launch: {err}"), 1))?;
+    }
+
+    map_to_host_for_os(&client_dir, &parse_maps(raw_maps), Os::current())
+        .map_err(|err| (err.to_string(), 2))
+}
+
+fn add_folder_mapping(
+    path: &Path,
+    raw_maps: &mut String,
+    raw_modes: &mut String,
+    client_dir: &str,
+    host_dir: &str,
+    host: &str,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if mapping_for_dir(client_dir, raw_maps).is_some() {
+        let _ = writeln!(out, "already mapped (or under a mapped root): {client_dir}");
+        return Ok(());
+    }
+
+    let entry = format!("{client_dir}::{host_dir}");
+    if raw_maps.is_empty() {
+        *raw_maps = entry;
+    } else {
+        raw_maps.push(';');
+        raw_maps.push_str(&entry);
+    }
+    config::set(path, "FOLDER_MAPS", raw_maps)?;
+
+    let method = infer_launch_map_method(client_dir, host);
+    *raw_modes = upsert_map_mode(raw_modes, client_dir, &method);
+    config::set(path, "FOLDER_MAP_MODES", raw_modes)?;
+    let _ = writeln!(out, "mapping added: {client_dir}  →  {host_dir} ({method})");
+    Ok(())
+}
+
+fn upsert_map_mode(raw_modes: &str, client_dir: &str, method: &str) -> String {
+    let mut entries = parse_maps(raw_modes)
+        .into_iter()
+        .filter(|(client, _)| client != client_dir)
+        .map(|(client, mode)| format!("{client}::{mode}"))
+        .collect::<Vec<_>>();
+    entries.push(format!("{client_dir}::{method}"));
+    entries.join(";")
+}
+
+fn mapping_for_dir(dir: &str, raw_maps: &str) -> Option<(String, String)> {
+    parse_maps(raw_maps)
+        .into_iter()
+        .filter(|(client, _)| path_eq_or_child(dir, client))
+        .max_by_key(|(client, _)| client.len())
+}
+
+fn path_dirname(path: &str) -> String {
+    Path::new(path)
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .filter(|parent| !parent.is_empty())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn posix_dirname(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == path && path == "/" {
+        return "/".to_string();
+    }
+    match trimmed.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(idx) => trimmed[..idx].to_string(),
+        None => ".".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -970,28 +1340,39 @@ fn build_remote_respawn_script(engine: Engine, session: &str, cl_continue: bool)
     )
 }
 
-fn wrap_remote_setup_cmd(aqua_sock: &str, body: &str) -> String {
+fn wrap_remote_setup_cmd(
+    aqua_sock: &str,
+    engine: Engine,
+    identity: &AppIdentity,
+    body: &str,
+) -> String {
     let sock = remote_quote::posix_single_quote(aqua_sock);
     format!(
         "{}{}; printf '__HOME__:%s\\n' \"$HOME\"",
-        remote_setup_preamble(&sock),
+        remote_setup_preamble(&sock, engine, identity),
         body
     )
 }
 
-fn remote_setup_preamble(sock_q: &str) -> String {
+fn remote_setup_preamble(sock_q: &str, engine: Engine, identity: &AppIdentity) -> String {
+    let app = remote_quote::posix_single_quote(&identity.app_name);
+    let bundle = remote_quote::posix_single_quote(&identity.bundle_prefix);
+    let forward_app = remote_quote::posix_single_quote(&identity.forward_app);
+    let forward_bundle = remote_quote::posix_single_quote(&identity.forward_bundle);
     format!(
         concat!(
             "set -e; exec 2>&1; {path_export}; ",
+            "APP_NAME={app}; BUNDLE_PREFIX={bundle}; FORWARD_APP={forward_app}; FORWARD_BUNDLE={forward_bundle}; ",
+            "{engine_preflight}",
             "SOCK={sock_q}; TMUXB=\"{remote_bin}/{tmux_aqua}\"; ",
             "tm() {{ \"$TMUXB\" -S \"$SOCK\" \"$@\"; }}; ",
             "host_setup_recovery() {{ ",
-            "why=\"${{1:-XpairHost tmux-aqua is not ready}}\"; ",
+            "why=\"${{1:-$APP_NAME tmux-aqua is not ready}}\"; ",
             "printf '__XPAIR_HOST_RECOVERY__\\n'; ",
-            "printf '\\nXpairHost setup is required before this remote session can start.\\n' >&2; ",
+            "printf '\\n%s setup is required before this remote session can start.\\n' \"$APP_NAME\" >&2; ",
             "printf 'Reason: %s\\n' \"$why\" >&2; ",
             "printf 'Recovery on %s:\\n' \"$(hostname -s)\" >&2; ",
-            "printf '  1. Open {app}.app on the host Mac.\\n' >&2; ",
+            "printf '  1. Open %s.app on the host Mac.\\n' \"$APP_NAME\" >&2; ",
             "printf '  2. From the menu bar, choose Set up... or Permissions...\\n' >&2; ",
             "printf '  3. Grant Accessibility and Screen Recording, then retry xpair launch.\\n' >&2; ",
             "printf 'Diagnostics: tmux-aqua=%s socket=%s\\n' \"$TMUXB\" \"$SOCK\" >&2; ",
@@ -999,17 +1380,38 @@ fn remote_setup_preamble(sock_q: &str) -> String {
             "}}; ",
             "[ -x \"$TMUXB\" ] || host_setup_recovery \"tmux-aqua helper is missing or not executable: $TMUXB\"; ",
             "if ! tm has-session 2>/dev/null; then ",
-            "open -a \"{app}\" 2>/dev/null || /bin/launchctl kickstart \"gui/$(id -u)/{bundle}\" 2>/dev/null || true; ",
+            "open -a \"$APP_NAME\" 2>/dev/null || open -a \"$FORWARD_APP\" 2>/dev/null || /bin/launchctl kickstart \"gui/$(id -u)/$BUNDLE_PREFIX\" 2>/dev/null || /bin/launchctl kickstart \"gui/$(id -u)/$FORWARD_BUNDLE\" 2>/dev/null || true; ",
             "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do tm has-session 2>/dev/null && break; sleep 0.5; done; ",
             "fi; ",
-            "if ! tm has-session 2>/dev/null; then host_setup_recovery \"{app} host server is not running on $SOCK\"; fi; "
+            "if ! tm has-session 2>/dev/null; then host_setup_recovery \"$APP_NAME host server is not running on $SOCK\"; fi; "
         ),
         path_export = REMOTE_AGENT_PATH_EXPORT,
+        app = app,
+        bundle = bundle,
+        forward_app = forward_app,
+        forward_bundle = forward_bundle,
+        engine_preflight = remote_engine_preflight(engine),
         sock_q = sock_q,
         remote_bin = REMOTE_BIN,
         tmux_aqua = TMUX_AQUA,
-        app = DEFAULT_APP_NAME,
-        bundle = DEFAULT_BUNDLE_PREFIX,
+    )
+}
+
+fn remote_engine_preflight(engine: Engine) -> String {
+    if engine == Engine::Shell {
+        return String::new();
+    }
+
+    let command = remote_quote::posix_single_quote(engine.command_name());
+    format!(
+        concat!(
+            "RP_ENGINE={command}; ",
+            "if [ \"$RP_ENGINE\" != shell ] && ! command -v \"$RP_ENGINE\" >/dev/null 2>&1; then ",
+            "printf '%s not found on %s (PATH=%s) — install it with the native installer or use --engine claude\\n' \"$RP_ENGINE\" \"$(hostname -s)\" \"$PATH\" >&2; ",
+            "exit 11; ",
+            "fi; "
+        ),
+        command = command,
     )
 }
 
@@ -1527,6 +1929,36 @@ fn resolve_raw_modes(path: &Path) -> std::io::Result<String> {
         return Ok(raw_modes);
     }
     Ok(config::get(path, "FOLDER_MAP_MODES")?.unwrap_or_default())
+}
+
+fn resolve_app_identity(path: &Path) -> io::Result<AppIdentity> {
+    Ok(AppIdentity {
+        app_name: resolve_env_stack_value(path, "APP_NAME")?
+            .unwrap_or_else(|| DEFAULT_APP_NAME.to_string()),
+        bundle_prefix: resolve_env_stack_value(path, "BUNDLE_PREFIX")?
+            .unwrap_or_else(|| DEFAULT_BUNDLE_PREFIX.to_string()),
+        forward_app: resolve_env_stack_value(path, "FORWARD_APP")?
+            .unwrap_or_else(|| DEFAULT_FORWARD_APP.to_string()),
+        forward_bundle: resolve_env_stack_value(path, "FORWARD_BUNDLE")?
+            .unwrap_or_else(|| DEFAULT_FORWARD_BUNDLE.to_string()),
+    })
+}
+
+fn resolve_env_stack_value(path: &Path, key: &str) -> io::Result<Option<String>> {
+    let mut value = non_empty_env(key);
+
+    if let Some(file_value) = config::get(path, key)?.filter(|value| !value.is_empty()) {
+        value = Some(file_value);
+    }
+
+    let host_env = config::default_rp_dir()?.join("host.env");
+    for (existing_key, existing_value) in config::list(host_env)? {
+        if existing_key == key && !existing_value.is_empty() {
+            value = Some(existing_value);
+        }
+    }
+
+    Ok(value)
 }
 
 fn resolve_aqua_sock(path: &Path) -> io::Result<String> {
@@ -2319,9 +2751,13 @@ mod tests {
             false,
         );
         assert!(cmd.contains(REMOTE_AGENT_PATH_EXPORT));
-        assert!(cmd.contains("open -a \"XpairHost\""));
-        assert!(cmd.contains("/bin/launchctl kickstart \"gui/$(id -u)/com.x10lab.xpair-host\""));
-        assert!(cmd.contains("XpairHost setup is required before this remote session can start."));
+        assert!(cmd.contains("APP_NAME='XpairHost'; BUNDLE_PREFIX='com.x10lab.xpair-host';"));
+        assert!(cmd.contains("FORWARD_APP='Xpair'; FORWARD_BUNDLE='com.x10lab.xpair';"));
+        assert!(cmd.contains("command -v \"$RP_ENGINE\""));
+        assert!(cmd.contains("open -a \"$APP_NAME\" 2>/dev/null || open -a \"$FORWARD_APP\""));
+        assert!(cmd.contains("/bin/launchctl kickstart \"gui/$(id -u)/$BUNDLE_PREFIX\""));
+        assert!(cmd.contains("/bin/launchctl kickstart \"gui/$(id -u)/$FORWARD_BUNDLE\""));
+        assert!(cmd.contains("setup is required before this remote session can start."));
         assert!(cmd.contains("BASE='mac_project_8779b'; N=1; FRESH=0; CONT=1;"));
         assert!(cmd.contains("list-clients -t \"=${BASE}_${N}\" -F x"));
         assert!(cmd.contains("do N=$((N+1)); CONT=0; done"));
@@ -2358,6 +2794,214 @@ mod tests {
         );
         assert!(cmd.contains("opencode"));
         assert!(cmd.contains("OPENCODE_CONFIG_CONTENT"));
+    }
+
+    #[test]
+    fn remote_setup_uses_configured_app_identity_and_forward_fallbacks() {
+        let identity = AppIdentity {
+            app_name: "LabHost".to_string(),
+            bundle_prefix: "com.example.lab-host".to_string(),
+            forward_app: "Xpair".to_string(),
+            forward_bundle: "com.x10lab.xpair".to_string(),
+        };
+        let cmd = build_ensure_session_remote_cmd_for_engine_and_identity(
+            Engine::Claude,
+            "/tmp/aqua-tmux.sock",
+            "mac_project_8779b_1",
+            "/Users/me/project",
+            false,
+            true,
+            &identity,
+        );
+
+        assert!(cmd.contains("APP_NAME='LabHost'; BUNDLE_PREFIX='com.example.lab-host';"));
+        assert!(cmd.contains("FORWARD_APP='Xpair'; FORWARD_BUNDLE='com.x10lab.xpair';"));
+        assert!(!cmd.contains("open -a \"XpairHost\""));
+        assert!(cmd.contains("open -a \"$APP_NAME\""));
+        assert!(cmd.contains("open -a \"$FORWARD_APP\""));
+    }
+
+    #[test]
+    fn shell_remote_setup_skips_engine_preflight() {
+        let cmd = build_ensure_session_remote_cmd_for_engine(
+            Engine::Shell,
+            "/tmp/aqua-tmux.sock",
+            "mac_project_8779b_1",
+            "/Users/me/project",
+            false,
+            true,
+        );
+
+        assert!(!cmd.contains("command -v \"$RP_ENGINE\""));
+    }
+
+    #[test]
+    fn app_identity_loads_from_client_then_host_env_stack() {
+        let client_env = TestPath::new("identity-client");
+        let host_dir = TestDir::new("identity-host");
+        client_env.write("APP_NAME=ClientHost\nBUNDLE_PREFIX=com.example.client\n");
+        fs::write(
+            host_dir.path.join("host.env"),
+            "APP_NAME=HostHost\nBUNDLE_PREFIX=com.example.host\nFORWARD_APP=ForwardHost\nFORWARD_BUNDLE=com.example.forward\n",
+        )
+        .unwrap();
+        let host_dir_s = path_string(&host_dir.path);
+
+        with_env(
+            &[
+                ("RP_HOST_DIR", Some(&host_dir_s)),
+                ("APP_NAME", Some("EnvHost")),
+                ("BUNDLE_PREFIX", None),
+                ("FORWARD_APP", None),
+                ("FORWARD_BUNDLE", None),
+            ],
+            || {
+                assert_eq!(
+                    resolve_app_identity(&client_env.path).unwrap(),
+                    AppIdentity {
+                        app_name: "HostHost".to_string(),
+                        bundle_prefix: "com.example.host".to_string(),
+                        forward_app: "ForwardHost".to_string(),
+                        forward_bundle: "com.example.forward".to_string(),
+                    }
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn unmapped_prompt_registers_existing_host_path_by_default() {
+        let tmp = TestPath::new("unmapped-existing");
+        let client = TestDir::new("unmapped-existing-client");
+        let client_dir = path_string(&client.path);
+        let transport = MockTransport::new();
+        transport.push_response(0, "");
+        transport.push_response(0, "__YES__\n");
+        let mut raw_maps = String::new();
+        let mut raw_modes = String::new();
+        let mut input = io::Cursor::new(b"\n".as_slice());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let result = prompt_unmapped_folder_if_needed_with(
+            &tmp.path,
+            &transport,
+            "mac.local",
+            &client_dir,
+            &mut raw_maps,
+            &mut raw_modes,
+            false,
+            Os::Mac,
+            &mut input,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        assert_eq!(result, Some(client_dir.clone()));
+        assert_eq!(raw_maps, format!("{client_dir}::{client_dir}"));
+        assert_eq!(raw_modes, format!("{client_dir}::sync"));
+        assert_eq!(
+            config::get(&tmp.path, "FOLDER_MAPS").unwrap(),
+            Some(format!("{client_dir}::{client_dir}"))
+        );
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("Register this mapping for next time? [Y/n]: "));
+        assert_eq!(String::from_utf8(err).unwrap(), "");
+        assert_eq!(transport.calls().len(), 2);
+    }
+
+    #[test]
+    fn unmapped_missing_prompt_can_register_actual_host_path() {
+        let tmp = TestPath::new("unmapped-map");
+        let client = TestDir::new("unmapped-map-client");
+        let client_dir = path_string(&client.path);
+        let transport = MockTransport::new();
+        transport.push_response(0, "");
+        transport.push_response(0, "__NO__\n");
+        transport.push_response(0, "__YES__\n");
+        let mut raw_maps = String::new();
+        let mut raw_modes = String::new();
+        let mut input = io::Cursor::new(b"m\n/Users/host/project\n\n".as_slice());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let result = prompt_unmapped_folder_if_needed_with(
+            &tmp.path,
+            &transport,
+            "mac.local",
+            &client_dir,
+            &mut raw_maps,
+            &mut raw_modes,
+            false,
+            Os::Linux,
+            &mut input,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        let registered_client_dir = path_string(absolutize_existing_dir(&client_dir).unwrap());
+        assert_eq!(result, Some("/Users/host/project".to_string()));
+        assert_eq!(
+            raw_maps,
+            format!("{registered_client_dir}::/Users/host/project")
+        );
+        assert_eq!(raw_modes, format!("{registered_client_dir}::sync"));
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("[m] map to the host path that actually has this content"));
+        assert!(String::from_utf8(err)
+            .unwrap()
+            .contains("not found on mac.local"));
+    }
+
+    #[test]
+    fn unmapped_prompt_is_skipped_for_yes_and_windows() {
+        let tmp = TestPath::new("unmapped-skip");
+        let transport = MockTransport::new();
+        let mut raw_maps = String::new();
+        let mut raw_modes = String::new();
+        let mut input = io::Cursor::new([].as_slice());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        assert_eq!(
+            prompt_unmapped_folder_if_needed_with(
+                &tmp.path,
+                &transport,
+                "mac.local",
+                "/client",
+                &mut raw_maps,
+                &mut raw_modes,
+                true,
+                Os::Mac,
+                &mut input,
+                &mut out,
+                &mut err,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            prompt_unmapped_folder_if_needed_with(
+                &tmp.path,
+                &transport,
+                "mac.local",
+                "/client",
+                &mut raw_maps,
+                &mut raw_modes,
+                false,
+                Os::Windows,
+                &mut input,
+                &mut out,
+                &mut err,
+            )
+            .unwrap(),
+            None
+        );
+        assert!(transport.calls().is_empty());
     }
 
     #[test]

@@ -518,7 +518,9 @@ fn valid_host_part(part: &str) -> bool {
 }
 
 fn valid_remote_host(path: &Path) -> io::Result<Option<String>> {
-    Ok(get(path, "REMOTE_HOST")?.filter(|host| host.is_empty() || valid_host(host)))
+    Ok(get(path, "REMOTE_HOST")?
+        .map(|host| host.trim().to_string())
+        .filter(|host| !host.is_empty() && valid_host(host)))
 }
 
 fn canonical_engine(engine: &str) -> Option<&'static str> {
@@ -953,6 +955,31 @@ mod tests {
                 .find(|(key, _)| key == "mappings")
                 .map(|(_, value)| value.as_str()),
             Some("1")
+        );
+    }
+
+    #[test]
+    fn list_cli_labels_empty_or_whitespace_host_as_unconfigured() {
+        let tmp = TestPath::new("empty-host");
+        tmp.write("REMOTE_HOST=\n");
+
+        let rows = list_cli(&tmp.path).unwrap();
+
+        assert_eq!(
+            rows.iter()
+                .find(|(key, _)| key == "host")
+                .map(|(_, value)| value.as_str()),
+            Some("(no host configured)")
+        );
+
+        tmp.write("REMOTE_HOST='   '\n");
+        let rows = list_cli(&tmp.path).unwrap();
+
+        assert_eq!(
+            rows.iter()
+                .find(|(key, _)| key == "host")
+                .map(|(_, value)| value.as_str()),
+            Some("(no host configured)")
         );
     }
 

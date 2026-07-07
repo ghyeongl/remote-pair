@@ -23,6 +23,15 @@ impl Engine {
             _ => Self::Unknown,
         }
     }
+
+    pub fn command_name(self) -> &'static str {
+        match self {
+            Self::Claude | Self::Unknown => "claude",
+            Self::Shell => "shell",
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+        }
+    }
 }
 
 const SHELL_RESPAWN: &str = r#"trap 'kill -- -$$ 2>/dev/null' EXIT
@@ -78,7 +87,7 @@ trap 'kill -- -$$ 2>/dev/null' EXIT
 
 # codex must be present on the host (resolved on the host, not the client).
 command -v codex >/dev/null 2>&1 || {
-  printf '\n[codex not found on host — install it (brew install codex) or use --engine claude]\n' >&2
+  printf '\n[codex not found on host — install it with the native Codex installer or use --engine claude]\n' >&2
   exit 11
 }
 while :; do
@@ -95,7 +104,7 @@ trap 'kill -- -$$ 2>/dev/null' EXIT
 
 # opencode must be present on the host (resolved on the host, not the client).
 command -v opencode >/dev/null 2>&1 || {
-  printf '\n[opencode not found on host — install it (brew install opencode) or use --engine claude]\n' >&2
+  printf '\n[opencode not found on host — install it with the native OpenCode installer or use --engine claude]\n' >&2
   exit 11
 }
 # Auto-approve via inline config merge (TUI has no skip-permissions flag). Merges with existing config.
@@ -183,7 +192,7 @@ trap 'kill -- -$$ 2>/dev/null' EXIT
 
 # codex must be present on the host (resolved on the host, not the client).
 command -v codex >/dev/null 2>&1 || {
-  printf '\n[codex not found on host — install it (brew install codex) or use --engine claude]\n' >&2
+  printf '\n[codex not found on host — install it with the native Codex installer or use --engine claude]\n' >&2
   exit 11
 }
 while :; do
@@ -200,7 +209,7 @@ trap 'kill -- -$$ 2>/dev/null' EXIT
 
 # opencode must be present on the host (resolved on the host, not the client).
 command -v opencode >/dev/null 2>&1 || {
-  printf '\n[opencode not found on host — install it (brew install opencode) or use --engine claude]\n' >&2
+  printf '\n[opencode not found on host — install it with the native OpenCode installer or use --engine claude]\n' >&2
   exit 11
 }
 # Auto-approve via inline config merge (TUI has no skip-permissions flag). Merges with existing config.
