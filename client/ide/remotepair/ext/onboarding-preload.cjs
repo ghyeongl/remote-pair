@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('remotepair', {
   addMapping: (clientPath, hostPath, method) => rp('addMapping', [clientPath, hostPath, method]),
   removeMapping: (clientPath) => rp('removeMapping', [clientPath]),
   resolveHostPath: (target, hostPath) => rp('resolveHostPath', [target, hostPath]),
+  listHostDir: (target, hostPath) => rp('listHostDir', [target, hostPath]),
   mount: (hostPath, mountpoint) => rp('mount', [hostPath, mountpoint]),
   defaultMountpoint: (hostPath) => rp('defaultMountpoint', [hostPath]),
   // Discovery / remote-install. Client onboarding uses key auth only and pairs against the host's
