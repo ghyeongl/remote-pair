@@ -1386,8 +1386,8 @@ const bridge = {
     };
   },
 
-  // Mappings — resolve a host folder over SSH before saving it. The webview's sample host
-  // browser emits "~" paths, but FOLDER_MAPS must store an absolute path that exists on the host.
+  // Mappings — resolve a host folder over SSH before saving it. FOLDER_MAPS must store an
+  // absolute path that exists on the host, so the renderer treats this call as the trust boundary.
   async resolveHostPath(sshTarget, hostPath) {
     const h = String(sshTarget || "").trim();
     const p = String(hostPath || "").trim();
@@ -1408,6 +1408,44 @@ const bridge = {
       return { ok: false, path: "", err: s.err, state: s.state, action: s.action };
     }
     return { ok: false, path: "", err: "folder not found" };
+  },
+
+  async listHostDir(sshTarget, hostPath) {
+    const h = String(sshTarget || "").trim();
+    const p = String(hostPath || "").trim() || "~";
+    const empty = (err, state, action) => ({ ok: false, base: "", entries: [], err, state, action });
+    if (!h) return empty("no host");
+    if (!validSshTarget(h)) {
+      return empty(invalidSshTarget(h), SSH_STATE.INVALID_HOST, SSH_ACTION.ABORT);
+    }
+    const cmd = "cd " + shPathQuotePreserveHome(p) +
+      " 2>/dev/null && pwd && find . -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print";
+    const r = await run("ssh", [...sshProbeOpts(h, 5), h, cmd]);
+    if (r.code === 0) {
+      const lines = String(r.out || "").split("\n");
+      const base = String(lines.shift() || "").trim();
+      if (!base) return empty("folder not found");
+      const names = lines
+        .filter((line) => line.startsWith("./"))
+        .map((line) => line.slice(2))
+        .filter(Boolean)
+        .sort();
+      const capped = names.slice(0, 500);
+      const prefix = base === "/" ? "" : base;
+      const result = {
+        ok: true,
+        base,
+        entries: capped.map((name) => ({ name, path: `${prefix}/${name}` })),
+        err: "",
+      };
+      if (names.length > capped.length) result.truncated = true;
+      return result;
+    }
+    if (r.code === 255 || r.err) {
+      const s = sshResult(r, "could not list host folder");
+      return empty(s.err, s.state, s.action);
+    }
+    return empty("folder not found");
   },
 
   // Mappings — pre-fill with the NetFS/Finder mountpoint. macOS chooses
