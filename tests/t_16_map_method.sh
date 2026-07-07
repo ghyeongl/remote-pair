@@ -70,4 +70,52 @@ assert_eq "$(json_method "$EXTERNAL")" "sync" "non-SMB /Volumes path infers sync
 
 cleanup_sandbox
 
+# ── shared SMB discovery contract across the CLIs that source maplib.sh ──
+new_sandbox
+cat > "$MOCKBIN/mount" <<'EOF'
+#!/bin/bash
+echo '//bob@office-mac.local/foo on /Volumes/wrong-user (smbfs, nodev, nosuid, mounted by bob)'
+echo '//alice@office-mac.local/foo on /Volumes/foo-1 (smbfs, nodev, nosuid, mounted by alice)'
+EOF
+cat > "$MOCKBIN/ssh" <<'EOF'
+#!/bin/bash
+case "$*" in *" whoami") echo alice; exit 0 ;; esac
+exit 1
+EOF
+chmod +x "$MOCKBIN/mount" "$MOCKBIN/ssh"
+extract_maplib_guard() {
+  awk '
+    $0 == "if [ -f \"$RP_CLIENT_DIR/bin/maplib.sh\" ]; then" { capture=1 }
+    capture { print }
+    capture && $0 == "fi" { exit }
+  ' "$1"
+}
+discover_via_guard() {
+  local src="$1" guard="$SBX/maplib-guard.sh"
+  extract_maplib_guard "$src" > "$guard"
+  PATH="$MOCKBIN:$PATH" RP_CLIENT_DIR="$RP_CLIENT_DIR" REMOTE_HOST="user@office-mac.local" bash -c '
+    set -euo pipefail
+    . "$1"
+    discover_mountpoint_for_hostpath "/Users/alice/Projects/foo"
+  ' _ "$guard"
+}
+MP_XPAIR="$(discover_via_guard "$_REPO_ROOT/client/cli/xpair")"
+MP_LAUNCH="$(discover_via_guard "$_REPO_ROOT/client/cli/xpair-launch")"
+MP_MOUNT="$(discover_via_guard "$_REPO_ROOT/client/cli/xpair-mount")"
+it "map_method/discover-contract-xpair"
+assert_eq "$MP_XPAIR" "/Volumes/foo-1" "xpair guard loads canonical SMB discovery"
+it "map_method/discover-contract-launch"
+assert_eq "$MP_LAUNCH" "$MP_XPAIR" "xpair-launch guard returns the same mountpoint"
+it "map_method/discover-contract-mount"
+assert_eq "$MP_MOUNT" "$MP_XPAIR" "xpair-mount guard returns the same mountpoint"
+cleanup_sandbox
+
+# ── bootstrap valid_host copies stay in sync with maplib.sh (they run pre-self-update) ──
+extract_valid_host() { awk '/^ *valid_host\(\) \{$/{c=1} c{sub(/^[[:space:]]*/,""); print} c && /^ *\}$/{exit}' "$1"; }
+CANON="$(extract_valid_host "$_REPO_ROOT/client/cli/bin/maplib.sh")"
+for _s in xpair xpair-launch xpair-mount reset-onboarding.sh; do
+  it "map_method/fallback-valid-host-sync-$_s"
+  assert_eq "$(extract_valid_host "$_REPO_ROOT/client/cli/$_s")" "$CANON" "$_s bootstrap valid_host matches maplib.sh"
+done
+
 finish

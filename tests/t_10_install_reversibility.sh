@@ -281,7 +281,7 @@ for a in "$@"; do
 done
 [ -n "$out" ] || exit 2
 case "$out" in
-  */xpair|*/xpair-launch|*/hangul-romanize|*/xpair-askpass|*/xpair-mount|*/xpair-desktop|*/xpair-editor|*/logging.sh|*/uninstall-host.sh)
+  */xpair|*/xpair-launch|*/hangul-romanize|*/xpair-askpass|*/xpair-mount|*/xpair-desktop|*/xpair-editor|*/maplib.sh|*/logging.sh|*/uninstall-host.sh)
     printf 'updated %s\n' "$(basename "$out")" > "$out"
     ;;
   *) exit 22 ;;
@@ -298,6 +298,7 @@ assert_contains "$(cat "$MOCKBIN/xpair-mount" 2>/dev/null)" "updated xpair-mount
 assert_contains "$(cat "$MOCKBIN/xpair-desktop" 2>/dev/null)" "updated xpair-desktop" "self-update refreshes xpair-desktop"
 assert_contains "$(cat "$MOCKBIN/xpair-editor" 2>/dev/null)" "updated xpair-editor" "self-update refreshes xpair-editor"
 assert_contains "$(cat "$MOCKBIN/xpair-askpass" 2>/dev/null)" "updated xpair-askpass" "self-update refreshes askpass helper"
+assert_contains "$(cat "$RP_CLIENT_DIR/bin/maplib.sh" 2>/dev/null)" "updated maplib.sh" "self-update refreshes map helpers"
 assert_contains "$(cat "$RP_CLIENT_DIR/share/uninstall-host.sh" 2>/dev/null)" "updated uninstall-host.sh" "self-update stages canonical host uninstaller"
 cleanup_sandbox
 

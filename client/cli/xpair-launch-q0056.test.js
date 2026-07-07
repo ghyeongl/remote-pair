@@ -4,6 +4,7 @@ const path = require("node:path");
 
 const root = __dirname;
 const launcher = fs.readFileSync(path.join(root, "xpair-launch"), "utf8");
+const maplib = fs.readFileSync(path.join(root, "bin/maplib.sh"), "utf8");
 
 let failures = 0;
 function test(name, fn) {
@@ -19,7 +20,7 @@ function test(name, fn) {
 
 test("launch/attach preserves persistent host session identity and context (Q0056)", () => {
   assert.match(
-    launcher,
+    maplib,
     /map_to_host\(\)[\s\S]*best_c="" best_h=""[\s\S]*case "\$d" in "\$c"\|"\$c"\/\*\)[\s\S]*"\$\{d#"\$best_c"\}"/,
     "client paths must resolve to the longest matching mapped host path",
   );

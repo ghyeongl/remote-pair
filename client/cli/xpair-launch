@@ -87,29 +87,44 @@ canonical_engine() {
 
 sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
-valid_host() {
-  local target="${1:-}" user="" host=""
-  case "$target" in ''|-*) return 1 ;; esac
-  case "$target" in
-    *@*)
-      case "$target" in *@*@*|@*|*@) return 1 ;; esac
-      user="${target%@*}"; host="${target#*@}"
-      case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
-      ;;
-    *) host="$target" ;;
-  esac
-  case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
-}
+# Source the shared logger; no-op fallback for partially-updated clients.
+# shellcheck disable=SC1090
+[ -f "$RP_CLIENT_DIR/bin/logging.sh" ] && . "$RP_CLIENT_DIR/bin/logging.sh"
+type rp_log >/dev/null 2>&1 || { rp_log(){ :; }; log_info(){ :; }; log_warn(){ printf '%s\n' "$*" >&2; }; log_error(){ printf '%s\n' "$*" >&2; }; }
+
+if [ -f "$RP_CLIENT_DIR/bin/maplib.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$RP_CLIENT_DIR/bin/maplib.sh"
+else
+  # Deferred failure: mapping-free commands (self-update, host, status, logs) must keep
+  # working on a pre-maplib install — a load-time exit would brick the upgrade path
+  # (the old self-update never fetched maplib.sh, so the recovery command itself dies).
+  # valid_host is the one REAL implementation here: startup validates $REMOTE_HOST with it
+  # before any dispatch, so even its stub would re-brick self-update. It is a pure,
+  # dependency-free string check — bootstrap copy of maplib.sh's (t_16 asserts they match).
+  valid_host() {
+    local target="${1:-}" user="" host=""
+    case "$target" in ''|-*) return 1 ;; esac
+    case "$target" in
+      *@*)
+        case "$target" in *@*@*|@*|*@) return 1 ;; esac
+        user="${target%@*}"; host="${target#*@}"
+        case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        ;;
+      *) host="$target" ;;
+    esac
+    case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+  }
+  for _maplib_fn in map_client_of map_host_of map_to_host resolve_host smb_host map_mode_infer smb_user share_name_for_hostpath expected_mountpoint smb_mount_url smb_mount_source discover_mountpoint_for_share discover_mountpoint_for_hostpath host_smb_status; do
+    eval "$_maplib_fn() { printf '%s\n' 'maplib.sh missing — run: xpair self-update' >&2; exit 1; }"
+  done
+  unset _maplib_fn
+fi
 
 if [ -n "$REMOTE_HOST" ] && ! valid_host "$REMOTE_HOST"; then
   printf 'invalid REMOTE_HOST ignored: %s\n' "$REMOTE_HOST" >&2
   REMOTE_HOST=""
 fi
-
-# Source the shared logger; no-op fallback for partially-updated clients.
-# shellcheck disable=SC1090
-[ -f "$RP_CLIENT_DIR/bin/logging.sh" ] && . "$RP_CLIENT_DIR/bin/logging.sh"
-type rp_log >/dev/null 2>&1 || { rp_log(){ :; }; log_info(){ :; }; log_warn(){ printf '%s\n' "$*" >&2; }; log_error(){ printf '%s\n' "$*" >&2; }; }
 
 # ── args ──
 FRESH=0; RP_YES="${RP_YES:-0}"; DIR_ARG=""
@@ -130,7 +145,19 @@ mkdir -p "$RP_CLIENT_DIR/logs"
 _rotate_log() { local f="$1" max="${2:-5000000}" sz; sz="$(_stat_size "$f" || echo 0)"; [ "$sz" -gt "$max" ] && mv -f "$f" "$f.1" 2>/dev/null || true; }
 _rotate_log "$LAUNCH_LOG"
 printf '\n===== %s launch %s (%s) =====\n' "$(date '+%F %T')" "${DIR_ARG:-$PWD}" "$(hostname -s)" >> "$LAUNCH_LOG"
-exec 2> >(while IFS= read -r l; do printf '%s %s\n' "$(date '+%T')" "$l" >> "$LAUNCH_LOG"; printf '%s\n' "$l" >&2; done)
+if exec 2> >(while IFS= read -r l; do printf '%s %s\n' "$(date '+%T')" "$l" >> "$LAUNCH_LOG"; printf '%s\n' "$l" >&2; done); then
+  :
+else
+  _stderr_fifo="${TMPDIR:-/tmp}/xpair-launch-stderr.$$"
+  if mkfifo "$_stderr_fifo" 2>/dev/null; then
+    while IFS= read -r l; do printf '%s %s\n' "$(date '+%T')" "$l" >> "$LAUNCH_LOG"; printf '%s\n' "$l" >&2; done < "$_stderr_fifo" &
+    if exec 2>"$_stderr_fifo"; then
+      rm -f "$_stderr_fifo"
+    else
+      rm -f "$_stderr_fifo"
+    fi
+  fi
+fi
 on_exit() {
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -189,38 +216,7 @@ choose_engine() {
 LOCAL_HOST="$(hostname -s)"
 
 # ── path mapping: client path → host path (longest-prefix). Assumes same path if no mapping. ──
-map_client_of() { printf '%s' "${1%%::*}"; }
-map_host_of()   { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '%s' "$h"; }
-
-map_to_host() { # $1=clientDir → echo hostDir
-  local d="$1" best_c="" best_h="" c h pair IFS=';'
-  for pair in $FOLDER_MAPS; do
-    [ -n "$pair" ] || continue
-    c="$(map_client_of "$pair")"; h="$(map_host_of "$pair")"
-    case "$d" in "$c"|"$c"/*) if [ "${#c}" -gt "${#best_c}" ]; then best_c="$c"; best_h="$h"; fi ;; esac
-  done
-  if [ -n "$best_c" ]; then printf '%s%s' "$best_h" "${d#"$best_c"}"; else printf '%s' "$d"; fi
-}
-
 # ── mount-method attach guard: remount missing SMB mounts best-effort before attach ──
-map_mode_infer() {
-  local d="$1" host="${REMOTE_HOST:-}" inferred=""
-  case "$d" in /Volumes/*) : ;; *) printf 'sync'; return ;; esac
-  [ -n "$host" ] || { printf 'sync'; return; }
-  host="${host#*@}"
-  inferred="$(mount 2>/dev/null | awk -v d="$d" -v h="$host" '
-    index($0, " (smbfs") {
-      start = index($0, " on "); if (!start) next
-      src = substr($0, 1, start - 1)
-      rest = substr($0, start + 4)
-      idx = index(rest, " (smbfs"); if (!idx) next
-      mp = substr(rest, 1, idx - 1)
-      if (!(index(src, "@" h "/") || index(src, "//" h "/") == 1)) next
-      if (d == mp || index(d, mp "/") == 1) { print "mount"; exit }
-    }
-  ' || true)"
-  [ "$inferred" = mount ] && printf 'mount' || printf 'sync'
-}
 map_mode_of() {
   local d="$1" e c IFS=';'
   for e in ${FOLDER_MAP_MODES:-}; do [ -n "$e" ] || continue
@@ -230,28 +226,6 @@ map_mode_of() {
   map_mode_infer "$d"
 }
 
-smb_host() {
-  case "${REMOTE_HOST:-}" in *@*) printf '%s' "${REMOTE_HOST#*@}" ;; *) printf '%s' "${REMOTE_HOST:-}" ;; esac
-}
-share_name_for_hostpath() {
-  basename "$1"
-}
-expected_mountpoint_for_hostpath() {
-  printf '/Volumes/%s' "$(share_name_for_hostpath "$1")"
-}
-discover_mountpoint_for_hostpath() {
-  local hostpath="$1" share src
-  share="$(share_name_for_hostpath "$hostpath")"
-  src="@$(smb_host)/${share} on "
-  mount 2>/dev/null | awk -v src="$src" '
-    index($0, src) && index($0, " (smbfs") {
-      start = index($0, " on ")
-      rest = substr($0, start + 4)
-      idx = index(rest, " (smbfs")
-      if (idx) { print substr(rest, 1, idx - 1); exit }
-    }
-  ' || true
-}
 resolve_xpair_mount_tool() {
   if [ -x "$LOCAL_BIN/xpair-mount" ]; then
     printf '%s\n' "$LOCAL_BIN/xpair-mount"
@@ -308,7 +282,7 @@ ensure_mount_mappings_best_effort() {
       replace_mount_mapping_client_path "$client_path" "$mountpoint"
       continue
     fi
-    expected="$(expected_mountpoint_for_hostpath "$host_path")"
+    expected="$(expected_mountpoint "$host_path")"
     if out="$("$tool" --backend smb mount "$host_path" 2>&1)"; then
       printf '%s\n' "$out"
       mountpoint="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Mountpoint:[[:space:]]*//p' | tail -1)"

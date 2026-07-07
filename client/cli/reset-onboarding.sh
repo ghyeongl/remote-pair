@@ -16,8 +16,9 @@
 set -euo pipefail
 
 RP_DIR="$HOME/.xpair/client"
+RP_CLIENT_DIR="${RP_CLIENT_DIR:-$RP_DIR}"
 RP_HOST_DIR="$HOME/.xpair/host"
-CLIENT_ENV="$RP_DIR/client.env"
+CLIENT_ENV="$RP_CLIENT_DIR/client.env"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 YES=0
@@ -31,6 +32,35 @@ for a in "$@"; do
   esac
 done
 
+if [ -f "$RP_CLIENT_DIR/bin/maplib.sh" ]; then
+  # shellcheck disable=SC1090
+  . "$RP_CLIENT_DIR/bin/maplib.sh"
+else
+  # Deferred failure: mapping-free commands (self-update, host, status, logs) must keep
+  # working on a pre-maplib install — a load-time exit would brick the upgrade path
+  # (the old self-update never fetched maplib.sh, so the recovery command itself dies).
+  # valid_host is the one REAL implementation here: startup validates $REMOTE_HOST with it
+  # before any dispatch, so even its stub would re-brick self-update. It is a pure,
+  # dependency-free string check — bootstrap copy of maplib.sh's (t_16 asserts they match).
+  valid_host() {
+    local target="${1:-}" user="" host=""
+    case "$target" in ''|-*) return 1 ;; esac
+    case "$target" in
+      *@*)
+        case "$target" in *@*@*|@*|*@) return 1 ;; esac
+        user="${target%@*}"; host="${target#*@}"
+        case "$user" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+        ;;
+      *) host="$target" ;;
+    esac
+    case "$host" in ''|-*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+  }
+  for _maplib_fn in map_client_of map_host_of map_to_host resolve_host smb_host map_mode_infer smb_user share_name_for_hostpath expected_mountpoint smb_mount_url smb_mount_source discover_mountpoint_for_share discover_mountpoint_for_hostpath host_smb_status; do
+    eval "$_maplib_fn() { printf '%s\n' 'maplib.sh missing — run: xpair self-update' >&2; exit 1; }"
+  done
+  unset _maplib_fn
+fi
+
 # Resolve xpair-mount (installed or on PATH) for backend-correct unmounts.
 RPM=""
 if command -v xpair-mount >/dev/null 2>&1; then RPM="$(command -v xpair-mount)"
@@ -42,26 +72,6 @@ if [ "$YES" != 1 ]; then
   case "${ans:-n}" in [yY]*) ;; *) echo "Aborted."; exit 1 ;; esac
 fi
 
-map_client_of() { printf '%s' "${1%%::*}"; }
-map_host_of() { local p="$1" h="${1#*::}"; [ "$h" = "$p" ] && h="$p"; printf '%s' "$h"; }
-map_mode_infer() {
-  local d="$1" host="${REMOTE_HOST:-}" inferred=""
-  case "$d" in /Volumes/*) : ;; *) printf 'sync'; return ;; esac
-  [ -n "$host" ] || { printf 'sync'; return; }
-  host="${host#*@}"
-  inferred="$(mount 2>/dev/null | awk -v d="$d" -v h="$host" '
-    index($0, " (smbfs") {
-      start = index($0, " on "); if (!start) next
-      src = substr($0, 1, start - 1)
-      rest = substr($0, start + 4)
-      idx = index(rest, " (smbfs"); if (!idx) next
-      mp = substr(rest, 1, idx - 1)
-      if (!(index(src, "@" h "/") || index(src, "//" h "/") == 1)) next
-      if (d == mp || index(d, mp "/") == 1) { print "mount"; exit }
-    }
-  ' || true)"
-  [ "$inferred" = mount ] && printf 'mount' || printf 'sync'
-}
 map_mode_for() {
   local client="$1" e c IFS=';'
   for e in ${FOLDER_MAP_MODES:-}; do
