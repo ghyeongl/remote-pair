@@ -6,6 +6,7 @@ const OPENED_SESSIONS_LEGACY_VERSION = 1;
 const OPENED_SESSIONS_BUCKET_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const OPENED_SESSIONS_LOCK_FILE = "opened-sessions.lock";
 const SESSION_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const BUCKET_KEY_RE = /^[A-Za-z0-9_.-]+(?:#[2-9][0-9]*)?$/;
 
 function normalizeOpenedSessionNames(names) {
   const out = [];
@@ -28,6 +29,18 @@ function cleanHost(host) {
 function cleanScopeId(scopeId) {
   const value = typeof scopeId === "string" ? scopeId.trim() : "";
   return SESSION_NAME_RE.test(value) ? value : null;
+}
+
+function cleanBucketKey(bucketKey) {
+  const value = typeof bucketKey === "string" ? bucketKey.trim() : "";
+  return BUCKET_KEY_RE.test(value) ? value : null;
+}
+
+function baseScopeFromBucketKey(bucketKey) {
+  const key = cleanBucketKey(bucketKey);
+  if (!key) return null;
+  const idx = key.indexOf("#");
+  return cleanScopeId(idx === -1 ? key : key.slice(0, idx));
 }
 
 function nowFromOpts(opts) {
@@ -60,11 +73,11 @@ function serializeOpenedSessions(host, scopeId, names, opts = {}) {
   };
 }
 
-function normalizeBucket(bucket, now, pruneOld) {
+function normalizeBucket(bucket, now, pruneOld, opts = {}) {
   if (!isRecord(bucket)) return null;
   const ts = Number.isFinite(bucket.ts) ? bucket.ts : now;
-  if (pruneOld && ts < now - OPENED_SESSIONS_BUCKET_TTL_MS) return null;
   const pid = Number.isInteger(bucket.pid) && bucket.pid > 0 ? bucket.pid : 0;
+  if (pruneOld && ts < now - OPENED_SESSIONS_BUCKET_TTL_MS && !lockPidAlive(pid, opts)) return null;
   return {
     sessions: normalizeOpenedSessionNames(bucket.sessions),
     ts,
@@ -72,23 +85,23 @@ function normalizeBucket(bucket, now, pruneOld) {
   };
 }
 
-function normalizedWindows(windows, now, pruneOld) {
+function normalizedWindows(windows, now, pruneOld, opts = {}) {
   const out = {};
   if (!isRecord(windows)) return out;
-  for (const [rawScope, bucket] of Object.entries(windows)) {
-    const scope = cleanScopeId(rawScope);
-    if (!scope) continue;
-    const normalized = normalizeBucket(bucket, now, pruneOld);
+  for (const [rawBucketKey, bucket] of Object.entries(windows)) {
+    const bucketKey = cleanBucketKey(rawBucketKey);
+    if (!bucketKey) continue;
+    const normalized = normalizeBucket(bucket, now, pruneOld, opts);
     if (!normalized) continue;
-    out[scope] = normalized;
+    out[bucketKey] = normalized;
   }
   return out;
 }
 
-function scopeWindowSessions(windows, scopeId) {
-  const scope = cleanScopeId(scopeId);
-  if (!scope || !isRecord(windows)) return [];
-  const bucket = windows[scope];
+function scopeWindowSessions(windows, bucketKey) {
+  const key = cleanBucketKey(bucketKey);
+  if (!key || !isRecord(windows)) return [];
+  const bucket = windows[key];
   if (!isRecord(bucket)) return [];
   return normalizeOpenedSessionNames(bucket.sessions);
 }
@@ -107,8 +120,8 @@ function legacyBucketForScope(parsed, scopeId, now) {
 
 function parseOpenedSessions(raw, currentHost, scopeId) {
   const clean = cleanHost(currentHost);
-  const scope = cleanScopeId(scopeId);
-  if (!clean || !scope || typeof raw !== "string" || !raw.trim()) return [];
+  const bucketKey = cleanBucketKey(scopeId);
+  if (!clean || !bucketKey || typeof raw !== "string" || !raw.trim()) return [];
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -117,7 +130,7 @@ function parseOpenedSessions(raw, currentHost, scopeId) {
   }
   if (!isRecord(parsed) || parsed.host !== clean) return [];
   if (parsed.v === OPENED_SESSIONS_VERSION) {
-    return scopeWindowSessions(parsed.windows, scope);
+    return scopeWindowSessions(parsed.windows, bucketKey);
   }
   if (parsed.v === OPENED_SESSIONS_LEGACY_VERSION) {
     return normalizeOpenedSessionNames(parsed.sessions);
@@ -142,7 +155,7 @@ function readOpenedSessions(filePath, currentHost, scopeId, opts = {}) {
   return sessions;
 }
 
-function readSnapshotForWrite(filePath, currentHost, scopeId, now) {
+function readSnapshotForWrite(filePath, currentHost, scopeId, now, opts = {}) {
   const clean = cleanHost(currentHost);
   const scope = cleanScopeId(scopeId);
   const empty = { v: OPENED_SESSIONS_VERSION, host: clean, windows: {} };
@@ -171,7 +184,7 @@ function readSnapshotForWrite(filePath, currentHost, scopeId, now) {
   return {
     v: OPENED_SESSIONS_VERSION,
     host: clean,
-    windows: normalizedWindows(parsed.windows, now, true),
+    windows: normalizedWindows(parsed.windows, now, true, opts),
   };
 }
 
@@ -197,6 +210,48 @@ function lockPidAlive(pid, opts) {
   } catch (e) {
     return !!(e && e.code === "EPERM");
   }
+}
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function bucketClaimed(bucket, opts) {
+  return isRecord(bucket) && lockPidAlive(bucket.pid, opts);
+}
+
+function suffixNumberForScope(bucketKey, scope) {
+  const prefix = `${scope}#`;
+  if (!bucketKey.startsWith(prefix)) return null;
+  const raw = bucketKey.slice(prefix.length);
+  if (!/^[2-9][0-9]*$/.test(raw)) return null;
+  const n = parseInt(raw, 10);
+  return Number.isInteger(n) ? n : null;
+}
+
+function sortedSiblingBucketKeys(windows, scope) {
+  return Object.keys(windows)
+    .map((key) => ({ key, n: suffixNumberForScope(key, scope) }))
+    .filter((entry) => entry.n !== null)
+    .sort((a, b) => a.n - b.n)
+    .map((entry) => entry.key);
+}
+
+function nextFreeBucketKey(windows, scope) {
+  if (!hasOwn(windows, scope)) return scope;
+  for (let n = 2; n < 1000000; n += 1) {
+    const key = `${scope}#${n}`;
+    if (!hasOwn(windows, key)) return key;
+  }
+  return null;
+}
+
+function chooseOpenedSessionsClaimBucket(windows, scope, opts = {}) {
+  if (hasOwn(windows, scope) && !bucketClaimed(windows[scope], opts)) return scope;
+  for (const key of sortedSiblingBucketKeys(windows, scope)) {
+    if (!bucketClaimed(windows[key], opts)) return key;
+  }
+  return nextFreeBucketKey(windows, scope);
 }
 
 function readLockPid(lockFile) {
@@ -266,21 +321,53 @@ function releaseOpenedSessionsLock(lockFile, opts = {}) {
   try { fs.unlinkSync(lockFile); } catch (_e) {}
 }
 
-function writeOpenedSessionsForScope(filePath, host, scopeId, names, opts = {}) {
+function claimOpenedSessionsBucket(filePath, host, scopeId, opts = {}) {
   const clean = cleanHost(host);
   const scope = cleanScopeId(scopeId);
-  if (!clean || !scope) return false;
+  if (!clean || !scope) return null;
+  const dir = path.dirname(filePath);
+  const lockFile = path.join(dir, OPENED_SESSIONS_LOCK_FILE);
+  if (!claimOpenedSessionsLock(lockFile, opts)) return null;
+  try {
+    const now = nowFromOpts(opts);
+    const pid = pidFromOpts(opts);
+    const snapshot = readSnapshotForWrite(filePath, clean, scope, now, opts);
+    if (!snapshot) return null;
+    const bucketKey = chooseOpenedSessionsClaimBucket(snapshot.windows, scope, opts);
+    if (!bucketKey) return null;
+    const existing = snapshot.windows[bucketKey];
+    const sessions = normalizeOpenedSessionNames(existing && existing.sessions);
+    snapshot.windows[bucketKey] = {
+      sessions,
+      ts: now,
+      pid,
+    };
+    if (!writeSnapshotAtomic(filePath, snapshot)) return null;
+    return { bucketKey, sessions };
+  } finally {
+    releaseOpenedSessionsLock(lockFile, opts);
+  }
+}
+
+function writeOpenedSessionsForBucket(filePath, host, bucketKey, names, opts = {}) {
+  const clean = cleanHost(host);
+  const key = cleanBucketKey(bucketKey);
+  const scope = baseScopeFromBucketKey(key);
+  if (!clean || !key || !scope) return false;
   const dir = path.dirname(filePath);
   const lockFile = path.join(dir, OPENED_SESSIONS_LOCK_FILE);
   if (!claimOpenedSessionsLock(lockFile, opts)) return false;
   try {
     const now = nowFromOpts(opts);
-    const snapshot = readSnapshotForWrite(filePath, clean, scope, now);
+    const pid = pidFromOpts(opts);
+    const snapshot = readSnapshotForWrite(filePath, clean, scope, now, opts);
     if (!snapshot) return false;
-    snapshot.windows[scope] = {
+    const existing = snapshot.windows[key];
+    if (existing && existing.pid !== pid && bucketClaimed(existing, opts)) return false;
+    snapshot.windows[key] = {
       sessions: normalizeOpenedSessionNames(names),
       ts: now,
-      pid: pidFromOpts(opts),
+      pid,
     };
     return writeSnapshotAtomic(filePath, snapshot);
   } finally {
@@ -288,27 +375,47 @@ function writeOpenedSessionsForScope(filePath, host, scopeId, names, opts = {}) 
   }
 }
 
-function migrateOpenedSessionsScope(filePath, host, oldScopeId, newScopeId, opts = {}) {
+function writeOpenedSessionsForScope(filePath, host, scopeId, names, opts = {}) {
   const clean = cleanHost(host);
-  const oldScope = cleanScopeId(oldScopeId);
+  const scope = cleanScopeId(scopeId);
+  if (!clean || !scope) return false;
+  return writeOpenedSessionsForBucket(filePath, clean, scope, names, opts);
+}
+
+function migrateOpenedSessionsClaim(filePath, host, claimedBucketKey, newScopeId, opts = {}) {
+  const clean = cleanHost(host);
+  const oldKey = cleanBucketKey(claimedBucketKey);
   const newScope = cleanScopeId(newScopeId);
-  if (!clean || !oldScope || !newScope) return false;
-  if (oldScope === newScope) return true;
+  if (!clean || !oldKey || !newScope) return null;
   const dir = path.dirname(filePath);
   const lockFile = path.join(dir, OPENED_SESSIONS_LOCK_FILE);
-  if (!claimOpenedSessionsLock(lockFile, opts)) return false;
+  if (!claimOpenedSessionsLock(lockFile, opts)) return null;
   try {
     const now = nowFromOpts(opts);
-    const snapshot = readSnapshotForWrite(filePath, clean, oldScope, now);
-    if (!snapshot) return false;
-    const bucket = snapshot.windows[oldScope];
-    if (!bucket) return true;
-    snapshot.windows[newScope] = bucket;
-    delete snapshot.windows[oldScope];
-    return writeSnapshotAtomic(filePath, snapshot);
+    const pid = pidFromOpts(opts);
+    const oldScope = baseScopeFromBucketKey(oldKey) || newScope;
+    const snapshot = readSnapshotForWrite(filePath, clean, oldScope, now, opts);
+    if (!snapshot) return null;
+    const bucket = snapshot.windows[oldKey];
+    if (!bucket || bucket.pid !== pid) return null;
+    let targetKey = newScope;
+    if (targetKey !== oldKey && hasOwn(snapshot.windows, targetKey) && bucketClaimed(snapshot.windows[targetKey], opts)) {
+      targetKey = nextFreeBucketKey(snapshot.windows, newScope);
+    }
+    if (!targetKey) return null;
+    if (targetKey !== oldKey) {
+      snapshot.windows[targetKey] = bucket;
+      delete snapshot.windows[oldKey];
+    }
+    if (!writeSnapshotAtomic(filePath, snapshot)) return null;
+    return targetKey;
   } finally {
     releaseOpenedSessionsLock(lockFile, opts);
   }
+}
+
+function migrateOpenedSessionsScope(filePath, host, oldScopeId, newScopeId, opts = {}) {
+  return !!migrateOpenedSessionsClaim(filePath, host, oldScopeId, newScopeId, opts);
 }
 
 module.exports = {
@@ -316,10 +423,14 @@ module.exports = {
   OPENED_SESSIONS_BUCKET_TTL_MS,
   OPENED_SESSIONS_LOCK_FILE,
   SESSION_NAME_RE,
+  BUCKET_KEY_RE,
   normalizeOpenedSessionNames,
   serializeOpenedSessions,
   parseOpenedSessions,
   readOpenedSessions,
+  claimOpenedSessionsBucket,
+  writeOpenedSessionsForBucket,
   writeOpenedSessionsForScope,
+  migrateOpenedSessionsClaim,
   migrateOpenedSessionsScope,
 };

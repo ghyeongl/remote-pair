@@ -88,6 +88,11 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
     "Attached changes must rewrite the last-opened session snapshot through the extension host",
   );
   assert.match(
+    sessionManager,
+    /function localAttachedSessionsHaveUnfrozenName\(\): boolean \{[\s\S]*for \(const session of attachedProvider\?\.getAttached\(\) \?\? \[\]\)[\s\S]*if \(!normalizedSessionName\(session\.sessionName\)\) \{[\s\S]*return true;[\s\S]*function writeOpenedSessions\(commandService: ICommandService\): void \{[\s\S]*if \(localAttachedSessionsHaveUnfrozenName\(\)\) \{[\s\S]*opened sessions write deferred until attached session names freeze[\s\S]*return;[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.writeOpened', localAttachedSessionNameList\(\)\)/,
+    "Attached snapshot writes must defer while any attached terminal lacks a frozen tmux sessionName",
+  );
+  assert.match(
     terminalSidebar,
     /id: 'remotepair\.terminalSidebar\.reattachSession'[\s\S]*view\.reattachSession\(name\.trim\(\)\)/,
     "startup restore must have a command entry point into the same sidebar reattach flow",
@@ -144,18 +149,18 @@ test("terminal tabs restore saved sessions after client relaunch (Q0546/Q0547)",
   );
   assert.match(
     extension,
-    /const clientServicesLock = claimClientServicesLock\(\);\n  setOpenedSessionsWriteOwner\(\!!clientServicesLock\);/,
-    "opened-session restore/write ownership must reuse the existing client services lock",
+    /let openedSessionsClaimedBucketKey = null;[\s\S]*claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, currentSnapshotScopeId, \{ log, pid: process\.pid \}\)[\s\S]*openedSessionsClaimedBucketKey = claim \? claim\.bucketKey : null;[\s\S]*const openedNames = claim \? claim\.sessions : \[\];/,
+    "opened-session restore/write ownership must come from the per-bucket claim",
   );
   assert.match(
     extension,
-    /\/\/ 5a\) Warm the Sessions sidebar in every window[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar"\)[\s\S]*if \(clientServicesLock\) \{[\s\S]*return restoreOpenedSessionsOnActivation\(\);[\s\S]*opened sessions: restore skipped in non-owner extension host[\s\S]*return 0;/,
-    "startup warmup and Browser default must run in every window while restore stays owner-gated",
+    /\/\/ 5a\) Warm the Sessions sidebar in every window[\s\S]*Snapshot restore\/write ownership is claimed per opened-session bucket[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar"\)[\s\S]*return restoreOpenedSessionsOnActivation\(\);/,
+    "startup warmup and snapshot restore must run in every window through a per-bucket claim",
   );
   assert.match(
     extension,
-    /restoreOpenedSessionsOnActivation\(\)[\s\S]*readOpenedSessions\(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, \{ log \}\)[\s\S]*let sessionListWasAvailable = false;[\s\S]*const list = await waitForAvailableSessionList\(\);[\s\S]*if \(!list\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*sessionListWasAvailable = true;[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*if \(sessionListWasAvailable && restored === 0\) \{[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
-    "restore must read only this window scope and sync immediately only when nothing was restored",
+    /restoreOpenedSessionsOnActivation\(\)[\s\S]*claimOpenedSessionsBucket\(OPENED_SESSIONS_FILE, host, currentSnapshotScopeId, \{ log, pid: process\.pid \}\)[\s\S]*const openedNames = claim \? claim\.sessions : \[\];[\s\S]*let sessionListWasAvailable = false;[\s\S]*const list = await waitForAvailableSessionList\(\);[\s\S]*if \(!list\) \{[\s\S]*keeping snapshot[\s\S]*return 0;[\s\S]*sessionListWasAvailable = true;[\s\S]*finally \{[\s\S]*enableOpenedSessionWrites\(\);[\s\S]*if \(sessionListWasAvailable && restored === 0\) \{[\s\S]*vscode\.commands\.executeCommand\("remotepair\.terminalSidebar\.syncOpenedSessions"\)/,
+    "restore must use exactly the claimed bucket's sessions and sync immediately only when nothing was restored",
   );
   assert.doesNotMatch(
     extension,

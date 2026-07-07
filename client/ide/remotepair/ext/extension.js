@@ -29,9 +29,9 @@ const heartbeat = require("./heartbeat.js");
 const { SESSION_NAME_RE, listSessionsFromCli, checkSessionAvailableFromCli } = require("./session-list.js");
 const {
   normalizeOpenedSessionNames,
-  migrateOpenedSessionsScope,
-  readOpenedSessions,
-  writeOpenedSessionsForScope,
+  claimOpenedSessionsBucket,
+  migrateOpenedSessionsClaim,
+  writeOpenedSessionsForBucket,
 } = require("./opened-sessions.js");
 
 // --- constants -------------------------------------------------------------
@@ -1776,17 +1776,21 @@ function delay(ms) {
 let openedSessionsWriteTimer = null;
 let openedSessionsPendingNames = null;
 let openedSessionsWritesEnabled = false;
-let openedSessionsWriteOwner = false;
+let openedSessionsClaimedBucketKey = null;
 
 function writeOpenedSessionsNow(host, names) {
   const clean = normalizeOpenedSessionNames(names);
-  const scope = currentSnapshotScopeId;
+  const bucketKey = openedSessionsClaimedBucketKey;
+  if (!bucketKey) {
+    log("opened sessions: write skipped; no claimed snapshot bucket", "debug");
+    return false;
+  }
   try {
-    if (!writeOpenedSessionsForScope(OPENED_SESSIONS_FILE, host, scope, clean, { now: Date.now(), pid: process.pid })) {
-      log("opened sessions: write skipped; lock unavailable or invalid snapshot scope", "debug");
+    if (!writeOpenedSessionsForBucket(OPENED_SESSIONS_FILE, host, bucketKey, clean, { now: Date.now(), pid: process.pid })) {
+      log("opened sessions: write skipped; lock unavailable or invalid claimed bucket", "debug");
       return false;
     }
-    log(`opened sessions: wrote ${clean.length} session(s) for window ${scope}`, "debug");
+    log(`opened sessions: wrote ${clean.length} session(s) for bucket ${bucketKey}`, "debug");
     return true;
   } catch (e) {
     log(`opened sessions: write failed: ${e && e.message ? e.message : e}`, "warn");
@@ -1795,10 +1799,10 @@ function writeOpenedSessionsNow(host, names) {
 }
 
 function migrateOpenedSessionsSnapshotScope() {
-  if (!openedSessionsWriteOwner) return;
-  const oldScope = currentSnapshotScopeId;
+  const oldBucketKey = openedSessionsClaimedBucketKey;
+  if (!oldBucketKey) return;
   const nextScope = computeWorkspaceScopeId();
-  if (oldScope === nextScope) return;
+  if (currentSnapshotScopeId === nextScope) return;
   let host = null;
   try {
     host = getValidHost();
@@ -1806,19 +1810,20 @@ function migrateOpenedSessionsSnapshotScope() {
     log(`opened sessions: host lookup failed during snapshot scope migration: ${e && e.message ? e.message : e}`, "warn");
   }
   if (host) {
-    const migrated = migrateOpenedSessionsScope(OPENED_SESSIONS_FILE, host, oldScope, nextScope, { now: Date.now(), pid: process.pid });
-    if (migrated) {
-      log(`opened sessions: migrated snapshot window ${oldScope} -> ${nextScope}`, "debug");
+    const migratedBucketKey = migrateOpenedSessionsClaim(OPENED_SESSIONS_FILE, host, oldBucketKey, nextScope, { now: Date.now(), pid: process.pid });
+    if (migratedBucketKey) {
+      openedSessionsClaimedBucketKey = migratedBucketKey;
+      currentSnapshotScopeId = nextScope;
+      log(`opened sessions: migrated snapshot bucket ${oldBucketKey} -> ${migratedBucketKey}`, "debug");
     } else {
-      log(`opened sessions: snapshot window migration skipped ${oldScope} -> ${nextScope}`, "debug");
+      log(`opened sessions: snapshot bucket migration skipped ${oldBucketKey} -> ${nextScope}`, "debug");
     }
   }
-  currentSnapshotScopeId = nextScope;
 }
 
 function scheduleOpenedSessionsWrite(names) {
-  if (!openedSessionsWriteOwner) {
-    log("opened sessions: ignored write from non-owner extension host", "debug");
+  if (!openedSessionsClaimedBucketKey) {
+    log("opened sessions: ignored write before snapshot bucket claim", "debug");
     return;
   }
   const host = getValidHost();
@@ -1839,7 +1844,7 @@ function scheduleOpenedSessionsWrite(names) {
 }
 
 function flushOpenedSessionsWriteOnDeactivate() {
-  if (!openedSessionsWriteOwner) return;
+  if (!openedSessionsClaimedBucketKey) return;
   if (!openedSessionsWriteTimer) return;
   clearTimeout(openedSessionsWriteTimer);
   openedSessionsWriteTimer = null;
@@ -1860,10 +1865,6 @@ function enableOpenedSessionWrites() {
   openedSessionsWritesEnabled = true;
 }
 
-function setOpenedSessionsWriteOwner(enabled) {
-  openedSessionsWriteOwner = !!enabled;
-}
-
 async function waitForAvailableSessionList() {
   for (let attempt = 1; attempt <= OPENED_SESSIONS_RESTORE_ATTEMPTS; attempt += 1) {
     const result = await listSessionsFromCli(runXpairCli, { log, timeoutMs: 5000 });
@@ -1877,7 +1878,9 @@ async function waitForAvailableSessionList() {
 
 async function restoreOpenedSessionsOnActivation() {
   const host = getValidHost();
-  const openedNames = host ? readOpenedSessions(OPENED_SESSIONS_FILE, host, CLIENT_SERVICES_SCOPE_ID, { log }) : [];
+  const claim = host ? claimOpenedSessionsBucket(OPENED_SESSIONS_FILE, host, currentSnapshotScopeId, { log, pid: process.pid }) : null;
+  openedSessionsClaimedBucketKey = claim ? claim.bucketKey : null;
+  const openedNames = claim ? claim.sessions : [];
   let restored = 0;
   let sessionListWasAvailable = false;
 
@@ -2133,7 +2136,6 @@ function activate(context) {
   );
   const clientServiceDisposables = [];
   const clientServicesLock = claimClientServicesLock();
-  setOpenedSessionsWriteOwner(!!clientServicesLock);
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       migrateOpenedSessionsSnapshotScope();
@@ -2177,14 +2179,12 @@ function activate(context) {
     // Stamp the install creation time at FIRST RUN, INDEPENDENT of consent. A bare epoch-ms with
     // no id is not PII, so this is safe pre-consent and gives time_to_wow_ms a real elapsed base
     // (first launch → first session) instead of ~0. Idempotent across activations.
-    if (clientServicesLock) {
-      telemetry.firstRunStamp();
-      // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
-      // (window closed before Done) whose event never sent — the claim persists until
-      // a consented launch/completion actually emits it, exactly once per install.
-      if (telemetry.claimFirstLaunchOnce()) {
-        telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
-      }
+    telemetry.firstRunStamp();
+    // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
+    // (window closed before Done) whose event never sent — the claim persists until
+    // a consented launch/completion actually emits it, exactly once per install.
+    if (telemetry.claimFirstLaunchOnce()) {
+      telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
     }
   } catch (e) {
     log(`telemetry first-launch: ${e && e.message ? e.message : e}`, "warn");
@@ -2424,14 +2424,10 @@ function activate(context) {
   }
 
   // 5a) Warm the Sessions sidebar in every window so the frontend reattacher/provider hooks are
-  //     wired. Only the client-services owner restores and writes the last-opened snapshot.
+  //     wired. Snapshot restore/write ownership is claimed per opened-session bucket.
   vscode.commands.executeCommand("remotepair.terminalSidebar")
     .then(() => {
-      if (clientServicesLock) {
-        return restoreOpenedSessionsOnActivation();
-      }
-      log("opened sessions: restore skipped in non-owner extension host", "debug");
-      return 0;
+      return restoreOpenedSessionsOnActivation();
     })
     .then((restored) => {
       if (restored === 0) {

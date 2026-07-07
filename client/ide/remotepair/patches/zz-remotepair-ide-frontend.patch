@@ -2759,6 +2759,15 @@ index 0000000..6e5d586
 +	return names;
 +}
 +
++function localAttachedSessionsHaveUnfrozenName(): boolean {
++	for (const session of attachedProvider?.getAttached() ?? []) {
++		if (!normalizedSessionName(session.sessionName)) {
++			return true;
++		}
++	}
++	return false;
++}
++
 +function localAttachedSessionNameList(): readonly string[] {
 +	return [...localAttachedSessionNames()];
 +}
@@ -2843,6 +2852,10 @@ index 0000000..6e5d586
 +function writeOpenedSessions(commandService: ICommandService): void {
 +	if (shuttingDown) {
 +		rpLog('debug', 'opened sessions write skipped during workbench shutdown');
++		return;
++	}
++	if (localAttachedSessionsHaveUnfrozenName()) {
++		rpLog('debug', 'opened sessions write deferred until attached session names freeze');
 +		return;
 +	}
 +	commandService.executeCommand('remotepair.sessions.writeOpened', localAttachedSessionNameList()).then(undefined, (error) => {
