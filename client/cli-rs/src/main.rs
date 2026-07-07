@@ -1025,9 +1025,11 @@ mod tests {
         fs::create_dir_all(&client_dir).unwrap();
         let client_dir_s = path_string(fs::canonicalize(&client_dir).unwrap());
         let client_env = tmp.path.join("client.env");
+        // Single-quote the value: on windows the canonicalized path carries backslashes
+        // (and a \\?\\ prefix) that the shell-style env parser would otherwise mangle.
         fs::write(
             &client_env,
-            format!("SYNC_ROOTS={}::/host/project\n", client_dir_s),
+            format!("SYNC_ROOTS='{}::/host/project'\n", client_dir_s),
         )
         .unwrap();
         let client_env_s = path_string(&client_env);
