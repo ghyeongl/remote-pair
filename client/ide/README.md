@@ -23,7 +23,7 @@ client/ide/
 ## Build
 
 ```sh
-cd client/ide && ./build.sh        # → vendor/vscodium/VSCode-darwin-<arch>/Xpair.app
+cd client/ide && ./build.sh        # -> dist/VSCode-darwin-<arch>/Xpair.app
 ```
 
 `build.sh` injects `remotepair/`'s frontend patch + branding overlay into the pristine vendor
@@ -32,6 +32,26 @@ then runs `remotepair/dev-build.sh` with CWD = the recipe root. Requires nvm nod
 Build flags pass through to `dev-build.sh` (`-p` build assets, `-o` skip build, `-s` skip source).
 
 Dev-watch operates inside the checkout at `vendor/vscodium/vscode/` (created by the first build).
+
+### Windows IDE build
+
+Windows packaging runs through the same wrapper from Git Bash:
+
+```sh
+cd client/ide
+XPAIR_CLI_EXE=/c/path/to/xpair.exe ./build.sh
+```
+
+`XPAIR_CLI_EXE` is optional but recommended. When it points at a built native CLI, `build.sh`
+copies it into `dist/VSCode-win32-*/resources/app/bin/xpair.exe` before creating
+`dist/Xpair-win32-*-<build>.zip`. If `XPAIR_CLI_EXE` is unset, the zip is still produced with
+a loud warning and no bundled `xpair.exe`; this lets branches before `client/cli-rs` exists keep
+validating the IDE package.
+
+The CI path is `.github/workflows/win32-ide-build.yml`, a manual plus weekly workflow for the
+self-hosted `[self-hosted, Windows, X64, Win11]` runner. The runner needs Git Bash, Node/npm
+matching `client/ide/.nvmrc`, Python, rustup/cargo, MSVC Build Tools, and Windows PowerShell
+for `Compress-Archive`.
 
 ## Upstream sync (Option C)
 
