@@ -27,9 +27,14 @@ export type Mapping = {
 
 // FALLBACK ONLY: when a mapping has no stored method (FOLDER_MAP_MODES), infer it from the
 // path convention. SMB mount mappings land under /Volumes/<device>/<share>;
+// Windows SMB mappings land on UNC roots (//host/share or \\host\share);
 // everything else is treated as sync.
 function inferMethod(clientPath: string): MappingMode {
-  return clientPath.startsWith("/Volumes/") ? "mount" : "sync";
+  return clientPath.startsWith("/Volumes/") ||
+    clientPath.startsWith("//") ||
+    clientPath.startsWith("\\\\")
+    ? "mount"
+    : "sync";
 }
 
 function parseModes(raw: string): Map<string, MappingMode> {
@@ -648,7 +653,7 @@ function HostFolderBrowser({
 }
 
 function isManualClientPath(p: string) {
-  return p.startsWith("/") || p.startsWith("~/");
+  return p.startsWith("/") || p.startsWith("~/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
 }
 
 function ClientPathPopover({
@@ -689,7 +694,7 @@ function ClientPathPopover({
               onClick={() => {
                 const next = manual.trim();
                 if (!isManualClientPath(next)) {
-                  setError("Enter an absolute path starting with / or ~/.");
+                  setError(t("map.localPathInvalid"));
                   return;
                 }
                 setError(null);

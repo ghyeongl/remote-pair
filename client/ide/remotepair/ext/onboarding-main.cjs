@@ -304,13 +304,19 @@ function openOnboardingWindow({ electron, onComplete, startStep } = {}) {
   try { if (heartbeat && heartbeat.startHeartbeat) heartbeat.startHeartbeat() } catch { /* */ }
   wireIpc(ipcMain, onComplete)
 
+  const macWindowChrome = process.platform === 'darwin'
+    ? {
+        titleBarStyle: 'hiddenInset',
+        trafficLightPosition: { x: 16, y: 18 },
+      }
+    : {}
+
   _win = new BrowserWindow({
     width: 720,
     height: 524,
     resizable: false,
     show: false, // show on ready-to-show so it appears focused, not behind
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 18 },
+    ...macWindowChrome,
     backgroundColor: '#ffffff',
     webPreferences: {
       // Own session partition so this window escapes the IDE main's defaultSession security
