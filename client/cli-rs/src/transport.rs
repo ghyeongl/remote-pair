@@ -33,9 +33,11 @@ pub fn capture_stdout(mut command: Command) -> io::Result<(Option<i32>, String)>
             std::env::temp_dir().join(format!("xpair-ssh-{}-{}.out", std::process::id(), seq));
         let file = std::fs::File::create(&tmp)?;
         let status = command.stdout(file).status()?;
-        let stdout = std::fs::read_to_string(&tmp).unwrap_or_default();
+        // Decode lossily (not `read_to_string`, which drops all output on any
+        // non-UTF-8 byte), matching the Unix `.output()` path.
+        let bytes = std::fs::read(&tmp).unwrap_or_default();
         let _ = std::fs::remove_file(&tmp);
-        Ok((status.code(), stdout))
+        Ok((status.code(), String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     #[cfg(not(windows))]
