@@ -220,6 +220,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # gh writes to stderr on a missing release; Actions defaults ErrorActionPreference=Stop,
+          # which would turn that native stderr into a terminating NativeCommandError before the
+          # $LASTEXITCODE check runs. Continue lets us branch on the exit code ourselves.
+          $ErrorActionPreference = 'Continue'
           $releaseTag = "v${{ steps.release_ver.outputs.version }}"
           $versioned = "xpair-${{ steps.ver.outputs.version }}-x64.msi"
           $stable = "xpair-cli.msi"
@@ -227,10 +231,12 @@ jobs:
           # Ensure the Release exists. Normally the mac `release` job creates it; if that job
           # failed (e.g. signing) it won't, so create it here. Alpha/beta tags (a letter in the
           # version) publish as a pre-release, matching the mac job's own gate.
-          gh release view $releaseTag *> $null
+          gh release view $releaseTag 2>$null | Out-Null
           if ($LASTEXITCODE -ne 0) {
             $ver = "${{ steps.release_ver.outputs.version }}"
             $pre = if ($ver -match '[a-zA-Z]') { @("--prerelease","--latest=false") } else { @() }
             gh release create $releaseTag --title $releaseTag --notes "Windows CLI MSI ($versioned)." @pre
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
           }
           gh release upload $releaseTag $versioned $stable --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
