@@ -12,6 +12,22 @@ use std::fmt;
 pub type FolderMap = (String, String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredUnc {
+    pub root: String,
+    pub subpath: String,
+}
+
+impl DiscoveredUnc {
+    pub fn path(&self) -> String {
+        if self.subpath.is_empty() {
+            self.root.clone()
+        } else {
+            format!("{}/{}", self.root, self.subpath.trim_start_matches('/'))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MapError {
     WslPath { path: String },
     MappingRequired { path: String },
@@ -261,6 +277,43 @@ fn is_wsl_mount_path(path: &str) -> bool {
         && (bytes.len() == 6 || bytes[6] == b'/')
 }
 
+pub fn smb_host(remote_host: &str) -> &str {
+    remote_host.rsplit('@').next().unwrap_or(remote_host)
+}
+
+pub fn share_name_for_hostpath(host_path: &str) -> String {
+    posix_basename(host_path)
+}
+
+pub fn expected_unc_root(smb_host: &str, share: &str) -> String {
+    format!(
+        "//{}/{}",
+        smb_host.trim_matches('/'),
+        share.trim_matches('/')
+    )
+}
+
+pub fn discover_unc_for_hostpath(remote_host: &str, host_path: &str) -> Option<DiscoveredUnc> {
+    let host = smb_host(remote_host);
+    let share = share_name_for_hostpath(host_path);
+    if host.is_empty() || share.is_empty() {
+        return None;
+    }
+    Some(DiscoveredUnc {
+        root: expected_unc_root(host, &share),
+        subpath: String::new(),
+    })
+}
+
+fn posix_basename(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +431,31 @@ mod tests {
         assert_eq!(
             map_to_host(r"\\?\UNC\server\share\sub", &maps).unwrap(),
             "/host/share/sub"
+        );
+    }
+
+    #[test]
+    fn windows_unc_mapping_accepts_canonical_slash_root_round_trip() {
+        let maps = parse_maps("//server/share::/Users/alice/Project");
+        assert_eq!(
+            map_to_host_for_os(r"\\SERVER\Share\src", &maps, Os::Windows).unwrap(),
+            "/Users/alice/Project/src"
+        );
+    }
+
+    #[test]
+    fn canonicalizes_windows_client_path_forms() {
+        assert_eq!(
+            canonicalize_client_path(r"\\server\share\project").unwrap(),
+            "//server/share/project"
+        );
+        assert_eq!(
+            canonicalize_client_path(r"\\?\UNC\server\share\project").unwrap(),
+            "//server/share/project"
+        );
+        assert_eq!(
+            canonicalize_client_path(r"c:\Users\Alice\Project").unwrap(),
+            "C:/Users/Alice/Project"
         );
     }
 
@@ -502,5 +580,15 @@ mod tests {
                 path: r"\\wsl$\Ubuntu\home\me".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn win32_unc_helpers_match_bash_share_name_rule() {
+        let unc = discover_unc_for_hostpath("alice@office-mac.local", "/Users/alice/Projects/foo")
+            .unwrap();
+        assert_eq!(unc.root, "//office-mac.local/foo");
+        assert_eq!(unc.subpath, "");
+        assert_eq!(unc.path(), "//office-mac.local/foo");
+        assert_eq!(share_name_for_hostpath("/Users/alice/Projects/foo/"), "foo");
     }
 }

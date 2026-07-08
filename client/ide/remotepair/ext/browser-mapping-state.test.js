@@ -58,7 +58,7 @@ test("Q0398 Browser UI reflects FOLDER_MAPS and does not add roots on mount/map 
   const addRoot = extractFunction(extension, "addRoot");
   const mountFailure = addRoot.indexOf("if (mres.code !== 0)");
   const mapFailure = addRoot.indexOf("if (ares.code !== 0)");
-  const reconcileCall = addRoot.indexOf("reconcileBrowserRoots();");
+  const reconcileCall = addRoot.indexOf("reconcileBrowserRoots();", mapFailure);
   assert.ok(mountFailure !== -1 && mountFailure < reconcileCall, "mount failure must return before adding a Browser root");
   assert.ok(mapFailure !== -1 && mapFailure < reconcileCall, "map failure must return before adding a Browser root");
   assert.match(addRoot.slice(mountFailure, mapFailure), /showErrorMessage\(`Xpair: 'xpair mount mount \$\{host\}' failed\./);

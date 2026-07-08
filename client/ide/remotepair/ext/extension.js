@@ -1976,12 +1976,12 @@ async function restoreOpenedSessionsOnActivation() {
 }
 
 /**
- * C1.D3 — Mount-first add-mapping flow for the Browser's "Add Mapping" affordance.
+ * C1.D3 / Win32 P4 — Add-mapping flow for the Browser's "Add Mapping" affordance.
  *   1. Prompt for a HOST folder path (v1 = host-path input box).
- *   2. `xpair mount mount <hostPath>` (SMB default, macOS-native no-kext) → real OS mount.
- *   3. Parse the printed "Mountpoint: <path>" and register a FOLDER_MAP via
- *      `xpair map add <mountpoint> <hostPath>` (writes <mountpoint>::<hostPath>).
- *   4. Reconcile roots so the mountpoint appears as a Browser root without restart.
+ *   2. macOS: `xpair mount mount <hostPath>` -> parse "Mountpoint: <path>".
+ *      Windows: skip mount; derive the UNC root and let `xpair map add` validate it.
+ *   3. Register a FOLDER_MAP via `xpair map add <clientRoot> <hostPath>`.
+ *   4. Reconcile roots so the client root appears as a Browser root without restart.
  */
 async function addRoot() {
   const hostPath = await vscode.window.showInputBox({
@@ -2000,8 +2000,47 @@ async function addRoot() {
   const host = hostPath.trim();
 
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `Xpair: mounting ${host}…`, cancellable: false },
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: process.platform === "win32" ? `Xpair: adding ${host}...` : `Xpair: mounting ${host}…`,
+      cancellable: false,
+    },
     async () => {
+      if (process.platform === "win32") {
+        const uncRoot = onboardingBridge.defaultMountpoint(host);
+        if (!uncRoot) {
+          vscode.window.showErrorMessage("Xpair: configure the Mac host before adding a Windows UNC mapping.");
+          return;
+        }
+        const winMap = await runXpairCli(["map", "add", uncRoot, host, "--method", "mount"], { timeoutMs: 30000 });
+        if (winMap.code !== 0) {
+          log(`addRoot: UNC map add failed (code ${winMap.code}): ${winMap.stderr || winMap.stdout}`);
+          const detail = (winMap.stderr || winMap.stdout || "").trim().split(/\r?\n/).slice(-3).join(" ");
+          vscode.window.showErrorMessage(`Xpair: registering UNC mapping failed. ${detail}`);
+          return;
+        }
+
+        let mappedRoot = uncRoot;
+        for (const line of winMap.stdout.split(/\r?\n/)) {
+          const added = line.match(/^mapping added:\s*(.*?)\s+\u2192/);
+          const existing = line.match(/^already mapped \(or under a mapped root\):\s*(\S.*?)\s*$/);
+          if (added) { mappedRoot = added[1]; break; }
+          if (existing) { mappedRoot = existing[1]; break; }
+        }
+        if (!fs.existsSync(mappedRoot)) {
+          const netUse = mappedRoot.replace(/\//g, "\\");
+          vscode.window.showErrorMessage(`Xpair: UNC path is unreachable: ${mappedRoot}. Run: net use ${netUse} /persistent:yes`);
+          return;
+        }
+
+        reconcileBrowserRoots();
+        try {
+          await vscode.commands.executeCommand("workbench.view.explorer");
+        } catch (_e) {}
+        vscode.window.showInformationMessage(`Xpair: added mapping ${mappedRoot} -> ${host}.`);
+        return;
+      }
+
       // Step 2: mount.
       const mres = await runXpairCli(["mount", "mount", host], { timeoutMs: 180000 });
       if (mres.code !== 0) {

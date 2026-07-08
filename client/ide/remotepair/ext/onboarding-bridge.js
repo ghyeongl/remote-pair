@@ -1300,6 +1300,37 @@ function parseEnv(file) {
   return env;
 }
 
+function smbHostFromRemote(remoteHost) {
+  const h = String(remoteHost || "").trim();
+  return h.includes("@") ? h.split("@").pop() : h;
+}
+
+function shareNameForHostPath(hostPath) {
+  return path.posix.basename(String(hostPath || "").replace(/\\/g, "/").replace(/\/+$/, ""));
+}
+
+function expectedUncRoot(smbHost, shareName) {
+  const host = String(smbHost || "").replace(/^\/+|\/+$/g, "");
+  const share = String(shareName || "").replace(/^\/+|\/+$/g, "");
+  if (!host || !share) return "";
+  return `//${host}/${share}`;
+}
+
+function uncRootForHostPath(hostPath) {
+  const cfg = parseEnv(clientEnvPath());
+  const smbHost = smbHostFromRemote(process.env.REMOTE_HOST || cfg.REMOTE_HOST || "");
+  return expectedUncRoot(smbHost, shareNameForHostPath(hostPath));
+}
+
+function uncForNetUse(uncPath) {
+  return String(uncPath || "").replace(/\//g, "\\");
+}
+
+function netUseHint(uncPath) {
+  const unc = uncForNetUse(uncPath);
+  return unc ? `If this share needs credentials, run: net use ${unc} /persistent:yes` : "";
+}
+
 /** Upsert KEY="value" in client.env. (CLI `config set` only covers host|terminal; backend keys land here.) */
 function upsertEnv(key, val) {
   let lines = [];
@@ -1647,6 +1678,9 @@ const bridge = {
   // /Volumes/<share> or a suffixed variant; when the share is already mounted,
   // discover the real path from mount(8), otherwise return the first expected path.
   defaultMountpoint(hostPath) {
+    if (process.platform === "win32") {
+      return uncRootForHostPath(hostPath);
+    }
     const cfg = parseEnv(clientEnvPath());
     const remoteHost = cfg.REMOTE_HOST || "";
     const smbHost = String(remoteHost).includes("@") ? String(remoteHost).split("@").pop() : String(remoteHost);
@@ -1673,6 +1707,22 @@ const bridge = {
   async mount(hostPath, mountpoint) {
     const h = String(hostPath || "").trim();
     if (!h) return { code: -1, out: "", err: "mount requires a host path", mountpoint: "" };
+    if (process.platform === "win32") {
+      const uncRoot = uncRootForHostPath(h);
+      if (!uncRoot) {
+        return { code: 1, out: "", err: "REMOTE_HOST is not set; configure the Mac host before adding a mapping", mountpoint: "" };
+      }
+      if (!fs.existsSync(uncRoot)) {
+        const hint = netUseHint(uncRoot);
+        return {
+          code: 1,
+          out: "",
+          err: `UNC path unreachable: ${uncRoot}${hint ? `\n${hint}` : ""}`,
+          mountpoint: uncRoot,
+        };
+      }
+      return { code: 0, out: `Mountpoint: ${uncRoot}`, err: "", mountpoint: uncRoot };
+    }
     const mp = String(mountpoint || "").trim();
     const r = await cli(["mount", "mount", h, ...(mp ? [mp] : [])]);
     let parsedMountpoint = "";
