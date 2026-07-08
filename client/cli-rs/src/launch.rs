@@ -1987,26 +1987,30 @@ fn resolve_raw_modes(path: &Path) -> std::io::Result<String> {
 }
 
 fn resolve_app_identity(path: &Path) -> io::Result<AppIdentity> {
+    let host_env = config::default_rp_dir()?.join("host.env");
     Ok(AppIdentity {
-        app_name: resolve_env_stack_value(path, "APP_NAME")?
+        app_name: resolve_env_stack_value_with_host_env(path, &host_env, "APP_NAME")?
             .unwrap_or_else(|| DEFAULT_APP_NAME.to_string()),
-        bundle_prefix: resolve_env_stack_value(path, "BUNDLE_PREFIX")?
+        bundle_prefix: resolve_env_stack_value_with_host_env(path, &host_env, "BUNDLE_PREFIX")?
             .unwrap_or_else(|| DEFAULT_BUNDLE_PREFIX.to_string()),
-        forward_app: resolve_env_stack_value(path, "FORWARD_APP")?
+        forward_app: resolve_env_stack_value_with_host_env(path, &host_env, "FORWARD_APP")?
             .unwrap_or_else(|| DEFAULT_FORWARD_APP.to_string()),
-        forward_bundle: resolve_env_stack_value(path, "FORWARD_BUNDLE")?
+        forward_bundle: resolve_env_stack_value_with_host_env(path, &host_env, "FORWARD_BUNDLE")?
             .unwrap_or_else(|| DEFAULT_FORWARD_BUNDLE.to_string()),
     })
 }
 
-fn resolve_env_stack_value(path: &Path, key: &str) -> io::Result<Option<String>> {
+fn resolve_env_stack_value_with_host_env(
+    path: &Path,
+    host_env: &Path,
+    key: &str,
+) -> io::Result<Option<String>> {
     let mut value = non_empty_env(key);
 
     if let Some(file_value) = config::get(path, key)?.filter(|value| !value.is_empty()) {
         value = Some(file_value);
     }
 
-    let host_env = config::default_rp_dir()?.join("host.env");
     for (existing_key, existing_value) in config::list(host_env)? {
         if existing_key == key && !existing_value.is_empty() {
             value = Some(existing_value);

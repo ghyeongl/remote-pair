@@ -12,9 +12,10 @@ const oldRemoteHost = process.env.REMOTE_HOST;
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.REMOTE_HOST = "alice@office-mac.local";
-fs.mkdirSync(path.join(tmpHome, ".xpair", "client"), { recursive: true });
+const clientDir = path.join(tmpHome, ".xpair", "client");
+fs.mkdirSync(clientDir, { recursive: true });
 fs.writeFileSync(
-  path.join(tmpHome, ".xpair", "client", "client.env"),
+  path.join(clientDir, "client.env"),
   "REMOTE_HOST=alice@office-mac.local\n",
 );
 
@@ -68,6 +69,32 @@ test("P4 bridge defaultMountpoint returns UNC root on win32", async () => {
       bridge.defaultMountpoint("/Users/alice/Projects/foo"),
       "//office-mac.local/foo",
     );
+  });
+});
+
+test("P4 bridge UNC root resolves REMOTE_HOST through env, client.env, then common.env", async () => {
+  await withPlatform("win32", () => {
+    const clientEnv = path.join(clientDir, "client.env");
+    const commonEnv = path.join(clientDir, "common.env");
+    const savedRemoteHost = process.env.REMOTE_HOST;
+    try {
+      fs.writeFileSync(commonEnv, "REMOTE_HOST=common@common-mac.local\n");
+      fs.writeFileSync(clientEnv, "REMOTE_HOST=client@client-mac.local\n");
+
+      process.env.REMOTE_HOST = "env@env-mac.local";
+      assert.equal(bridge.defaultMountpoint("/Users/alice/Projects/foo"), "//env-mac.local/foo");
+
+      delete process.env.REMOTE_HOST;
+      assert.equal(bridge.defaultMountpoint("/Users/alice/Projects/foo"), "//client-mac.local/foo");
+
+      fs.writeFileSync(clientEnv, "ENGINE=codex\n");
+      assert.equal(bridge.defaultMountpoint("/Users/alice/Projects/foo"), "//common-mac.local/foo");
+    } finally {
+      fs.writeFileSync(clientEnv, "REMOTE_HOST=alice@office-mac.local\n");
+      fs.rmSync(commonEnv, { force: true });
+      if (savedRemoteHost === undefined) delete process.env.REMOTE_HOST;
+      else process.env.REMOTE_HOST = savedRemoteHost;
+    }
   });
 });
 

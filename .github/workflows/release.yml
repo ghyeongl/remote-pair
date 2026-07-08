@@ -178,7 +178,7 @@ jobs:
         # EULA gate (WIX7015), which otherwise fails the build. v5 uses the same v4 schema
         # namespace as xpair.wxs.
         run: |
-          dotnet tool install --global wix --version 5.0.2
+          dotnet tool update --global wix --version 5.0.2
           "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Resolve release version

@@ -14,7 +14,6 @@ use std::process::{Command, ExitCode, Stdio};
 use crate::platform::Os;
 
 const DEFAULT_GH_REPO: &str = "x10lab/xpair";
-const STABLE_MSI_ALIAS: &str = "xpair-cli.msi";
 const USER_AGENT_PREFIX: &str = "xpair-cli";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,23 +159,23 @@ pub fn run_with_exec<E: LocalExec + ?Sized>(
     }
 
     let release = fetch_release(exec, config)?;
-    if !is_newer(&release.tag, &config.current_version) {
-        return Ok(UpdateOutcome::AlreadyCurrent {
-            current: config.current_version.clone(),
-            latest: release.tag,
-        });
-    }
-
-    let latest_version = clean_version(&release.tag);
-    let asset = select_msi_asset(&release, &latest_version).ok_or_else(|| {
+    let (latest_version, asset) = select_cli_msi_asset(&release).ok_or_else(|| {
         UpdateError::new(
             format!(
-                "release {} has no xpair-{}-x64.msi or {} asset",
-                release.tag, latest_version, STABLE_MSI_ALIAS
+                "release {} has no CLI asset matching xpair-<version>-x64.msi",
+                release.tag
             ),
             1,
         )
     })?;
+
+    if !is_newer(&latest_version, &config.current_version) {
+        return Ok(UpdateOutcome::AlreadyCurrent {
+            current: config.current_version.clone(),
+            latest: latest_version,
+        });
+    }
+
     let msi_path = download_msi(exec, config, &latest_version, asset)?;
     install_msi(exec, &msi_path)?;
     Ok(UpdateOutcome::Installed {
@@ -234,8 +233,10 @@ fn parse_release_response(json: &str, channel: Channel) -> Result<Release, Updat
                 .iter()
                 .filter_map(Release::from_json)
                 .filter(|release| release.prerelease)
-                .max_by(|a, b| version_cmp(&a.tag, &b.tag))
-                .ok_or_else(|| UpdateError::new("no prerelease found in alpha channel", 1))
+                .find(|release| select_cli_msi_asset(release).is_some())
+                .ok_or_else(|| {
+                    UpdateError::new("no prerelease with CLI MSI asset found in alpha channel", 1)
+                })
         }
     }
 }
@@ -334,18 +335,29 @@ fn install_msi<E: LocalExec + ?Sized>(exec: &mut E, path: &Path) -> Result<(), U
     }
 }
 
-fn select_msi_asset<'a>(release: &'a Release, version: &str) -> Option<&'a Asset> {
-    let versioned = format!("xpair-{version}-x64.msi");
+fn select_cli_msi_asset(release: &Release) -> Option<(String, &Asset)> {
     release
         .assets
         .iter()
-        .find(|asset| asset.name.eq_ignore_ascii_case(&versioned))
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name.eq_ignore_ascii_case(STABLE_MSI_ALIAS))
+        .filter_map(|asset| {
+            cli_version_from_msi_asset_name(&asset.name).map(|version| (version, asset))
         })
+        .max_by(|(a_version, _), (b_version, _)| version_cmp(a_version, b_version))
+}
+
+fn cli_version_from_msi_asset_name(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let prefix = "xpair-";
+    let suffix = "-x64.msi";
+    if !lower.starts_with(prefix) || !lower.ends_with(suffix) {
+        return None;
+    }
+    let version = &name[prefix.len()..name.len() - suffix.len()];
+    if version_key(version).is_some() {
+        Some(clean_version(version))
+    } else {
+        None
+    }
 }
 
 pub fn is_newer(a: &str, than: &str) -> bool {
@@ -357,14 +369,29 @@ fn version_cmp(a: &str, b: &str) -> Ordering {
 }
 
 fn parse_version(raw: &str) -> (u32, u32, u32, u32) {
+    version_key(raw).unwrap_or((0, 0, 0, 0))
+}
+
+fn version_key(raw: &str) -> Option<(u32, u32, u32, u32)> {
     let core = clean_version(raw);
     let mut parts = core.split('.');
-    let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
-    let patch_part = parts.next().unwrap_or("0");
+    let major = parse_nonempty_u32(parts.next()?)?;
+    let minor = parse_nonempty_u32(parts.next()?)?;
+    let patch_part = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     let (patch_raw, alpha) = split_alpha(patch_part);
-    let patch = patch_raw.parse().unwrap_or(0);
-    (major, minor, patch, alpha)
+    let patch = parse_nonempty_u32(patch_raw)?;
+    Some((major, minor, patch, alpha))
+}
+
+fn parse_nonempty_u32(raw: &str) -> Option<u32> {
+    if raw.is_empty() {
+        None
+    } else {
+        raw.parse().ok()
+    }
 }
 
 fn split_alpha(patch_part: &str) -> (&str, u32) {
@@ -723,50 +750,49 @@ mod tests {
     }
 
     #[test]
-    fn asset_selection_prefers_versioned_then_stable_alias() {
+    fn asset_selection_uses_versioned_cli_msi_only() {
         let release = Release {
-            tag: "v0.2.0".to_string(),
+            tag: "v9.9.9".to_string(),
             prerelease: false,
             assets: vec![
                 asset("xpair-cli.msi", "https://example.com/stable", 7),
+                asset("xpair-0.1.9-x64.msi", "https://example.com/old", 7),
                 asset("xpair-0.2.0-x64.msi", "https://example.com/versioned", 7),
             ],
         };
         assert_eq!(
-            select_msi_asset(&release, "0.2.0").map(|a| a.name.as_str()),
-            Some("xpair-0.2.0-x64.msi")
+            select_cli_msi_asset(&release).map(|(version, asset)| (version, asset.name.as_str())),
+            Some(("0.2.0".to_string(), "xpair-0.2.0-x64.msi"))
         );
 
         let release = Release {
-            tag: "v0.2.0".to_string(),
+            tag: "v9.9.9".to_string(),
             prerelease: false,
             assets: vec![asset("xpair-cli.msi", "https://example.com/stable", 7)],
         };
-        assert_eq!(
-            select_msi_asset(&release, "0.2.0").map(|a| a.name.as_str()),
-            Some("xpair-cli.msi")
-        );
+        assert_eq!(select_cli_msi_asset(&release), None);
     }
 
     #[test]
-    fn alpha_response_picks_newest_prerelease() {
+    fn alpha_response_picks_newest_prerelease_with_cli_msi_asset() {
         let release = parse_release_response(
             r#"[
-              {"tag_name":"v0.2.0a2","prerelease":true,"assets":[{"name":"xpair-cli.msi","browser_download_url":"https://example.com/a2","size":7}]},
-              {"tag_name":"v0.2.0","prerelease":false,"assets":[{"name":"xpair-cli.msi","browser_download_url":"https://example.com/final","size":7}]},
-              {"tag_name":"v0.2.0a3","prerelease":true,"assets":[{"name":"xpair-cli.msi","browser_download_url":"https://example.com/a3","size":7}]}
+              {"tag_name":"host-v0.5.0a4","prerelease":true,"assets":[{"name":"XpairHost.zip","browser_download_url":"https://example.com/host","size":7}]},
+              {"tag_name":"host-v0.5.0","prerelease":false,"assets":[{"name":"xpair-0.2.0-x64.msi","browser_download_url":"https://example.com/final","size":7}]},
+              {"tag_name":"host-v0.5.0a3","prerelease":true,"assets":[{"name":"xpair-0.2.0a3-x64.msi","browser_download_url":"https://example.com/a3","size":7}]},
+              {"tag_name":"host-v0.5.0a2","prerelease":true,"assets":[{"name":"xpair-0.2.0a2-x64.msi","browser_download_url":"https://example.com/a2","size":7}]}
             ]"#,
             Channel::Alpha,
         )
         .unwrap();
-        assert_eq!(release.tag, "v0.2.0a3");
+        assert_eq!(release.tag, "host-v0.5.0a3");
     }
 
     #[test]
     fn windows_update_uses_curl_and_msiexec_argv() {
         let tmp = TestDir::new("self-update-success");
         let mut exec = MockExec::new(
-            r#"{"tag_name":"v0.2.0","prerelease":false,"assets":[{"name":"xpair-0.2.0-x64.msi","browser_download_url":"https://example.com/xpair-0.2.0-x64.msi","size":7}]}"#,
+            r#"{"tag_name":"host-v9.9.9","prerelease":false,"assets":[{"name":"xpair-0.2.0-x64.msi","browser_download_url":"https://example.com/xpair-0.2.0-x64.msi","size":7}]}"#,
             7,
         );
         let config = UpdateConfig {
@@ -778,7 +804,10 @@ mod tests {
         };
 
         let outcome = run_with_exec(&mut exec, &config).unwrap();
-        assert!(matches!(outcome, UpdateOutcome::Installed { .. }));
+        assert!(matches!(
+            outcome,
+            UpdateOutcome::Installed { version, .. } if version == "0.2.0"
+        ));
 
         let calls = exec.calls.borrow();
         assert_eq!(calls.len(), 3);
@@ -794,6 +823,28 @@ mod tests {
         assert_eq!(calls[2].program, "msiexec");
         assert_eq!(calls[2].args[0], "/i");
         assert_eq!(calls[2].args[2], "/passive");
+    }
+
+    #[test]
+    fn stable_release_without_cli_msi_asset_reports_clean_error() {
+        let tmp = TestDir::new("self-update-no-cli-msi");
+        let mut exec = MockExec::new(
+            r#"{"tag_name":"host-v9.9.9","prerelease":false,"assets":[{"name":"xpair-cli.msi","browser_download_url":"https://example.com/xpair-cli.msi","size":7}]}"#,
+            7,
+        );
+        let config = UpdateConfig {
+            os: Os::Windows,
+            repo: "x10lab/xpair".to_string(),
+            channel: Channel::Stable,
+            current_version: "0.1.0".to_string(),
+            temp_dir: tmp.path.clone(),
+        };
+
+        let err = run_with_exec(&mut exec, &config).unwrap_err();
+        assert!(err
+            .message
+            .contains("has no CLI asset matching xpair-<version>-x64.msi"));
+        assert_eq!(exec.calls.borrow().len(), 1);
     }
 
     #[test]

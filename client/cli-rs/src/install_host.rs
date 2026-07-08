@@ -482,6 +482,9 @@ where
         if installed {
             let reregister_cmd = build_reregister_cmd(&settings.bundle_prefix, &settings.app_name);
             let _ = transport.ssh_exec(&target, &reregister_cmd);
+            if let Err(code) = run_existing_app_glue_repair(settings, &target, transport, err) {
+                return code;
+            }
             return finish_install(req, settings, client_env_path, transport, io, out, err);
         }
     }
@@ -650,10 +653,117 @@ where
     }
 }
 
+fn run_existing_app_glue_repair<T, E>(
+    settings: &RuntimeSettings,
+    target: &str,
+    transport: &T,
+    err: &mut E,
+) -> Result<(), ExitCode>
+where
+    T: Transport + ?Sized,
+    E: Write,
+{
+    let remote_cmd = build_existing_app_glue_repair_cmd(settings);
+    match transport.ssh_exec(target, &remote_cmd) {
+        Ok(Output { code: 0, .. }) => Ok(()),
+        Ok(Output { code, stdout }) => {
+            let detail = stdout.trim();
+            if detail.is_empty() {
+                let _ = writeln!(err, "existing app glue repair failed (exit={code})");
+            } else {
+                let _ = writeln!(
+                    err,
+                    "existing app glue repair failed (exit={code})\n{detail}"
+                );
+            }
+            Err(ExitCode::from(1))
+        }
+        Err(error) => {
+            let _ = writeln!(err, "existing app glue repair failed: {error}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
 fn release_install_completed(stdout: &str) -> bool {
     stdout
         .lines()
         .any(|line| line.starts_with("__XPAIR_HOST_APP__:"))
+}
+
+fn build_existing_app_glue_repair_cmd(settings: &RuntimeSettings) -> String {
+    let script = existing_app_glue_repair_script();
+    let delimiter = heredoc_delimiter(script);
+    let mut cmd = format!(
+        "APP_NAME={}",
+        remote_quote::posix_single_quote(&settings.app_name),
+    );
+    cmd.push_str(" /bin/bash -s <<'");
+    cmd.push_str(&delimiter);
+    cmd.push_str("'\n");
+    cmd.push_str(script);
+    if !script.ends_with('\n') {
+        cmd.push('\n');
+    }
+    cmd.push_str(&delimiter);
+    cmd.push('\n');
+    cmd
+}
+
+fn existing_app_glue_repair_script() -> &'static str {
+    r#"set -euo pipefail
+app="${APP_NAME:-XpairHost}"
+app_path=""
+for candidate in "$HOME/Applications/${app}.app" "/Applications/${app}.app"; do
+  if [ -d "$candidate" ]; then
+    app_path="$candidate"
+    break
+  fi
+done
+[ -n "$app_path" ] || { printf 'HOST_APP_MISSING_AFTER_IDEMPOTENCY_PROBE: %s.app\n' "$app"; exit 1; }
+
+existing_app_glue_check() {
+  _missing=""
+  [ -x "$HOME/.local/bin/tmux-aqua" ] || _missing="${_missing} host tmux-aqua"
+  [ -f "$HOME/.xpair/host/rules.txt" ] || _missing="${_missing} host approve rules"
+  [ -f "$HOME/.claude/skills/approve/SKILL.md" ] || _missing="${_missing} host approve skill"
+  grep -q xpair-approve-reminder "$HOME/.claude/settings.json" 2>/dev/null || _missing="${_missing} host approve hook"
+  if [ -n "$_missing" ]; then
+    printf 'HOST_GLUE_SELF_INSTALL_INCOMPLETE:%s\n' "$_missing"
+    return 1
+  fi
+  return 0
+}
+
+install_existing_approve_glue() {
+  _glue="$app_path/Contents/Resources/host-glue/install-approve-glue.sh"
+  [ -x "$_glue" ] || { printf 'HOST_APPROVE_GLUE_MISSING: %s\n' "$_glue"; return 1; }
+  RP_DIR="$HOME/.xpair/host" \
+    RULES_FILE="$HOME/.xpair/host/rules.txt" \
+    /bin/bash "$_glue" >/dev/null
+}
+
+if existing_app_glue_check >/dev/null; then
+  printf '__XPAIR_HOST_GLUE__:ready\n'
+  exit 0
+fi
+
+if ! install_existing_approve_glue; then
+  printf 'HOST_APPROVE_GLUE_INSTALL_FAILED: could not install approve resources from existing app bundle\n'
+  exit 1
+fi
+glue_ready=0
+glue_detail="HOST_GLUE_SELF_INSTALL_INCOMPLETE: poll did not run"
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+  if glue_detail="$(existing_app_glue_check)"; then
+    glue_ready=1
+    break
+  fi
+  sleep 0.5
+done
+[ "$glue_ready" = 1 ] || { printf '%s\n' "$glue_detail"; exit 1; }
+printf '__XPAIR_HOST_GLUE__:repaired\n'
+"#
 }
 
 fn build_release_download_install_remote_cmd(settings: &RuntimeSettings) -> String {
@@ -2171,6 +2281,7 @@ mod tests {
                 transport.push_response(0, "");
                 transport.push_response(0, "");
                 transport.push_response(0, "");
+                transport.push_response(0, "");
                 let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST tester");
                 let mut out = Vec::new();
                 let mut err = Vec::new();
@@ -2190,7 +2301,7 @@ mod tests {
                     .unwrap()
                     .ends_with("host set: mac-mini\n"));
                 let calls = transport.calls();
-                assert_eq!(calls.len(), 3);
+                assert_eq!(calls.len(), 4);
                 assert_eq!(calls[0].host, "alice@mac-mini");
                 assert_eq!(
                     calls[0].remote_cmd,
@@ -2200,8 +2311,22 @@ mod tests {
                     calls[1].remote_cmd,
                     build_reregister_cmd(DEFAULT_BUNDLE_PREFIX, DEFAULT_APP_NAME)
                 );
+                assert!(calls[2]
+                    .remote_cmd
+                    .contains("Contents/Resources/host-glue/install-approve-glue.sh"));
+                assert!(calls[2].remote_cmd.contains("existing_app_glue_check"));
+                assert!(
+                    calls[2]
+                        .remote_cmd
+                        .find("if existing_app_glue_check")
+                        .unwrap()
+                        < calls[2]
+                            .remote_cmd
+                            .find("if ! install_existing_approve_glue")
+                            .unwrap()
+                );
                 assert_eq!(
-                    calls[2].remote_cmd,
+                    calls[3].remote_cmd,
                     build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST tester")
                 );
                 assert_eq!(
@@ -2252,6 +2377,7 @@ mod tests {
                 let transport = MockTransport::new();
                 transport.push_response(0, "");
                 transport.push_response(0, "");
+                transport.push_response(0, "");
                 let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST tester");
                 let mut out = Vec::new();
                 let mut err = Vec::new();
@@ -2271,7 +2397,7 @@ mod tests {
                 assert!(out.contains("skipping personal-key authorization"));
                 assert!(out.ends_with("host set: mac-mini\n"));
                 let calls = transport.calls();
-                assert_eq!(calls.len(), 2);
+                assert_eq!(calls.len(), 3);
                 assert_eq!(
                     calls[0].remote_cmd,
                     build_idempotency_probe_cmd(DEFAULT_APP_NAME)
@@ -2279,6 +2405,69 @@ mod tests {
                 assert_eq!(
                     calls[1].remote_cmd,
                     build_reregister_cmd(DEFAULT_BUNDLE_PREFIX, DEFAULT_APP_NAME)
+                );
+                assert!(calls[2]
+                    .remote_cmd
+                    .contains("Contents/Resources/host-glue/install-approve-glue.sh"));
+            },
+        );
+    }
+
+    #[test]
+    fn installed_path_aborts_when_existing_app_glue_repair_fails() {
+        with_env(
+            &[
+                ("REMOTE_HOST", None),
+                ("GH_REPO", None),
+                ("APP_NAME", None),
+                ("BUNDLE_PREFIX", None),
+                ("RP_SSH_CFG", None),
+                ("HOME", Some("C:/Users/tester")),
+                ("RP_OS", Some("mac")),
+                ("PAIRING_KEY", None),
+                ("USERPROFILE", None),
+            ],
+            || {
+                let tmp = TestDir::new("installed-glue-fails");
+                let transport = MockTransport::new();
+                transport.push_response(0, "");
+                transport.push_response(0, "");
+                transport.push_response(1, "HOST_APPROVE_GLUE_MISSING: app bundle has no glue\n");
+                let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST tester");
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+
+                let code = run_with_transport(
+                    &strings(&["--host", "mac-mini", "--account", "alice"]),
+                    &tmp.client_env_path(),
+                    &transport,
+                    &io,
+                    &mut out,
+                    &mut err,
+                );
+
+                assert_eq!(code, ExitCode::from(1));
+                assert_eq!(String::from_utf8(out).unwrap(), "");
+                let err = String::from_utf8(err).unwrap();
+                assert!(err.contains("existing app glue repair failed"));
+                assert!(err.contains("HOST_APPROVE_GLUE_MISSING"));
+                let calls = transport.calls();
+                assert_eq!(calls.len(), 3);
+                assert_eq!(
+                    calls[0].remote_cmd,
+                    build_idempotency_probe_cmd(DEFAULT_APP_NAME)
+                );
+                assert_eq!(
+                    calls[1].remote_cmd,
+                    build_reregister_cmd(DEFAULT_BUNDLE_PREFIX, DEFAULT_APP_NAME)
+                );
+                assert!(calls[2]
+                    .remote_cmd
+                    .contains("Contents/Resources/host-glue/install-approve-glue.sh"));
+                assert!(io.ssh_config_writes.borrow().is_empty());
+                assert_eq!(
+                    config::get(tmp.client_env_path(), "REMOTE_HOST").unwrap(),
+                    None
                 );
             },
         );

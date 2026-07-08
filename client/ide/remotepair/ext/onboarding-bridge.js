@@ -143,6 +143,10 @@ function clientEnvPath() {
   return LEGACY_CLIENT_ENV;
 }
 
+function commonEnvPathForClientEnv(file) {
+  return path.join(path.dirname(file), "common.env");
+}
+
 /** Client version SSOT — the same 0.5.0a{N} lockstep stamp the webview build embeds (read from the
  *  shared monotonic build counter). Repo-relative from this file: ext → remotepair → ide → client →
  *  repo-root. In a built app bundle the counter is absent, so we fall back to the base "0.5.0a". */
@@ -1300,6 +1304,15 @@ function parseEnv(file) {
   return env;
 }
 
+function configValue(key) {
+  const fromProcess = String(process.env[key] || "").trim();
+  if (fromProcess) return fromProcess;
+  const clientFile = clientEnvPath();
+  const fromClient = String(parseEnv(clientFile)[key] || "").trim();
+  if (fromClient) return fromClient;
+  return String(parseEnv(commonEnvPathForClientEnv(clientFile))[key] || "").trim();
+}
+
 function smbHostFromRemote(remoteHost) {
   const h = String(remoteHost || "").trim();
   return h.includes("@") ? h.split("@").pop() : h;
@@ -1317,8 +1330,7 @@ function expectedUncRoot(smbHost, shareName) {
 }
 
 function uncRootForHostPath(hostPath) {
-  const cfg = parseEnv(clientEnvPath());
-  const smbHost = smbHostFromRemote(process.env.REMOTE_HOST || cfg.REMOTE_HOST || "");
+  const smbHost = smbHostFromRemote(configValue("REMOTE_HOST"));
   return expectedUncRoot(smbHost, shareNameForHostPath(hostPath));
 }
 
