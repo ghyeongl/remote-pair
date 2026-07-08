@@ -6,6 +6,49 @@
 //! argv it was asked to run — mirroring the bash `tests/lib.sh` MOCKLOG argv-capture approach.
 
 use std::cell::RefCell;
+use std::io;
+use std::process::{Command, Stdio};
+
+/// Run `command`, capturing stdout, discarding stderr, with stdin closed.
+///
+/// Returns `(process exit code, captured stdout)`; the code is `None` only when the
+/// child was killed without a code (rare), so callers keep their own fallback.
+///
+/// Why this exists: on Windows, Win32 OpenSSH's `ssh.exe` does **not** terminate when
+/// its stdout is an anonymous pipe — which is exactly what `Command::output()` hands it.
+/// The remote command finishes but `ssh.exe` stays alive holding the pipe, so `.output()`
+/// blocks forever (observed: `xpair ls`/`doctor`/`launch` hanging >20s). Redirecting
+/// stdout to a temp file instead makes `ssh.exe` exit promptly (observed: ~0.1s). On Unix
+/// `.output()` is correct and avoids the temp-file round-trip.
+pub fn capture_stdout(mut command: Command) -> io::Result<(Option<i32>, String)> {
+    command.stdin(Stdio::null()).stderr(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Unique per call so concurrent ssh_exec's don't clobber each other's capture.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp =
+            std::env::temp_dir().join(format!("xpair-ssh-{}-{}.out", std::process::id(), seq));
+        let file = std::fs::File::create(&tmp)?;
+        let status = command.stdout(file).status()?;
+        // Decode lossily (not `read_to_string`, which drops all output on any
+        // non-UTF-8 byte), matching the Unix `.output()` path.
+        let bytes = std::fs::read(&tmp).unwrap_or_default();
+        let _ = std::fs::remove_file(&tmp);
+        Ok((status.code(), String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let out = command.output()?;
+        Ok((
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        ))
+    }
+}
 
 /// Result of running a remote command: process exit code + captured stdout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +161,26 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].host, "host.local");
         assert_eq!(calls[0].remote_cmd, "'tmux-aqua' 'has-session'");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_stdout_reads_child_output() {
+        let mut c = Command::new("echo");
+        c.arg("hello");
+        let (code, out) = capture_stdout(c).unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(out.trim(), "hello");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_stdout_reads_child_output_via_tempfile() {
+        let mut c = Command::new("cmd");
+        c.args(["/c", "echo hello"]);
+        let (code, out) = capture_stdout(c).unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(out.trim(), "hello");
     }
 
     #[test]

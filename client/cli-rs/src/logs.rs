@@ -690,14 +690,12 @@ impl Transport for SshTransport {
             false,
             &session::pairing_identity_args(),
         );
-        let output = Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(Stdio::null())
-            .output()?;
-
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        let (code, stdout) = crate::transport::capture_stdout(command)?;
         Ok(Output {
-            code: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            code: code.unwrap_or(1),
+            stdout,
         })
     }
 }

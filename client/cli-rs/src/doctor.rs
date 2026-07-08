@@ -493,17 +493,17 @@ struct SshTransport {
 
 impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
-        let output = Command::new("ssh")
+        let mut command = Command::new("ssh");
+        command
             .args(session::pairing_identity_args())
             .args(self.os.ssh_mux_neutralizer_args())
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=6"])
             .arg(host)
-            .arg(remote_cmd)
-            .output()?;
-
+            .arg(remote_cmd);
+        let (code, stdout) = crate::transport::capture_stdout(command)?;
         Ok(Output {
-            code: output.status.code().unwrap_or(255),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            code: code.unwrap_or(255),
+            stdout,
         })
     }
 }
