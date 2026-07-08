@@ -206,6 +206,15 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
   for f in install.sh config.sh lib.sh logging.sh; do
     cp "$SHARED/$f" "$_cli/shared/$f"
   done
+  # Bake publishable telemetry keys (PostHog project key / Sentry DSN) from CI secrets into the
+  # bundled CLI tree; install.sh (--role client) materializes them into ~/.xpair/client/telemetry.env.
+  # Both are publishable client keys — safe to ship. Absent env (local builds) => no file => telemetry
+  # stays inert. The key value is never echoed.
+  _tenv="$_cli/shared/telemetry.build.env"
+  : > "$_tenv"
+  [ -n "${RP_POSTHOG_KEY:-}" ] && printf 'POSTHOG_KEY=%s\n' "$RP_POSTHOG_KEY" >> "$_tenv"
+  [ -n "${RP_SENTRY_DSN:-}" ]  && printf 'SENTRY_DSN=%s\n'  "$RP_SENTRY_DSN"  >> "$_tenv"
+  if [ -s "$_tenv" ]; then chmod 600 "$_tenv"; echo "→ baked telemetry keys into bundled CLI (telemetry.build.env)"; else rm -f "$_tenv"; fi
   # The client CLI scripts install.sh installs to ~/.local/bin (+ the Service + hangul-romanize helper).
   for f in xpair xpair-launch xpair-mount xpair-desktop xpair-editor xpair-askpass hangul-romanize; do
     [ -e "$CLI_SRC/$f" ] && cp "$CLI_SRC/$f" "$_cli/client/cli/$f"
