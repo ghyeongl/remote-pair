@@ -141,6 +141,53 @@ pub fn canonicalize_client_path(path: &str) -> Result<String, MapError> {
     Ok(out)
 }
 
+/// Normalize a client path before writing it back to `FOLDER_MAPS` or
+/// `FOLDER_MAP_MODES`.
+///
+/// Windows `fs::canonicalize` may return verbatim paths (`\\?\C:\...` or
+/// `\\?\UNC\...`). Those are useful for Win32 APIs, but they are not the mapping
+/// format bash and the rest of xpair consume. Persist the comparable form instead.
+pub fn normalize_client_path_for_persistence(path: &str, os: Os) -> String {
+    if os != Os::Windows {
+        return path.to_string();
+    }
+
+    let mut normalized = canonicalize_client_path(path).unwrap_or_else(|_| path.replace('\\', "/"));
+    trim_trailing_windows_separators(&mut normalized);
+    normalized
+}
+
+/// Normalize all client keys in parsed mapping rows before display or rewrite.
+pub fn normalize_folder_maps_for_persistence(pairs: Vec<FolderMap>, os: Os) -> Vec<FolderMap> {
+    pairs
+        .into_iter()
+        .map(|(client, host)| (normalize_client_path_for_persistence(&client, os), host))
+        .collect()
+}
+
+/// Compare two client mapping keys using the same normalization as persistence.
+pub fn client_path_eq_for_os(left: &str, right: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        normalize_windows_path_for_cmp(left) == normalize_windows_path_for_cmp(right)
+    } else {
+        left == right
+    }
+}
+
+/// Return true when `path` is exactly `prefix` or is a child path under it.
+pub fn client_path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        let path = normalize_windows_path_for_cmp(path);
+        let prefix = normalize_windows_path_for_cmp(prefix);
+        return path == prefix
+            || path
+                .strip_prefix(&prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'));
+    }
+
+    path_prefix_matches(path, prefix, os)
+}
+
 fn path_prefix_matches(path: &str, prefix: &str, os: Os) -> bool {
     if os == Os::Windows {
         path.eq_ignore_ascii_case(prefix)
@@ -155,6 +202,18 @@ fn path_prefix_matches(path: &str, prefix: &str, os: Os) -> bool {
             || path
                 .strip_prefix(prefix)
                 .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+}
+
+fn normalize_windows_path_for_cmp(path: &str) -> String {
+    let mut normalized = normalize_client_path_for_persistence(path, Os::Windows);
+    trim_trailing_windows_separators(&mut normalized);
+    normalized.to_ascii_lowercase()
+}
+
+fn trim_trailing_windows_separators(path: &mut String) {
+    while path.len() > 3 && path.ends_with('/') {
+        path.pop();
     }
 }
 
@@ -398,6 +457,56 @@ mod tests {
             canonicalize_client_path(r"c:\Users\Alice\Project").unwrap(),
             "C:/Users/Alice/Project"
         );
+    }
+
+    #[test]
+    fn windows_persistence_strips_verbatim_prefixes() {
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\C:\Users\Alice\Project", Os::Windows),
+            "C:/Users/Alice/Project"
+        );
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\UNC\server\share\Project", Os::Windows),
+            "//server/share/Project"
+        );
+    }
+
+    #[test]
+    fn windows_persistence_normalizes_parsed_mapping_clients() {
+        assert_eq!(
+            normalize_folder_maps_for_persistence(
+                parse_maps(
+                    r"\\?\C:\Users\Alice\Project::/host/project;\\?\UNC\server\share::/host/share"
+                ),
+                Os::Windows,
+            ),
+            vec![
+                (
+                    "C:/Users/Alice/Project".to_string(),
+                    "/host/project".to_string()
+                ),
+                ("//server/share".to_string(), "/host/share".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_mapping_key_compare_strips_verbatim_prefixes() {
+        assert!(client_path_eq_for_os(
+            r"\\?\C:\Users\Alice\Project",
+            "c:/users/alice/project/",
+            Os::Windows,
+        ));
+        assert!(client_path_eq_or_child_for_os(
+            "C:/Users/Alice/Project/Sub",
+            r"\\?\C:\Users\Alice\Project",
+            Os::Windows,
+        ));
+        assert!(!client_path_eq_or_child_for_os(
+            "C:/Users/Alice/Projectile",
+            r"\\?\C:\Users\Alice\Project",
+            Os::Windows,
+        ));
     }
 
     #[test]

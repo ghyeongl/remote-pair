@@ -14,7 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use crate::attach::Target;
 use crate::config;
-use crate::mapping::{map_to_host_for_os, parse_maps};
+use crate::mapping::{
+    client_path_eq_for_os, client_path_eq_or_child_for_os, map_to_host_for_os,
+    normalize_client_path_for_persistence, parse_maps,
+};
 use crate::platform::Os;
 use crate::remote_quote;
 use crate::respawn::{self, Engine};
@@ -651,7 +654,7 @@ where
     W: Write,
     E: Write,
 {
-    if yes || os == Os::Windows || mapping_for_dir(client_dir, raw_maps).is_some() {
+    if yes || os == Os::Windows || mapping_for_dir(client_dir, raw_maps, os).is_some() {
         return Ok(None);
     }
     if !remote_reachable(transport, host) {
@@ -665,8 +668,19 @@ where
         let _ = writeln!(out, "exists on {host}");
         let ans = prompt_answer(out, input, "  Register this mapping for next time? [Y/n]: ");
         if !ans.starts_with(['n', 'N']) {
-            add_folder_mapping(path, raw_maps, raw_modes, client_dir, &host_dir, host, out)
-                .map_err(|err| (format!("xpair launch: {err}"), 1))?;
+            add_folder_mapping(
+                path,
+                RawMappingState {
+                    maps: raw_maps,
+                    modes: raw_modes,
+                },
+                client_dir,
+                &host_dir,
+                host,
+                os,
+                out,
+            )
+            .map_err(|err| (format!("xpair launch: {err}"), 1))?;
         }
         let _ = writeln!(out, "  Edit later with 'xpair config' / 'xpair map'.");
         return Ok(Some(host_dir));
@@ -688,7 +702,7 @@ where
     );
     let host_dir = match ans.as_str() {
         "m" | "M" => map_register_interactive(
-            path, transport, host, client_dir, raw_maps, raw_modes, input, out, err,
+            path, transport, host, client_dir, raw_maps, raw_modes, os, input, out, err,
         )?,
         "c" | "C" => match transport.ssh_exec(host, &build_remote_mkdir_cmd(&host_dir)) {
             Ok(result) if result.code == 0 => {
@@ -741,6 +755,7 @@ fn map_register_interactive<R, W, E>(
     seed_client_dir: &str,
     raw_maps: &mut String,
     raw_modes: &mut String,
+    os: Os,
     input: &mut R,
     out: &mut W,
     err: &mut E,
@@ -822,68 +837,100 @@ where
         };
         add_folder_mapping(
             path,
-            raw_maps,
-            raw_modes,
+            RawMappingState {
+                maps: raw_maps,
+                modes: raw_modes,
+            },
             &client_root,
             &host_root,
             host,
+            os,
             out,
         )
         .map_err(|err| (format!("xpair launch: {err}"), 1))?;
         let _ = writeln!(out, "  All subfolders under {client_root} are now covered.");
     } else {
-        add_folder_mapping(path, raw_maps, raw_modes, &client_dir, &host_dir, host, out)
-            .map_err(|err| (format!("xpair launch: {err}"), 1))?;
+        add_folder_mapping(
+            path,
+            RawMappingState {
+                maps: raw_maps,
+                modes: raw_modes,
+            },
+            &client_dir,
+            &host_dir,
+            host,
+            os,
+            out,
+        )
+        .map_err(|err| (format!("xpair launch: {err}"), 1))?;
     }
 
-    map_to_host_for_os(&client_dir, &parse_maps(raw_maps), Os::current())
-        .map_err(|err| (err.to_string(), 2))
+    map_to_host_for_os(&client_dir, &parse_maps(raw_maps), os).map_err(|err| (err.to_string(), 2))
+}
+
+struct RawMappingState<'a> {
+    maps: &'a mut String,
+    modes: &'a mut String,
 }
 
 fn add_folder_mapping(
     path: &Path,
-    raw_maps: &mut String,
-    raw_modes: &mut String,
+    raw: RawMappingState<'_>,
     client_dir: &str,
     host_dir: &str,
     host: &str,
+    os: Os,
     out: &mut impl Write,
 ) -> io::Result<()> {
-    if mapping_for_dir(client_dir, raw_maps).is_some() {
+    let RawMappingState {
+        maps: raw_maps,
+        modes: raw_modes,
+    } = raw;
+    let client_dir = normalize_client_path_for_persistence(client_dir, os);
+    if mapping_for_dir(&client_dir, raw_maps, os).is_some() {
         let _ = writeln!(out, "already mapped (or under a mapped root): {client_dir}");
         return Ok(());
     }
 
-    let entry = format!("{client_dir}::{host_dir}");
-    if raw_maps.is_empty() {
-        *raw_maps = entry;
-    } else {
-        raw_maps.push(';');
-        raw_maps.push_str(&entry);
-    }
+    let mut entries = parse_maps(raw_maps)
+        .into_iter()
+        .map(|(client, host)| {
+            format!(
+                "{}::{host}",
+                normalize_client_path_for_persistence(&client, os)
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.push(format!("{client_dir}::{host_dir}"));
+    *raw_maps = entries.join(";");
     config::set(path, "FOLDER_MAPS", raw_maps)?;
 
-    let method = infer_launch_map_method(client_dir, host);
-    *raw_modes = upsert_map_mode(raw_modes, client_dir, &method);
+    let method = infer_launch_map_method(&client_dir, host);
+    *raw_modes = upsert_map_mode(raw_modes, &client_dir, &method, os);
     config::set(path, "FOLDER_MAP_MODES", raw_modes)?;
     let _ = writeln!(out, "mapping added: {client_dir}  →  {host_dir} ({method})");
     Ok(())
 }
 
-fn upsert_map_mode(raw_modes: &str, client_dir: &str, method: &str) -> String {
+fn upsert_map_mode(raw_modes: &str, client_dir: &str, method: &str, os: Os) -> String {
     let mut entries = parse_maps(raw_modes)
         .into_iter()
-        .filter(|(client, _)| client != client_dir)
-        .map(|(client, mode)| format!("{client}::{mode}"))
+        .filter(|(client, _)| !client_path_eq_for_os(client, client_dir, os))
+        .map(|(client, mode)| {
+            format!(
+                "{}::{mode}",
+                normalize_client_path_for_persistence(&client, os)
+            )
+        })
         .collect::<Vec<_>>();
     entries.push(format!("{client_dir}::{method}"));
     entries.join(";")
 }
 
-fn mapping_for_dir(dir: &str, raw_maps: &str) -> Option<(String, String)> {
+fn mapping_for_dir(dir: &str, raw_maps: &str, os: Os) -> Option<(String, String)> {
     parse_maps(raw_maps)
         .into_iter()
-        .filter(|(client, _)| path_eq_or_child(dir, client))
+        .filter(|(client, _)| client_path_eq_or_child_for_os(dir, client, os))
         .max_by_key(|(client, _)| client.len())
 }
 
@@ -1572,6 +1619,9 @@ fn resolve_remote_engine<T: Transport + ?Sized>(
 }
 
 fn resolve_client_engine_fallback(path: &Path) -> Result<String, String> {
+    if let Some(engine) = non_empty_env("ENGINE") {
+        return Ok(engine);
+    }
     config::get_cli(path, "engine").map_err(|err| err.to_string())
 }
 
@@ -2423,10 +2473,12 @@ mod tests {
         transport.push_response(0, "opencode\n");
         let req = parse(&[]).unwrap();
 
-        assert_eq!(
-            resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
-            Engine::Opencode
-        );
+        with_env(&[("ENGINE", Some("shell"))], || {
+            assert_eq!(
+                resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
+                Engine::Opencode
+            );
+        });
 
         let calls = transport.calls();
         assert_eq!(calls.len(), 1);
@@ -2445,6 +2497,38 @@ mod tests {
             resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
             Engine::Codex
         );
+    }
+
+    #[test]
+    fn process_engine_wins_over_client_env_when_host_engine_is_invalid() {
+        let tmp = TestPath::new("process-engine");
+        tmp.write("ENGINE=opencode\n");
+        let transport = MockTransport::new();
+        transport.push_response(0, "unknown\n");
+        let req = parse(&[]).unwrap();
+
+        with_env(&[("ENGINE", Some("codex"))], || {
+            assert_eq!(
+                resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
+                Engine::Codex
+            );
+        });
+    }
+
+    #[test]
+    fn client_env_engine_is_used_when_process_engine_is_absent() {
+        let tmp = TestPath::new("file-engine");
+        tmp.write("ENGINE=opencode\n");
+        let transport = MockTransport::new();
+        transport.push_response(0, "unknown\n");
+        let req = parse(&[]).unwrap();
+
+        with_env(&[("ENGINE", None)], || {
+            assert_eq!(
+                resolve_remote_engine(&tmp.path, &req, "mac.local", &transport).unwrap(),
+                Engine::Opencode
+            );
+        });
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //!
 //! Divergence from bash's non-bootstrap path: a native client may not have a bundled signed
 //! macOS `.app` to stage, so the host downloads the release `XpairHost.zip` artifact itself and
-//! installs it over SSH. The `--bootstrap` path remains the pinned script path.
+//! installs it over SSH. After the app is installed and serving, the release path runs the same
+//! host-side bootstrap glue path as `--bootstrap` so the host is not left with only a running app.
 
 use std::cell::Cell;
 use std::fs;
@@ -491,6 +492,10 @@ where
         if let Err(code) = run_release_download_install(settings, &target, transport, err) {
             return code;
         }
+        if let Err(code) = run_release_host_glue_install(req, settings, &target, transport, io, err)
+        {
+            return code;
+        }
     }
 
     finish_install(req, settings, client_env_path, transport, io, out, err)
@@ -509,7 +514,52 @@ where
     I: InstallIo + ?Sized,
     E: Write,
 {
-    let expected = req.sha256.as_deref().unwrap_or_default();
+    let script = fetch_bootstrap_script(req, settings, io, err, true)?;
+    run_bootstrap_remote_script(
+        &req.git_ref,
+        &script,
+        target,
+        transport,
+        err,
+        "remote bootstrap",
+    )
+}
+
+fn run_release_host_glue_install<T, I, E>(
+    req: &InstallReq,
+    settings: &RuntimeSettings,
+    target: &str,
+    transport: &T,
+    io: &I,
+    err: &mut E,
+) -> Result<(), ExitCode>
+where
+    T: Transport + ?Sized,
+    I: InstallIo + ?Sized,
+    E: Write,
+{
+    let script = fetch_bootstrap_script(req, settings, io, err, false)?;
+    run_bootstrap_remote_script(
+        &req.git_ref,
+        &script,
+        target,
+        transport,
+        err,
+        "remote host glue setup",
+    )
+}
+
+fn fetch_bootstrap_script<I, E>(
+    req: &InstallReq,
+    settings: &RuntimeSettings,
+    io: &I,
+    err: &mut E,
+    verify_hash: bool,
+) -> Result<String, ExitCode>
+where
+    I: InstallIo + ?Sized,
+    E: Write,
+{
     let url = build_bootstrap_url(&settings.gh_repo, &req.git_ref);
     let path = temp_bootstrap_path();
 
@@ -523,22 +573,25 @@ where
         return Err(ExitCode::from(1));
     }
 
-    let actual = match io.sha256_file(&path) {
-        Ok(actual) => actual,
-        Err(error) => {
+    if verify_hash {
+        let expected = req.sha256.as_deref().unwrap_or_default();
+        let actual = match io.sha256_file(&path) {
+            Ok(actual) => actual,
+            Err(error) => {
+                cleanup(&path);
+                let _ = writeln!(err, "SHA256 computation failed: {error}");
+                return Err(ExitCode::from(1));
+            }
+        };
+
+        if !verify_sha256(expected, &actual) {
             cleanup(&path);
-            let _ = writeln!(err, "SHA256 computation failed: {error}");
+            let _ = writeln!(
+                err,
+                "SHA256 mismatch - aborting before remote bootstrap exec (expected {expected}, got {actual})"
+            );
             return Err(ExitCode::from(1));
         }
-    };
-
-    if !verify_sha256(expected, &actual) {
-        cleanup(&path);
-        let _ = writeln!(
-            err,
-            "SHA256 mismatch - aborting before remote bootstrap exec (expected {expected}, got {actual})"
-        );
-        return Err(ExitCode::from(1));
     }
 
     let script = match fs::read_to_string(&path) {
@@ -550,16 +603,30 @@ where
         }
     };
     cleanup(&path);
+    Ok(script)
+}
 
-    let remote_cmd = build_bootstrap_remote_script_cmd(&req.git_ref, &script);
+fn run_bootstrap_remote_script<T, E>(
+    git_ref: &str,
+    script: &str,
+    target: &str,
+    transport: &T,
+    err: &mut E,
+    label: &str,
+) -> Result<(), ExitCode>
+where
+    T: Transport + ?Sized,
+    E: Write,
+{
+    let remote_cmd = build_bootstrap_remote_script_cmd(git_ref, script);
     match transport.ssh_exec(target, &remote_cmd) {
         Ok(Output { code: 0, .. }) => Ok(()),
         Ok(Output { code, .. }) => {
-            let _ = writeln!(err, "remote bootstrap failed (exit={code})");
+            let _ = writeln!(err, "{label} failed (exit={code})");
             Err(ExitCode::from(1))
         }
         Err(error) => {
-            let _ = writeln!(err, "remote bootstrap failed: {error}");
+            let _ = writeln!(err, "{label} failed: {error}");
             Err(ExitCode::from(1))
         }
     }
@@ -1241,11 +1308,14 @@ fn temp_bootstrap_path() -> PathBuf {
 
 fn upsert_ssh_config_block(path: &Path, host: &str, block: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
     }
 
     let begin = format!("# >>> xpair: {host} >>>");
     let end = format!("# <<< xpair: {host} <<<");
+    let original_mode = existing_file_mode(path)?;
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -1269,7 +1339,127 @@ fn upsert_ssh_config_block(path: &Path, host: &str, block: &str) -> io::Result<(
         }
     }
     out.push_str(block);
-    fs::write(path, out)
+    atomic_replace_ssh_config(path, &out, original_mode)
+}
+
+fn atomic_replace_ssh_config(
+    path: &Path,
+    contents: &str,
+    original_mode: Option<u32>,
+) -> io::Result<()> {
+    let tmp = ssh_config_temp_path(path);
+    let result = (|| {
+        let mut file = create_private_temp_file(&tmp)?;
+        file.write_all(contents.as_bytes())?;
+        file.flush()?;
+        drop(file);
+        replace_file(&tmp, path)?;
+        set_file_mode(path, original_mode.unwrap_or(0o600))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn ssh_config_temp_path(path: &Path) -> PathBuf {
+    let nonce = timestamp_nanos();
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config"))
+        .to_os_string();
+    name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
+    path.with_file_name(name)
+}
+
+#[cfg(unix)]
+fn create_private_temp_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_temp_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn existing_file_mode(path: &Path) -> io::Result<Option<u32>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o7777)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn existing_file_mode(path: &Path) -> io::Result<Option<u32>> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_path: &Path, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    extern "system" {
+        fn MoveFileExW(
+            lpExistingFileName: *const u16,
+            lpNewFileName: *const u16,
+            dwFlags: u32,
+        ) -> i32;
+    }
+
+    let from_w: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to_w: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let ok = unsafe {
+        MoveFileExW(
+            from_w.as_ptr(),
+            to_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
 }
 
 #[cfg(windows)]
@@ -1796,6 +1986,82 @@ mod tests {
     }
 
     #[test]
+    fn ssh_config_upsert_creates_missing_file_with_private_mode() {
+        let tmp = TestDir::new("ssh-config-create-mode");
+        let path = tmp.path.join(".ssh").join("config");
+
+        upsert_ssh_config_block(
+            &path,
+            "mac-mini",
+            &build_ssh_config_block_for_os(
+                Os::Linux,
+                "mac-mini",
+                "192.0.2.10",
+                "alice",
+                "/Users/me/.ssh/id_ed25519",
+            ),
+        )
+        .unwrap();
+
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("Host mac-mini\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_config_upsert_preserves_existing_mode_and_drops_old_block() {
+        let tmp = TestDir::new("ssh-config-preserve-mode");
+        let path = tmp.path.join("config");
+        fs::write(
+            &path,
+            "# keep\n# >>> xpair: mac-mini >>>\nold\n# <<< xpair: mac-mini <<<\nHost other\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o640);
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+
+        upsert_ssh_config_block(
+            &path,
+            "mac-mini",
+            &build_ssh_config_block_for_os(
+                Os::Linux,
+                "mac-mini",
+                "192.0.2.10",
+                "alice",
+                "/Users/me/.ssh/id_ed25519",
+            ),
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep\n"));
+        assert!(text.contains("Host other\n"));
+        assert!(text.contains("Host mac-mini\n"));
+        assert!(!text.contains("\nold\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+    }
+
+    #[test]
     fn windows_askpass_reads_literal_data_file() {
         assert_eq!(WINDOWS_ASKPASS_DATA_FILE, "pw.dat");
         for password in [
@@ -2128,7 +2394,8 @@ mod tests {
                 transport.push_response(1, "");
                 transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
                 transport.push_response(0, "");
-                let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST");
+                transport.push_response(0, "");
+                let io = FakeInstallIo::new("echo bootstrap\n", "", "ssh-ed25519 AAAATEST");
                 let mut out = Vec::new();
                 let mut err = Vec::new();
 
@@ -2144,8 +2411,12 @@ mod tests {
                 assert_eq!(code, ExitCode::SUCCESS);
                 assert_eq!(String::from_utf8(err).unwrap(), "");
                 assert_eq!(String::from_utf8(out).unwrap(), "host set: mac-mini\n");
+                assert_eq!(
+                    io.fetched_urls.borrow().as_slice(),
+                    ["https://raw.githubusercontent.com/x10lab/xpair/main/shared/bootstrap.sh"]
+                );
                 let calls = transport.calls();
-                assert_eq!(calls.len(), 3);
+                assert_eq!(calls.len(), 4);
                 assert_eq!(
                     calls[0].remote_cmd,
                     build_idempotency_probe_cmd(DEFAULT_APP_NAME)
@@ -2181,6 +2452,10 @@ mod tests {
                     .contains("HOST_APP_SERVING_STATE_TIMEOUT"));
                 assert_eq!(
                     calls[2].remote_cmd,
+                    "ROLE=host BRANCH=main bash -s <<'__XPAIR_BOOTSTRAP__'\necho bootstrap\n__XPAIR_BOOTSTRAP__\n"
+                );
+                assert_eq!(
+                    calls[3].remote_cmd,
                     build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
                 );
             },
@@ -2228,7 +2503,8 @@ mod tests {
                 let transport = MockTransport::new();
                 transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
                 transport.push_response(0, "");
-                let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST");
+                transport.push_response(0, "");
+                let io = FakeInstallIo::new("echo bootstrap\n", "", "ssh-ed25519 AAAATEST");
                 let mut out = Vec::new();
                 let mut err = Vec::new();
 
@@ -2244,10 +2520,14 @@ mod tests {
                 assert_eq!(code, ExitCode::SUCCESS);
                 assert_eq!(String::from_utf8(err).unwrap(), "");
                 let calls = transport.calls();
-                assert_eq!(calls.len(), 2);
+                assert_eq!(calls.len(), 3);
                 assert!(calls[0].remote_cmd.contains("releases/latest/download"));
                 assert_eq!(
                     calls[1].remote_cmd,
+                    "ROLE=host BRANCH=main bash -s <<'__XPAIR_BOOTSTRAP__'\necho bootstrap\n__XPAIR_BOOTSTRAP__\n"
+                );
+                assert_eq!(
+                    calls[2].remote_cmd,
                     build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
                 );
             },
