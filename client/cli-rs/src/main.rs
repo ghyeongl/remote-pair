@@ -17,7 +17,11 @@ use xpair::host_permissions;
 use xpair::install_host;
 use xpair::launch;
 use xpair::logs;
-use xpair::mapping::{canonicalize_client_path, parse_maps, FolderMap};
+use xpair::mapping::{
+    canonicalize_client_path, client_path_eq_or_child_for_os,
+    normalize_client_path_for_persistence, normalize_folder_maps_for_persistence, parse_maps,
+    FolderMap,
+};
 use xpair::notify;
 use xpair::open_gui;
 use xpair::platform::Os;
@@ -216,8 +220,9 @@ fn cmd_map(args: &[String]) -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let pairs = parse_maps(&raw_maps);
-            let modes = parse_maps(&raw_modes);
+            let os = Os::current();
+            let pairs = normalize_folder_maps_for_persistence(parse_maps(&raw_maps), os);
+            let modes = normalize_folder_maps_for_persistence(parse_maps(&raw_modes), os);
             if args.get(1).is_some_and(|arg| arg == "--json") {
                 println!("{}", render_map_json(&pairs, &modes));
             } else {
@@ -238,7 +243,7 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 eprintln!("{message}");
                 return ExitCode::from(2);
             }
-            let client_dir = match canonical_client_dir(&add.client) {
+            let client_dir = match canonical_client_dir_for_os(&add.client, os) {
                 Ok(dir) => dir,
                 Err(()) => {
                     eprintln!("client path not found: {}", add.client);
@@ -265,17 +270,12 @@ fn cmd_map(args: &[String]) -> ExitCode {
             }
 
             let host_dir = add.host.unwrap_or_else(|| client_dir.clone());
-            let entry = format!("{client_dir}::{host_dir}");
-            let new_maps = if raw_maps.is_empty() {
-                entry
-            } else {
-                format!("{raw_maps};{entry}")
-            };
+            let new_maps = append_folder_map_for_os(&raw_maps, &client_dir, &host_dir, os);
             if let Err(err) = config::set(&path, "FOLDER_MAPS", &new_maps) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
             }
-            if let Err(err) = set_map_mode(&path, &client_dir, &method) {
+            if let Err(err) = set_map_mode_for_os(&path, &client_dir, &method, os) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
             }
@@ -288,7 +288,7 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 return ExitCode::from(2);
             }
             let os = Os::current();
-            let client_dir = canonical_client_dir(&args[1])
+            let client_dir = canonical_client_dir_for_os(&args[1], os)
                 .unwrap_or_else(|_| normalize_client_dir_literal_for_os(&args[1], os));
             let raw_maps = match resolve_raw_maps_with_source(&path) {
                 Ok(raw_maps) => raw_maps,
@@ -397,7 +397,7 @@ fn cmd_ls(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let pairs = parse_maps(&raw_maps);
+    let pairs = normalize_folder_maps_for_persistence(parse_maps(&raw_maps), Os::current());
     let map_list = render_map_list(&pairs);
     let output = if host.is_empty() {
         session::render_text("host", "", "", &map_list)
@@ -545,10 +545,13 @@ fn validate_map_add_args_for_os(add: &MapAddArgs, os: Os) -> Result<(), String> 
     }
 }
 
-fn canonical_client_dir(path: &str) -> Result<String, ()> {
+fn canonical_client_dir_for_os(path: &str, os: Os) -> Result<String, ()> {
     let path = fs::canonicalize(path).map_err(|_| ())?;
     if path.is_dir() {
-        Ok(path.to_string_lossy().into_owned())
+        Ok(normalize_client_path_for_persistence(
+            &path.to_string_lossy(),
+            os,
+        ))
     } else {
         Err(())
     }
@@ -557,36 +560,32 @@ fn canonical_client_dir(path: &str) -> Result<String, ()> {
 fn is_mapped(client_dir: &str, pairs: &[FolderMap], os: Os) -> bool {
     pairs
         .iter()
-        .any(|(client, _)| path_eq_or_child_for_os(client_dir, client, os))
+        .any(|(client, _)| client_path_eq_or_child_for_os(client_dir, client, os))
 }
 
-fn path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
-    if os == Os::Windows {
-        path.eq_ignore_ascii_case(prefix)
-            || (path.len() > prefix.len()
-                && path
-                    .as_bytes()
-                    .get(prefix.len())
-                    .is_some_and(|ch| is_windows_separator(*ch))
-                && path[..prefix.len()].eq_ignore_ascii_case(prefix))
-    } else {
-        path == prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with('/'))
-    }
+fn append_folder_map_for_os(raw_maps: &str, client_dir: &str, host_dir: &str, os: Os) -> String {
+    let mut entries = normalize_folder_maps_for_persistence(parse_maps(raw_maps), os)
+        .into_iter()
+        .map(|(client, host)| format!("{client}::{host}"))
+        .collect::<Vec<_>>();
+    entries.push(format!(
+        "{}::{host_dir}",
+        normalize_client_path_for_persistence(client_dir, os)
+    ));
+    entries.join(";")
 }
 
-fn is_windows_separator(ch: u8) -> bool {
-    matches!(ch, b'/' | b'\\')
-}
-
-fn set_map_mode(path: &Path, client_dir: &str, method: &str) -> std::io::Result<()> {
+fn set_map_mode_for_os(path: &Path, client_dir: &str, method: &str, os: Os) -> std::io::Result<()> {
     let raw = resolve_raw_modes(path)?;
     let mut entries = parse_maps(&raw)
         .into_iter()
-        .filter(|(client, _)| client != client_dir)
-        .map(|(client, mode)| format!("{client}::{mode}"))
+        .filter(|(client, _)| !map_client_eq_for_os(client, client_dir, os))
+        .map(|(client, mode)| {
+            format!(
+                "{}::{mode}",
+                normalize_client_path_for_persistence(&client, os)
+            )
+        })
         .collect::<Vec<_>>();
     entries.push(format!("{client_dir}::{method}"));
     config::set(path, "FOLDER_MAP_MODES", &entries.join(";"))
@@ -602,7 +601,12 @@ fn remove_client_from_raw_maps(raw: &str, client_dir: &str, os: Os) -> String {
     parse_maps(raw)
         .into_iter()
         .filter(|(client, _)| !map_client_eq_for_os(client, client_dir, os))
-        .map(|(client, mode)| format!("{client}::{mode}"))
+        .map(|(client, mode)| {
+            format!(
+                "{}::{mode}",
+                normalize_client_path_for_persistence(&client, os)
+            )
+        })
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -617,7 +621,7 @@ fn map_client_eq_for_os(left: &str, right: &str, os: Os) -> bool {
 
 fn normalize_client_dir_literal_for_os(path: &str, os: Os) -> String {
     if os == Os::Windows {
-        return path.to_string();
+        return normalize_client_path_for_persistence(path, os);
     }
 
     let literal = Path::new(path);
@@ -945,12 +949,12 @@ mod tests {
 
     #[test]
     fn windows_child_containment_accepts_forward_and_backslash_boundaries() {
-        assert!(path_eq_or_child_for_os(
+        assert!(client_path_eq_or_child_for_os(
             r"C:\Users\Alice\Project\Child",
             r"c:\users\alice\project",
             Os::Windows
         ));
-        assert!(path_eq_or_child_for_os(
+        assert!(client_path_eq_or_child_for_os(
             "C:/Users/Alice/Project/Child",
             "c:/users/alice/project",
             Os::Windows
@@ -959,7 +963,7 @@ mod tests {
 
     #[test]
     fn windows_child_containment_still_requires_separator_boundary() {
-        assert!(!path_eq_or_child_for_os(
+        assert!(!client_path_eq_or_child_for_os(
             r"C:\Users\Alice\Projectile",
             r"c:\users\alice\project",
             Os::Windows
@@ -993,7 +997,7 @@ mod tests {
                 r"\\?\UNC\server\share\project",
                 Os::Windows,
             ),
-            r"D:\Other::/host/other"
+            r"D:/Other::/host/other"
         );
     }
 
@@ -1005,7 +1009,51 @@ mod tests {
                 "c:/users/alice/project/",
                 Os::Windows,
             ),
-            r"D:\Other::/host/other"
+            r"D:/Other::/host/other"
+        );
+    }
+
+    #[test]
+    fn windows_persistence_strips_verbatim_prefixes() {
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\C:\Users\Alice\Project", Os::Windows),
+            "C:/Users/Alice/Project"
+        );
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\UNC\server\share\Project", Os::Windows),
+            "//server/share/Project"
+        );
+    }
+
+    #[test]
+    fn windows_map_list_normalizes_verbatim_clients_for_display() {
+        assert_eq!(
+            normalize_folder_maps_for_persistence(
+                parse_maps(
+                    r"\\?\C:\Users\Alice\Project::/host/project;\\?\UNC\server\share::/host/share"
+                ),
+                Os::Windows,
+            ),
+            vec![
+                (
+                    "C:/Users/Alice/Project".to_string(),
+                    "/host/project".to_string()
+                ),
+                ("//server/share".to_string(), "/host/share".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_map_add_persists_stripped_verbatim_clients() {
+        assert_eq!(
+            append_folder_map_for_os(
+                r"\\?\C:\Users\Alice\Old::/host/old",
+                r"\\?\UNC\server\share\Project",
+                "/host/project",
+                Os::Windows,
+            ),
+            "C:/Users/Alice/Old::/host/old;//server/share/Project::/host/project"
         );
     }
 
