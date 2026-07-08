@@ -29,7 +29,14 @@ EXEC="$APP_NAME"
 DEPLOY_HOST="${REMOTE_HOST:-gh-mac-m1}"
 
 # ── signing identity ──
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_CN"; then
+# Prefer a codesigning-VALID (trusted) identity; fall back to one that is merely PRESENT
+# (imported but not system-trusted). Signing only needs the private key — not a trust anchor —
+# so a freshly-imported self-signed cert signs fine even where `find-identity -v` won't list it
+# (e.g. GitHub macOS runners whose keychain-trust behavior changed). The downstream
+# `codesign --verify --strict` validates the signature seal, not certificate trust, so it still
+# passes. SIGN_ID stays "-" (ad-hoc) only when the cert is truly absent.
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_CN" \
+   || security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_CN"; then
   SIGN_ID="$SIGN_CN"; echo "signing: stable cert '$SIGN_CN' (grant survives rebuilds/updates)"
 else
   SIGN_ID="-"; echo "⚠ signing: ad-hoc (cert '$SIGN_CN' missing → re-toggle on every rebuild). ./host/make-signing-cert.sh recommended"
