@@ -271,6 +271,14 @@ function sshControlMasterArgs() {
   ];
 }
 
+function sshDisableControlMasterArgs() {
+  if (process.platform === "win32") return [];
+  return [
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=none",
+  ];
+}
+
 function sshEphemeralKnownHostsPath() {
   if (sshEphemeralKnownHostsDir === undefined) {
     let dir = null;
@@ -601,8 +609,7 @@ function sshPairingProofOpts(host, connectTimeout = 5) {
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${connectTimeout}`,
     "-o", "ConnectionAttempts=1",
-    "-o", "ControlMaster=no",
-    "-o", "ControlPath=none",
+    ...sshDisableControlMasterArgs(),
     "-o", "PreferredAuthentications=publickey",
     "-o", "PubkeyAuthentication=yes",
     "-o", "PasswordAuthentication=no",
@@ -619,8 +626,7 @@ function sshDurablePinOpts(connectTimeout = 5) {
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${connectTimeout}`,
     "-o", "ConnectionAttempts=1",
-    "-o", "ControlMaster=no",
-    "-o", "ControlPath=none",
+    ...sshDisableControlMasterArgs(),
     "-o", "PreferredAuthentications=publickey",
     "-o", "PubkeyAuthentication=yes",
     "-o", "PasswordAuthentication=no",
@@ -2364,6 +2370,8 @@ const bridge = {
 	    parseOpenSSHEd25519PrivateKey,
 	    gatewayMacStatus,
 	    sshControlMasterArgs,
+	    sshPairingProofOpts,
+	    sshDurablePinOpts,
 	    cliSupportsPasswordStdin,
 	    currentGatewayMacWin32,
 	  },
