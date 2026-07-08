@@ -155,7 +155,12 @@ jobs:
 
   windows-msi:
     name: build and upload Windows MSI
+    # Ordered after the mac release job (which normally creates the GitHub Release) but
+    # NOT gated on its success: a broken mac signing/build must not block the Windows MSI.
+    # if:always() runs this even when `release` fails; the upload step creates the Release
+    # if the mac job didn't (see "Ensure release exists").
     needs: release
+    if: ${{ always() }}
     runs-on: [self-hosted, Windows, X64, Win11]
     defaults:
       run:
@@ -219,10 +224,13 @@ jobs:
           $versioned = "xpair-${{ steps.ver.outputs.version }}-x64.msi"
           $stable = "xpair-cli.msi"
           Copy-Item -Force $versioned $stable
-          for ($i = 1; $i -le 12; $i++) {
-            gh release view $releaseTag *> $null
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 12) { throw "GitHub Release $releaseTag was not visible after waiting" }
-            Start-Sleep -Seconds 10
+          # Ensure the Release exists. Normally the mac `release` job creates it; if that job
+          # failed (e.g. signing) it won't, so create it here. Alpha/beta tags (a letter in the
+          # version) publish as a pre-release, matching the mac job's own gate.
+          gh release view $releaseTag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            $ver = "${{ steps.release_ver.outputs.version }}"
+            $pre = if ($ver -match '[a-zA-Z]') { @("--prerelease","--latest=false") } else { @() }
+            gh release create $releaseTag --title $releaseTag --notes "Windows CLI MSI ($versioned)." @pre
           }
           gh release upload $releaseTag $versioned $stable --clobber
