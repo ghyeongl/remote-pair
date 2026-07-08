@@ -150,3 +150,77 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_win32_ide }}
         run: |
           echo "::notice::win32 IDE release publication is intentionally disabled until artifact promotion from win32-ide-build.yml is accepted."
+
+  windows-msi:
+    name: build and upload Windows MSI
+    needs: release
+    runs-on: [self-hosted, Windows, X64, Win11]
+    defaults:
+      run:
+        working-directory: client/cli-rs
+        shell: powershell -ExecutionPolicy Bypass -NoProfile -Command "& '{0}'"
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Win11 self-hosted runner is validated by win-probe.yml; workflow_dispatch can rerun
+      # this release path if the runner is temporarily unavailable.
+      - name: Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -V
+          cargo -V
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Install WiX
+        # Pin WiX v5 — the last major before v6/v7's Open Source Maintenance Fee (OSMF)
+        # EULA gate (WIX7015), which otherwise fails the build. v5 uses the same v4 schema
+        # namespace as xpair.wxs.
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Resolve release version
+        id: release_ver
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $v = "${{ github.event.inputs.version }}"
+          } else {
+            $v = "${{ github.ref_name }}"
+            if ($v.StartsWith("v")) { $v = $v.Substring(1) }
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "release version=$v"
+
+      - name: Resolve version from Cargo.toml
+        id: ver
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "cargo version=$v"
+
+      - name: Build .msi
+        # Unsigned per W1; Windows SmartScreen will warn until code signing lands.
+        run: >
+          wix build packaging/windows/xpair.wxs
+          -b target/release
+          -arch x64
+          -d Version=${{ steps.ver.outputs.version }}
+          -o xpair-${{ steps.ver.outputs.version }}-x64.msi
+
+      - name: Upload MSI assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseTag = "v${{ steps.release_ver.outputs.version }}"
+          $versioned = "xpair-${{ steps.ver.outputs.version }}-x64.msi"
+          $stable = "xpair-cli.msi"
+          Copy-Item -Force $versioned $stable
+          for ($i = 1; $i -le 12; $i++) {
+            gh release view $releaseTag *> $null
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 12) { throw "GitHub Release $releaseTag was not visible after waiting" }
+            Start-Sleep -Seconds 10
+          }
+          gh release upload $releaseTag $versioned $stable --clobber

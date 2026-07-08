@@ -25,6 +25,7 @@ use xpair::mapping::{
 use xpair::notify;
 use xpair::open_gui;
 use xpair::platform::Os;
+use xpair::self_update;
 use xpair::session::{self, SshTransport};
 use xpair::status;
 use xpair::tools;
@@ -92,6 +93,7 @@ fn main() -> ExitCode {
         "ls" => cmd_ls(&args[1..]),
         "status" => cmd_status(&args[1..]),
         "logs" => logs::run(&args[1..]),
+        "self-update" => self_update::run(&args[1..]),
         "notify" => notify::run(&args[1..]),
         "install-host" => install_host::run(&args[1..]),
         "host-permissions" => host_permissions::run(&args[1..]),
@@ -133,7 +135,7 @@ fn print_help() {
     }
     println!();
     println!(
-        "(native Rust client — port in progress; onboard deferred to IDE onboarding; self-update remaining)"
+        "(native Rust client — port in progress; onboard deferred to IDE onboarding; Windows self-update uses the MSI release channel)"
     );
 }
 
