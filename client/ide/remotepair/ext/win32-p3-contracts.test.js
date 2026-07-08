@@ -350,6 +350,48 @@ test("P3 cliReady on win32 trusts the MSI status probe without source-scanning t
   });
 });
 
+test("P3 cliSupportsPasswordStdin trusts the native MSI exe without askpass sibling scan", async () => {
+  await withWin32InstalledExe(async () => {
+    const realReadFileSync = fs.readFileSync;
+    await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
+      if (candidate === WIN32_XPAIR) throw new Error("win32 password-stdin must not UTF-8 scan xpair.exe");
+      if (String(candidate).includes("xpair-askpass")) throw new Error("win32 MSI has no xpair-askpass sibling");
+      return realReadFileSync.call(fs, candidate, encoding);
+    }, async () => {
+      assert.equal(bridge.__pairingTest.cliSupportsPasswordStdin(), true);
+    });
+  });
+});
+
+test("P3 cliSupportsPasswordStdin keeps script CLI sibling askpass pinning", async () => {
+  await withPlatform("darwin", async () => {
+    const darwinXpair = path.join(os.homedir(), ".local", "bin", "xpair");
+    const darwinAskpass = path.join(path.dirname(darwinXpair), "xpair-askpass");
+    const realAccessSync = fs.accessSync;
+    const realReadFileSync = fs.readFileSync;
+    await withPatched(fs, "accessSync", function accessSync(candidate, mode) {
+      if (candidate === darwinXpair) return undefined;
+      return realAccessSync.call(fs, candidate, mode);
+    }, async () => {
+      await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
+        if (candidate === darwinXpair) return "install-host --password-stdin";
+        if (candidate === darwinAskpass) return "RP_ASKPASS_FIFO";
+        return realReadFileSync.call(fs, candidate, encoding);
+      }, async () => {
+        assert.equal(bridge.__pairingTest.cliSupportsPasswordStdin(), true);
+      });
+
+      await withPatched(fs, "readFileSync", function readFileSync(candidate, encoding) {
+        if (candidate === darwinXpair) return "install-host --password-stdin";
+        if (candidate === darwinAskpass) return "old askpass";
+        return realReadFileSync.call(fs, candidate, encoding);
+      }, async () => {
+        assert.equal(bridge.__pairingTest.cliSupportsPasswordStdin(), false);
+      });
+    });
+  });
+});
+
 test("P3 cliReady still source-scans script CLIs for the serving surface", async () => {
   await withPlatform("darwin", async () => {
     const darwinXpair = path.join(os.homedir(), ".local", "bin", "xpair");

@@ -143,6 +143,10 @@ function clientEnvPath() {
   return LEGACY_CLIENT_ENV;
 }
 
+function commonEnvPathForClientEnv(file) {
+  return path.join(path.dirname(file), "common.env");
+}
+
 /** Client version SSOT — the same 0.5.0a{N} lockstep stamp the webview build embeds (read from the
  *  shared monotonic build counter). Repo-relative from this file: ext → remotepair → ide → client →
  *  repo-root. In a built app bundle the counter is absent, so we fall back to the base "0.5.0a". */
@@ -1194,13 +1198,18 @@ function gatewayMacStatus({ updateBaseline = false } = {}) {
   return gatewayMacVerdict(current, stored, updateBaseline);
 }
 
-/** True only when the FULL password-bootstrap toolchain is present: the installed CLI understands
- *  install-host --password-stdin AND its sibling xpair-askpass supports the FIFO (RP_ASKPASS_FIFO)
- *  handoff. Both are bash scripts on disk, so read them and look for the markers — cliReady() only
- *  proves `xpair status` runs, which an old toolchain also passes. Conservative: unreadable → false. */
+/** True when the installed CLI can accept install-host --password-stdin. On Windows the native
+ *  Rust MSI exe has supported the flag since its first release and generates its own askpass at
+ *  runtime, so there is no xpair-askpass sibling to scan. On script CLIs (darwin/linux), require
+ *  both the flag and the FIFO-capable sibling askpass marker; this mirrors the serving-gate
+ *  rationale from #86 round 3: old script CLIs can pass `xpair status` while lacking a required
+ *  onboarding capability. Conservative for scripts: unreadable → false. */
 function cliSupportsPasswordStdin() {
   const bin = rpBinAbs();
   if (!bin) return false;
+  if (process.platform === "win32") {
+    return true;
+  }
   try {
     if (!fs.readFileSync(bin, "utf8").includes("--password-stdin")) return false;
     // xpair-askpass ships next to the CLI (rp_askpass_path resolves it as a sibling). A CLI that
@@ -1293,6 +1302,45 @@ function parseEnv(file) {
     if (m) env[m[1]] = m[2].replace(/^["']/, "").replace(/["']\s*$/, "");
   }
   return env;
+}
+
+function configValue(key) {
+  const fromProcess = String(process.env[key] || "").trim();
+  if (fromProcess) return fromProcess;
+  const clientFile = clientEnvPath();
+  const fromClient = String(parseEnv(clientFile)[key] || "").trim();
+  if (fromClient) return fromClient;
+  return String(parseEnv(commonEnvPathForClientEnv(clientFile))[key] || "").trim();
+}
+
+function smbHostFromRemote(remoteHost) {
+  const h = String(remoteHost || "").trim();
+  return h.includes("@") ? h.split("@").pop() : h;
+}
+
+function shareNameForHostPath(hostPath) {
+  return path.posix.basename(String(hostPath || "").replace(/\\/g, "/").replace(/\/+$/, ""));
+}
+
+function expectedUncRoot(smbHost, shareName) {
+  const host = String(smbHost || "").replace(/^\/+|\/+$/g, "");
+  const share = String(shareName || "").replace(/^\/+|\/+$/g, "");
+  if (!host || !share) return "";
+  return `//${host}/${share}`;
+}
+
+function uncRootForHostPath(hostPath) {
+  const smbHost = smbHostFromRemote(configValue("REMOTE_HOST"));
+  return expectedUncRoot(smbHost, shareNameForHostPath(hostPath));
+}
+
+function uncForNetUse(uncPath) {
+  return String(uncPath || "").replace(/\//g, "\\");
+}
+
+function netUseHint(uncPath) {
+  const unc = uncForNetUse(uncPath);
+  return unc ? `If this share needs credentials, run: net use ${unc} /persistent:yes` : "";
 }
 
 /** Upsert KEY="value" in client.env. (CLI `config set` only covers host|terminal; backend keys land here.) */
@@ -1642,6 +1690,9 @@ const bridge = {
   // /Volumes/<share> or a suffixed variant; when the share is already mounted,
   // discover the real path from mount(8), otherwise return the first expected path.
   defaultMountpoint(hostPath) {
+    if (process.platform === "win32") {
+      return uncRootForHostPath(hostPath);
+    }
     const cfg = parseEnv(clientEnvPath());
     const remoteHost = cfg.REMOTE_HOST || "";
     const smbHost = String(remoteHost).includes("@") ? String(remoteHost).split("@").pop() : String(remoteHost);
@@ -1668,6 +1719,22 @@ const bridge = {
   async mount(hostPath, mountpoint) {
     const h = String(hostPath || "").trim();
     if (!h) return { code: -1, out: "", err: "mount requires a host path", mountpoint: "" };
+    if (process.platform === "win32") {
+      const uncRoot = uncRootForHostPath(h);
+      if (!uncRoot) {
+        return { code: 1, out: "", err: "REMOTE_HOST is not set; configure the Mac host before adding a mapping", mountpoint: "" };
+      }
+      if (!fs.existsSync(uncRoot)) {
+        const hint = netUseHint(uncRoot);
+        return {
+          code: 1,
+          out: "",
+          err: `UNC path unreachable: ${uncRoot}${hint ? `\n${hint}` : ""}`,
+          mountpoint: uncRoot,
+        };
+      }
+      return { code: 0, out: `Mountpoint: ${uncRoot}`, err: "", mountpoint: uncRoot };
+    }
     const mp = String(mountpoint || "").trim();
     const r = await cli(["mount", "mount", h, ...(mp ? [mp] : [])]);
     let parsedMountpoint = "";
@@ -2297,6 +2364,7 @@ const bridge = {
 	    parseOpenSSHEd25519PrivateKey,
 	    gatewayMacStatus,
 	    sshControlMasterArgs,
+	    cliSupportsPasswordStdin,
 	    currentGatewayMacWin32,
 	  },
 };

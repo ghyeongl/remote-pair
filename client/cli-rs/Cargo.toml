@@ -1,0 +1,22 @@
+[package]
+name = "xpair"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform xpair client CLI — Rust port of client/cli/xpair + client/cli/xpair-launch (no WSL/Cygwin/MSYS/Git Bash)."
+publish = false
+
+# P0 scaffold: NO external dependencies yet, so `cargo build`/`cargo test` run fully
+# offline on a fresh runner. Dependencies (clap, serde, etc.) are added in later phases
+# once the CI cargo cache / vendored registry is wired.
+
+[[bin]]
+name = "xpair"
+path = "src/main.rs"
+
+[lib]
+name = "xpair"
+path = "src/lib.rs"
+
+[profile.release]
+strip = true
+lto = true
