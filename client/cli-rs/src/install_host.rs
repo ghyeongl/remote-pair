@@ -6,14 +6,16 @@
 //! [`Transport::ssh_exec`] call. The real transport passes
 //! [`platform::Os::ssh_mux_neutralizer_args`] on Windows so ambient mux config cannot leak in.
 //!
-//! Deferred, by design: the non-bootstrap signed `.app` scp staging path, askpass/password-pipe
-//! authentication, and onboarding recovery. Those paths must not be faked in the native port.
+//! Divergence from bash's non-bootstrap path: a native client may not have a bundled signed
+//! macOS `.app` to stage, so the host downloads the release `XpairHost.zip` artifact itself and
+//! installs it over SSH. After the app is installed and serving, the release path runs the same
+//! host-side bootstrap glue path as `--bootstrap` so the host is not left with only a running app.
 
 use std::cell::Cell;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
@@ -133,6 +135,13 @@ fn parse_install_args_with_default_host(
         ));
     }
     normalize_user_qualified_host(&mut host, &mut account);
+    let target = match account.as_deref().filter(|account| !account.is_empty()) {
+        Some(account) => format!("{account}@{host}"),
+        None => host.clone(),
+    };
+    if !config::valid_host(&target) {
+        return Err((format!("invalid host: {target}"), 2));
+    }
     if bootstrap && sha256.as_deref().unwrap_or_default().is_empty() {
         return Err((
             "--bootstrap requires --sha256 <hex> (no unverified curl|bash)".to_string(),
@@ -355,7 +364,7 @@ pub fn run(args: &[String]) -> ExitCode {
     };
 
     let os = Os::current();
-    let transport = SshTransport::new(os, &settings, askpass.as_ref().map(|helper| helper.path()));
+    let transport = SshTransport::new(os, &settings, askpass.as_ref());
     let io = LocalInstallIo;
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
@@ -480,14 +489,13 @@ where
             return code;
         }
     } else {
-        // DEFERRED: the bash path at `client/cli/xpair:1934-1961` stages a signed `.app`
-        // with scp plus shared install resources. The native port has no portable signed-app
-        // staging flow yet, and must not fake a host install.
-        let _ = writeln!(
-            err,
-            "install-host: non-bootstrap signed-app install is not ported in the native client; use --bootstrap --sha256 <hex> on this platform"
-        );
-        return ExitCode::from(1);
+        if let Err(code) = run_release_download_install(settings, &target, transport, err) {
+            return code;
+        }
+        if let Err(code) = run_release_host_glue_install(req, settings, &target, transport, io, err)
+        {
+            return code;
+        }
     }
 
     finish_install(req, settings, client_env_path, transport, io, out, err)
@@ -506,7 +514,52 @@ where
     I: InstallIo + ?Sized,
     E: Write,
 {
-    let expected = req.sha256.as_deref().unwrap_or_default();
+    let script = fetch_bootstrap_script(req, settings, io, err, true)?;
+    run_bootstrap_remote_script(
+        &req.git_ref,
+        &script,
+        target,
+        transport,
+        err,
+        "remote bootstrap",
+    )
+}
+
+fn run_release_host_glue_install<T, I, E>(
+    req: &InstallReq,
+    settings: &RuntimeSettings,
+    target: &str,
+    transport: &T,
+    io: &I,
+    err: &mut E,
+) -> Result<(), ExitCode>
+where
+    T: Transport + ?Sized,
+    I: InstallIo + ?Sized,
+    E: Write,
+{
+    let script = fetch_bootstrap_script(req, settings, io, err, false)?;
+    run_bootstrap_remote_script(
+        &req.git_ref,
+        &script,
+        target,
+        transport,
+        err,
+        "remote host glue setup",
+    )
+}
+
+fn fetch_bootstrap_script<I, E>(
+    req: &InstallReq,
+    settings: &RuntimeSettings,
+    io: &I,
+    err: &mut E,
+    verify_hash: bool,
+) -> Result<String, ExitCode>
+where
+    I: InstallIo + ?Sized,
+    E: Write,
+{
     let url = build_bootstrap_url(&settings.gh_repo, &req.git_ref);
     let path = temp_bootstrap_path();
 
@@ -520,22 +573,25 @@ where
         return Err(ExitCode::from(1));
     }
 
-    let actual = match io.sha256_file(&path) {
-        Ok(actual) => actual,
-        Err(error) => {
+    if verify_hash {
+        let expected = req.sha256.as_deref().unwrap_or_default();
+        let actual = match io.sha256_file(&path) {
+            Ok(actual) => actual,
+            Err(error) => {
+                cleanup(&path);
+                let _ = writeln!(err, "SHA256 computation failed: {error}");
+                return Err(ExitCode::from(1));
+            }
+        };
+
+        if !verify_sha256(expected, &actual) {
             cleanup(&path);
-            let _ = writeln!(err, "SHA256 computation failed: {error}");
+            let _ = writeln!(
+                err,
+                "SHA256 mismatch - aborting before remote bootstrap exec (expected {expected}, got {actual})"
+            );
             return Err(ExitCode::from(1));
         }
-    };
-
-    if !verify_sha256(expected, &actual) {
-        cleanup(&path);
-        let _ = writeln!(
-            err,
-            "SHA256 mismatch - aborting before remote bootstrap exec (expected {expected}, got {actual})"
-        );
-        return Err(ExitCode::from(1));
     }
 
     let script = match fs::read_to_string(&path) {
@@ -547,19 +603,249 @@ where
         }
     };
     cleanup(&path);
+    Ok(script)
+}
 
-    let remote_cmd = build_bootstrap_remote_script_cmd(&req.git_ref, &script);
+fn run_bootstrap_remote_script<T, E>(
+    git_ref: &str,
+    script: &str,
+    target: &str,
+    transport: &T,
+    err: &mut E,
+    label: &str,
+) -> Result<(), ExitCode>
+where
+    T: Transport + ?Sized,
+    E: Write,
+{
+    let remote_cmd = build_bootstrap_remote_script_cmd(git_ref, script);
     match transport.ssh_exec(target, &remote_cmd) {
         Ok(Output { code: 0, .. }) => Ok(()),
         Ok(Output { code, .. }) => {
-            let _ = writeln!(err, "remote bootstrap failed (exit={code})");
+            let _ = writeln!(err, "{label} failed (exit={code})");
             Err(ExitCode::from(1))
         }
         Err(error) => {
-            let _ = writeln!(err, "remote bootstrap failed: {error}");
+            let _ = writeln!(err, "{label} failed: {error}");
             Err(ExitCode::from(1))
         }
     }
+}
+
+fn run_release_download_install<T, E>(
+    settings: &RuntimeSettings,
+    target: &str,
+    transport: &T,
+    err: &mut E,
+) -> Result<(), ExitCode>
+where
+    T: Transport + ?Sized,
+    E: Write,
+{
+    let remote_cmd = build_release_download_install_remote_cmd(settings);
+    match transport.ssh_exec(target, &remote_cmd) {
+        Ok(Output { code: 0, stdout }) if release_install_completed(&stdout) => Ok(()),
+        Ok(Output { code: 0, stdout }) => {
+            let detail = stdout.trim();
+            if detail.is_empty() {
+                let _ = writeln!(
+                    err,
+                    "HOST_APP_SELF_INSTALL_INCOMPLETE: release install completed without host app marker"
+                );
+            } else {
+                let _ = writeln!(
+                    err,
+                    "HOST_APP_SELF_INSTALL_INCOMPLETE: release install completed without host app marker\n{detail}"
+                );
+            }
+            Err(ExitCode::from(1))
+        }
+        Ok(Output { code, stdout }) => {
+            let detail = stdout.trim();
+            if detail.is_empty() {
+                let _ = writeln!(err, "release install failed (exit={code})");
+            } else {
+                let _ = writeln!(err, "release install failed (exit={code})\n{detail}");
+            }
+            Err(ExitCode::from(1))
+        }
+        Err(error) => {
+            let _ = writeln!(err, "release install failed: {error}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+fn release_install_completed(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|line| line.starts_with("__XPAIR_HOST_APP__:"))
+}
+
+fn build_release_download_install_remote_cmd(settings: &RuntimeSettings) -> String {
+    let script = release_download_install_script();
+    let delimiter = heredoc_delimiter(script);
+    let mut cmd = format!(
+        "APP_NAME={} BUNDLE_PREFIX={} GH_REPO={}",
+        remote_quote::posix_single_quote(&settings.app_name),
+        remote_quote::posix_single_quote(&settings.bundle_prefix),
+        remote_quote::posix_single_quote(&settings.gh_repo),
+    );
+    if let Some(channel) = &settings.update_channel {
+        cmd.push_str(" RP_UPDATE_CHANNEL=");
+        cmd.push_str(&remote_quote::posix_single_quote(channel));
+    }
+    cmd.push_str(" /bin/bash -s <<'");
+    cmd.push_str(&delimiter);
+    cmd.push_str("'\n");
+    cmd.push_str(script);
+    if !script.ends_with('\n') {
+        cmd.push('\n');
+    }
+    cmd.push_str(&delimiter);
+    cmd.push('\n');
+    cmd
+}
+
+fn release_download_install_script() -> &'static str {
+    r#"set -euo pipefail
+app="${APP_NAME:-XpairHost}"
+bundle="${BUNDLE_PREFIX:-com.x10lab.xpair-host}"
+repo="${GH_REPO:-x10lab/xpair}"
+tmp="${TMPDIR:-/tmp}/xpair-host-release-install.$$"
+rm -rf "$tmp"
+mkdir -p "$tmp/extract"
+trap 'rm -rf "$tmp"' EXIT
+zip="$tmp/${app}.zip"
+
+channel="${RP_UPDATE_CHANNEL:-}"
+if [ -z "$channel" ] && command -v defaults >/dev/null 2>&1; then
+  channel="$(defaults read "$bundle" RPUpdateChannel 2>/dev/null || true)"
+fi
+channel="$(printf '%s' "$channel" | tr '[:upper:]' '[:lower:]')"
+
+if [ "$channel" = alpha ]; then
+  api="https://api.github.com/repos/${repo}/releases?per_page=30"
+  if command -v python3 >/dev/null 2>&1; then
+    py=python3
+  elif [ -x /usr/bin/python3 ]; then
+    py=/usr/bin/python3
+  else
+    printf 'alpha release lookup requires python3 on the host\n' >&2
+    exit 1
+  fi
+  url="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H "User-Agent: ${app}/install-host" "$api" | "$py" -c '
+import json, re, sys
+app = sys.argv[1].lower()
+data = json.load(sys.stdin)
+def key(tag):
+    tag = tag[1:] if tag.startswith("v") else tag
+    parts = tag.split(".")
+    if len(parts) != 3:
+        return (-1, -1, -1, -1)
+    match = re.match(r"^([0-9]+)(?:a([0-9]+))?$", parts[2])
+    if not match:
+        return (-1, -1, -1, -1)
+    alpha = int(match.group(2)) if match.group(2) else 2147483647
+    return (int(parts[0]), int(parts[1]), int(match.group(1)), alpha)
+best = None
+for rel in data:
+    tag = str(rel.get("tag_name") or "")
+    zips = []
+    for asset in rel.get("assets") or []:
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        if name.endswith(".zip") and url:
+            zips.append((name, url))
+    if not zips:
+        continue
+    preferred = [asset for asset in zips if app in asset[0].lower()]
+    name, url = (preferred or zips)[0]
+    candidate = (key(tag), url)
+    if best is None or candidate[0] > best[0]:
+        best = candidate
+if best is None:
+    sys.exit(2)
+print(best[1])
+' "$app")" || { printf 'could not resolve alpha release asset for %s\n' "$app" >&2; exit 1; }
+else
+  url="https://github.com/${repo}/releases/latest/download/${app}.zip"
+fi
+
+[ -n "$url" ] || { printf 'release asset URL not resolved\n' >&2; exit 1; }
+curl -fsSL "$url" -o "$zip"
+[ -s "$zip" ] || { printf 'downloaded release artifact is empty: %s\n' "$url" >&2; exit 1; }
+/usr/bin/ditto -x -k "$zip" "$tmp/extract"
+src="$tmp/extract/${app}.app"
+[ -d "$src" ] || { printf 'release zip did not contain %s.app\n' "$app" >&2; exit 1; }
+
+sign_cn="RemotePair Local Signing"
+if ! /usr/bin/codesign --verify --strict "$src" >/dev/null 2>&1; then
+  printf 'CODE_SIGNATURE_VERIFY_FAILED: codesign --verify --strict failed for %s\n' "$src"
+  exit 1
+fi
+leaf_cn="$(/usr/bin/codesign -dvv "$src" 2>&1 | awk -F= '/^Authority=/{print $2; exit}')"
+if [ "$leaf_cn" != "$sign_cn" ]; then
+  printf 'CODE_SIGNATURE_CERT_MISMATCH: expected leaf CN "%s", got "%s"\n' "$sign_cn" "${leaf_cn:-<none>}"
+  exit 1
+fi
+
+copy_app() {
+  _src="$1"; _dest="$2"
+  rm -rf "$_dest" 2>/dev/null || true
+  /usr/bin/ditto "$_src" "$_dest"
+}
+
+install_root="/Applications"
+if mkdir -p "$install_root" 2>/dev/null && touch "$install_root/.xpair-write-test" 2>/dev/null; then
+  rm -f "$install_root/.xpair-write-test"
+else
+  install_root="$HOME/Applications"
+  mkdir -p "$install_root"
+fi
+dest="$install_root/${app}.app"
+if ! copy_app "$src" "$dest"; then
+  if [ "$install_root" = /Applications ]; then
+    install_root="$HOME/Applications"
+    mkdir -p "$install_root"
+    dest="$install_root/${app}.app"
+    copy_app "$src" "$dest"
+  else
+    exit 1
+  fi
+fi
+
+[ -x "$dest/Contents/MacOS/$app" ] || { printf 'installed app executable missing: %s\n' "$dest/Contents/MacOS/$app" >&2; exit 1; }
+xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
+pkill -f "/${app}.app/Contents/MacOS/${app}" 2>/dev/null || true
+sleep 1
+launch_marker="$tmp/launch-marker"
+: > "$launch_marker"
+launch_ok=0
+if /bin/launchctl kickstart -k "gui/$(id -u)/${bundle}" 2>/dev/null; then
+  launch_ok=1
+elif /usr/bin/open "$dest" 2>/dev/null; then
+  launch_ok=1
+elif /usr/bin/open -a "$app" 2>/dev/null; then
+  launch_ok=1
+fi
+[ "$launch_ok" = 1 ] || { printf 'HOST_APP_LAUNCH_FAILED: could not launch %s\n' "$dest"; exit 1; }
+host_env="$HOME/.xpair/host/host.env"
+status_json="$HOME/.xpair/host/logs/status.json"
+host_env_ready=0
+serving_state_seen=0
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$host_env" ] && host_env_ready=1
+  if [ -s "$status_json" ] && [ "$status_json" -nt "$launch_marker" ] && /usr/bin/grep -q '"serving"' "$status_json"; then
+    serving_state_seen=1
+  fi
+  [ "$host_env_ready" = 1 ] && [ "$serving_state_seen" = 1 ] && break
+  sleep 0.5
+done
+[ "$host_env_ready" = 1 ] || { printf 'HOST_APP_SELF_INSTALL_INCOMPLETE: %s was not created\n' "$host_env"; exit 1; }
+[ "$serving_state_seen" = 1 ] || { printf 'HOST_APP_SERVING_STATE_TIMEOUT: %s did not report serving state after launch\n' "$status_json"; exit 1; }
+printf '__XPAIR_HOST_APP__:%s\n' "$dest"
+"#
 }
 
 fn finish_install<T, I, W, E>(
@@ -733,6 +1019,8 @@ fn contains_auth_denied(output: &str) -> bool {
 struct AskpassTemp {
     path: PathBuf,
     data_path: Option<PathBuf>,
+    fifo_path: Option<PathBuf>,
+    writer: Option<Child>,
 }
 
 impl AskpassTemp {
@@ -743,6 +1031,7 @@ impl AskpassTemp {
             timestamp_nanos()
         ));
         fs::create_dir_all(&dir)?;
+        chmod_best_effort(&dir, 0o700);
         #[cfg(windows)]
         let path = dir.join("askpass.cmd");
         #[cfg(not(windows))]
@@ -750,6 +1039,8 @@ impl AskpassTemp {
 
         #[cfg(windows)]
         let data_path = {
+            // Windows has no portable FIFO primitive for SSH_ASKPASS. Keep the secret in a
+            // private temp file only on this platform and scrub it aggressively on drop.
             let data_path = dir.join(WINDOWS_ASKPASS_DATA_FILE);
             if let Err(error) = fs::write(&data_path, windows_askpass_data(password)) {
                 let _ = fs::remove_dir_all(&dir);
@@ -760,44 +1051,160 @@ impl AskpassTemp {
         };
         #[cfg(not(windows))]
         let data_path = None;
+        #[cfg(not(windows))]
+        let fifo_path = {
+            let fifo_path = dir.join("pw.fifo");
+            let status = Command::new("mkfifo")
+                .arg("-m")
+                .arg("600")
+                .arg(&fifo_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(_) => {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(io::Error::other("mkfifo failed"));
+                }
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&dir);
+                    return Err(error);
+                }
+            }
+            Some(fifo_path)
+        };
+        #[cfg(windows)]
+        let fifo_path = None;
 
         #[cfg(windows)]
         let body = windows_askpass_cmd_body().to_string();
         #[cfg(not(windows))]
-        let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' {}\n",
-            remote_quote::posix_single_quote(password)
-        );
+        let body = unix_askpass_sh_body(fifo_path.as_ref().expect("unix fifo path is set"));
 
         if let Err(error) = fs::write(&path, body) {
             #[cfg(windows)]
             if let Some(data_path) = &data_path {
                 let _ = fs::remove_file(data_path);
             }
+            if let Some(fifo_path) = &fifo_path {
+                let _ = fs::remove_file(fifo_path);
+            }
             let _ = fs::remove_dir_all(&dir);
             return Err(error);
         }
         chmod_best_effort(&path, 0o700);
-        Ok(AskpassTemp { path, data_path })
+        #[cfg(not(windows))]
+        let writer = match spawn_unix_fifo_writer(
+            fifo_path.as_ref().expect("unix fifo path is set"),
+            password,
+        ) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                if let Some(fifo_path) = &fifo_path {
+                    let _ = fs::remove_file(fifo_path);
+                }
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_dir_all(&dir);
+                return Err(error);
+            }
+        };
+        #[cfg(windows)]
+        let writer = None;
+        Ok(AskpassTemp {
+            path,
+            data_path,
+            fifo_path,
+            writer,
+        })
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
+
+    fn fifo_path(&self) -> Option<&Path> {
+        self.fifo_path.as_deref()
+    }
 }
 
 impl Drop for AskpassTemp {
     fn drop(&mut self) {
+        if let Some(mut writer) = self.writer.take() {
+            match writer.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    let _ = writer.kill();
+                    let _ = writer.wait();
+                }
+                Err(_) => {}
+            }
+        }
         chmod_best_effort(&self.path, 0o600);
         if let Some(data_path) = &self.data_path {
             chmod_best_effort(data_path, 0o600);
             let _ = fs::remove_file(data_path);
+        }
+        if let Some(fifo_path) = &self.fifo_path {
+            let _ = fs::remove_file(fifo_path);
         }
         let _ = fs::remove_file(&self.path);
         if let Some(parent) = self.path.parent() {
             let _ = fs::remove_dir(parent);
         }
     }
+}
+
+#[cfg(not(windows))]
+fn spawn_unix_fifo_writer(fifo_path: &Path, password: &str) -> io::Result<Child> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("cat > \"$1\"")
+        .arg("xpair-askpass-fifo-writer")
+        .arg(fifo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let write_result = child.stdin.as_mut().map_or_else(
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "writer stdin unavailable",
+            ))
+        },
+        |stdin| {
+            stdin.write_all(password.as_bytes())?;
+            stdin.write_all(b"\n")
+        },
+    );
+    child.stdin.take();
+
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    Ok(child)
+}
+
+#[cfg(not(windows))]
+fn unix_askpass_sh_body(fifo_path: &Path) -> String {
+    format!(
+        concat!(
+            "#!/bin/sh\n",
+            "fifo=${{RP_ASKPASS_FIFO:-{fifo}}}\n",
+            "[ -p \"$fifo\" ] || exit 2\n",
+            "_secret=\n",
+            "IFS= read -r _secret < \"$fifo\" || exit 3\n",
+            "[ -n \"$_secret\" ] || exit 3\n",
+            "printf '%s\\n' \"$_secret\"\n"
+        ),
+        fifo = remote_quote::posix_single_quote(&path_string(fifo_path)),
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -845,6 +1252,7 @@ struct RuntimeSettings {
     ssh_config_path: PathBuf,
     pairing_key_path: PathBuf,
     client_os: Os,
+    update_channel: Option<String>,
 }
 
 impl RuntimeSettings {
@@ -871,6 +1279,8 @@ impl RuntimeSettings {
             ssh_config_path,
             pairing_key_path,
             client_os: Os::current(),
+            update_channel: non_empty_value(client_env_path, "RP_UPDATE_CHANNEL")
+                .map(|channel| channel.to_ascii_lowercase()),
         }
     }
 }
@@ -898,11 +1308,14 @@ fn temp_bootstrap_path() -> PathBuf {
 
 fn upsert_ssh_config_block(path: &Path, host: &str, block: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
     }
 
     let begin = format!("# >>> xpair: {host} >>>");
     let end = format!("# <<< xpair: {host} <<<");
+    let original_mode = existing_file_mode(path)?;
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -926,7 +1339,127 @@ fn upsert_ssh_config_block(path: &Path, host: &str, block: &str) -> io::Result<(
         }
     }
     out.push_str(block);
-    fs::write(path, out)
+    atomic_replace_ssh_config(path, &out, original_mode)
+}
+
+fn atomic_replace_ssh_config(
+    path: &Path,
+    contents: &str,
+    original_mode: Option<u32>,
+) -> io::Result<()> {
+    let tmp = ssh_config_temp_path(path);
+    let result = (|| {
+        let mut file = create_private_temp_file(&tmp)?;
+        file.write_all(contents.as_bytes())?;
+        file.flush()?;
+        drop(file);
+        replace_file(&tmp, path)?;
+        set_file_mode(path, original_mode.unwrap_or(0o600))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn ssh_config_temp_path(path: &Path) -> PathBuf {
+    let nonce = timestamp_nanos();
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config"))
+        .to_os_string();
+    name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
+    path.with_file_name(name)
+}
+
+#[cfg(unix)]
+fn create_private_temp_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_temp_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn existing_file_mode(path: &Path) -> io::Result<Option<u32>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o7777)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn existing_file_mode(path: &Path) -> io::Result<Option<u32>> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn set_file_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_path: &Path, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    extern "system" {
+        fn MoveFileExW(
+            lpExistingFileName: *const u16,
+            lpNewFileName: *const u16,
+            dwFlags: u32,
+        ) -> i32;
+    }
+
+    let from_w: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to_w: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let ok = unsafe {
+        MoveFileExW(
+            from_w.as_ptr(),
+            to_w.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
 }
 
 #[cfg(windows)]
@@ -1005,12 +1538,17 @@ struct SshTransport {
     os: platform::Os,
     control_path: Option<PathBuf>,
     askpass: Option<PathBuf>,
+    askpass_fifo: Option<PathBuf>,
     password_phase: Cell<bool>,
     pairing_key: Option<PathBuf>,
 }
 
 impl SshTransport {
-    fn new(os: platform::Os, settings: &RuntimeSettings, askpass: Option<&Path>) -> SshTransport {
+    fn new(
+        os: platform::Os,
+        settings: &RuntimeSettings,
+        askpass: Option<&AskpassTemp>,
+    ) -> SshTransport {
         let control_path = if os.supports_multiplexing() {
             Some(temp_control_path())
         } else {
@@ -1024,7 +1562,8 @@ impl SshTransport {
         SshTransport {
             os,
             control_path,
-            askpass: askpass.map(Path::to_path_buf),
+            askpass: askpass.map(|helper| helper.path().to_path_buf()),
+            askpass_fifo: askpass.and_then(|helper| helper.fifo_path().map(Path::to_path_buf)),
             password_phase: Cell::new(askpass.is_some()),
             pairing_key,
         }
@@ -1037,6 +1576,9 @@ impl SshTransport {
             if let Some(askpass) = &self.askpass {
                 command.env("SSH_ASKPASS", askpass);
                 command.env("SSH_ASKPASS_REQUIRE", "force");
+                if let Some(fifo) = &self.askpass_fifo {
+                    command.env("RP_ASKPASS_FIFO", fifo);
+                }
                 if std::env::var_os("DISPLAY").is_none() {
                     command.env("DISPLAY", ":0");
                 }
@@ -1444,6 +1986,82 @@ mod tests {
     }
 
     #[test]
+    fn ssh_config_upsert_creates_missing_file_with_private_mode() {
+        let tmp = TestDir::new("ssh-config-create-mode");
+        let path = tmp.path.join(".ssh").join("config");
+
+        upsert_ssh_config_block(
+            &path,
+            "mac-mini",
+            &build_ssh_config_block_for_os(
+                Os::Linux,
+                "mac-mini",
+                "192.0.2.10",
+                "alice",
+                "/Users/me/.ssh/id_ed25519",
+            ),
+        )
+        .unwrap();
+
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("Host mac-mini\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_config_upsert_preserves_existing_mode_and_drops_old_block() {
+        let tmp = TestDir::new("ssh-config-preserve-mode");
+        let path = tmp.path.join("config");
+        fs::write(
+            &path,
+            "# keep\n# >>> xpair: mac-mini >>>\nold\n# <<< xpair: mac-mini <<<\nHost other\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o640);
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+
+        upsert_ssh_config_block(
+            &path,
+            "mac-mini",
+            &build_ssh_config_block_for_os(
+                Os::Linux,
+                "mac-mini",
+                "192.0.2.10",
+                "alice",
+                "/Users/me/.ssh/id_ed25519",
+            ),
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep\n"));
+        assert!(text.contains("Host other\n"));
+        assert!(text.contains("Host mac-mini\n"));
+        assert!(!text.contains("\nold\n"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+    }
+
+    #[test]
     fn windows_askpass_reads_literal_data_file() {
         assert_eq!(WINDOWS_ASKPASS_DATA_FILE, "pw.dat");
         for password in [
@@ -1474,11 +2092,47 @@ mod tests {
         let helper = AskpassTemp {
             path: script.clone(),
             data_path: Some(data.clone()),
+            fifo_path: None,
+            writer: None,
         };
         drop(helper);
 
         assert!(!script.exists());
         assert!(!data.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_askpass_script_reads_fifo_without_embedding_secret() {
+        let fifo = PathBuf::from("/tmp/xpair-test-fifo");
+        let body = unix_askpass_sh_body(&fifo);
+
+        assert!(body.contains("RP_ASKPASS_FIFO"));
+        assert!(body.contains("/tmp/xpair-test-fifo"));
+        assert!(!body.contains("correct horse battery staple"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_askpass_create_uses_fifo_without_password_file() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let password = "correct horse battery staple";
+        let helper = AskpassTemp::create(password).unwrap();
+        let script = helper.path.clone();
+        let fifo = helper.fifo_path.clone().unwrap();
+        let parent = script.parent().unwrap().to_path_buf();
+
+        assert!(script.is_file());
+        assert!(fs::metadata(&fifo).unwrap().file_type().is_fifo());
+        assert!(helper.data_path.is_none());
+        assert!(!fs::read_to_string(&script).unwrap().contains(password));
+
+        drop(helper);
+
+        assert!(!script.exists());
+        assert!(!fifo.exists());
+        assert!(!parent.exists());
     }
 
     #[test]
@@ -1731,13 +2385,92 @@ mod tests {
     }
 
     #[test]
-    fn non_bootstrap_uninstalled_path_is_deferred() {
+    fn non_bootstrap_uninstalled_path_downloads_release_on_host() {
         with_env(
             &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
             || {
-                let tmp = TestDir::new("deferred");
+                let tmp = TestDir::new("release-install");
                 let transport = MockTransport::new();
                 transport.push_response(1, "");
+                transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
+                transport.push_response(0, "");
+                transport.push_response(0, "");
+                let io = FakeInstallIo::new("echo bootstrap\n", "", "ssh-ed25519 AAAATEST");
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+
+                let code = run_with_transport(
+                    &strings(&["--host", "mac-mini", "--account", "alice"]),
+                    &tmp.client_env_path(),
+                    &transport,
+                    &io,
+                    &mut out,
+                    &mut err,
+                );
+
+                assert_eq!(code, ExitCode::SUCCESS);
+                assert_eq!(String::from_utf8(err).unwrap(), "");
+                assert_eq!(String::from_utf8(out).unwrap(), "host set: mac-mini\n");
+                assert_eq!(
+                    io.fetched_urls.borrow().as_slice(),
+                    ["https://raw.githubusercontent.com/x10lab/xpair/main/shared/bootstrap.sh"]
+                );
+                let calls = transport.calls();
+                assert_eq!(calls.len(), 4);
+                assert_eq!(
+                    calls[0].remote_cmd,
+                    build_idempotency_probe_cmd(DEFAULT_APP_NAME)
+                );
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("https://github.com/${repo}/releases/latest/download/${app}.zip"));
+                assert!(calls[1].remote_cmd.contains("/usr/bin/ditto -x -k"));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("/usr/bin/codesign --verify --strict \"$src\""));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("/usr/bin/codesign -dvv \"$src\""));
+                assert!(calls[1].remote_cmd.contains("RemotePair Local Signing"));
+                assert!(
+                    calls[1].remote_cmd.find("codesign --verify").unwrap()
+                        < calls[1]
+                            .remote_cmd
+                            .find("copy_app \"$src\" \"$dest\"")
+                            .unwrap()
+                );
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("install_root=\"/Applications\""));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("install_root=\"$HOME/Applications\""));
+                assert!(calls[1].remote_cmd.contains("/bin/launchctl kickstart -k"));
+                assert!(calls[1].remote_cmd.contains("HOST_APP_LAUNCH_FAILED"));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("HOST_APP_SERVING_STATE_TIMEOUT"));
+                assert_eq!(
+                    calls[2].remote_cmd,
+                    "ROLE=host BRANCH=main bash -s <<'__XPAIR_BOOTSTRAP__'\necho bootstrap\n__XPAIR_BOOTSTRAP__\n"
+                );
+                assert_eq!(
+                    calls[3].remote_cmd,
+                    build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn release_install_zero_without_success_marker_is_failure() {
+        with_env(
+            &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
+            || {
+                let tmp = TestDir::new("release-install-no-marker");
+                let transport = MockTransport::new();
+                transport.push_response(1, "");
+                transport.push_response(0, "downloaded but not installed\n");
                 let io = FakeInstallIo::new("", "", "ssh-ed25519 AAAATEST");
                 let mut out = Vec::new();
                 let mut err = Vec::new();
@@ -1752,15 +2485,74 @@ mod tests {
                 );
 
                 assert_eq!(code, ExitCode::from(1));
-                assert_eq!(transport.calls().len(), 1);
-                assert_eq!(
-                    transport.calls()[0].remote_cmd,
-                    build_idempotency_probe_cmd(DEFAULT_APP_NAME)
-                );
                 assert_eq!(String::from_utf8(out).unwrap(), "");
                 assert!(String::from_utf8(err)
                     .unwrap()
-                    .contains("use --bootstrap --sha256 <hex> on this platform"));
+                    .contains("HOST_APP_SELF_INSTALL_INCOMPLETE"));
+                assert_eq!(transport.calls().len(), 2);
+            },
+        );
+    }
+
+    #[test]
+    fn force_non_bootstrap_skips_probe_and_reinstalls_release() {
+        with_env(
+            &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
+            || {
+                let tmp = TestDir::new("force-release-install");
+                let transport = MockTransport::new();
+                transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
+                transport.push_response(0, "");
+                transport.push_response(0, "");
+                let io = FakeInstallIo::new("echo bootstrap\n", "", "ssh-ed25519 AAAATEST");
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+
+                let code = run_with_transport(
+                    &strings(&["--host", "mac-mini", "--account", "alice", "--force"]),
+                    &tmp.client_env_path(),
+                    &transport,
+                    &io,
+                    &mut out,
+                    &mut err,
+                );
+
+                assert_eq!(code, ExitCode::SUCCESS);
+                assert_eq!(String::from_utf8(err).unwrap(), "");
+                let calls = transport.calls();
+                assert_eq!(calls.len(), 3);
+                assert!(calls[0].remote_cmd.contains("releases/latest/download"));
+                assert_eq!(
+                    calls[1].remote_cmd,
+                    "ROLE=host BRANCH=main bash -s <<'__XPAIR_BOOTSTRAP__'\necho bootstrap\n__XPAIR_BOOTSTRAP__\n"
+                );
+                assert_eq!(
+                    calls[2].remote_cmd,
+                    build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn release_install_honors_alpha_update_channel() {
+        with_env(
+            &[
+                ("REMOTE_HOST", None),
+                ("HOME", Some("C:/Users/tester")),
+                ("USERPROFILE", None),
+                ("RP_UPDATE_CHANNEL", None),
+            ],
+            || {
+                let tmp = TestDir::new("alpha-release-channel");
+                fs::write(tmp.client_env_path(), "RP_UPDATE_CHANNEL=alpha\n").unwrap();
+                let settings = RuntimeSettings::load(&tmp.client_env_path());
+
+                let cmd = build_release_download_install_remote_cmd(&settings);
+
+                assert!(cmd.contains("RP_UPDATE_CHANNEL='alpha'"));
+                assert!(cmd.contains("releases?per_page=30"));
+                assert!(cmd.contains("browser_download_url"));
             },
         );
     }

@@ -14,6 +14,7 @@ pub type FolderMap = (String, String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MapError {
     WslPath { path: String },
+    MappingRequired { path: String },
 }
 
 impl fmt::Display for MapError {
@@ -22,6 +23,10 @@ impl fmt::Display for MapError {
             MapError::WslPath { path } => {
                 write!(f, "unsupported WSL path for native xpair client: {path}")
             }
+            MapError::MappingRequired { path } => write!(
+                f,
+                "Windows launch path is outside FOLDER_MAPS: {path}; add the mapping with: xpair map add <UNC-or-drive path> <host path>"
+            ),
         }
     }
 }
@@ -81,6 +86,9 @@ pub fn map_to_host_for_os(
         }
     }
 
+    if best_client.is_empty() && os == Os::Windows {
+        return Err(MapError::MappingRequired { path });
+    }
     if best_client.is_empty() {
         return Ok(to_posix_path(&path));
     }
@@ -102,7 +110,7 @@ pub fn map_to_host_for_os(
 /// - `\\?\C:\a` and `\\?\UNC\server\share`: strip the long-path prefix first.
 /// - `/mnt/c/...` and `\\wsl$\...`: reject with `MapError::WslPath`.
 /// - Host results are POSIX paths, so backslashes become `/` after substitution.
-fn canonicalize_client_path(path: &str) -> Result<String, MapError> {
+pub fn canonicalize_client_path(path: &str) -> Result<String, MapError> {
     let mut out = path.replace('\\', "/");
     reject_wsl_path(path, &out)?;
 
@@ -115,6 +123,53 @@ fn canonicalize_client_path(path: &str) -> Result<String, MapError> {
     reject_wsl_path(path, &out)?;
     uppercase_drive_letter(&mut out);
     Ok(out)
+}
+
+/// Normalize a client path before writing it back to `FOLDER_MAPS` or
+/// `FOLDER_MAP_MODES`.
+///
+/// Windows `fs::canonicalize` may return verbatim paths (`\\?\C:\...` or
+/// `\\?\UNC\...`). Those are useful for Win32 APIs, but they are not the mapping
+/// format bash and the rest of xpair consume. Persist the comparable form instead.
+pub fn normalize_client_path_for_persistence(path: &str, os: Os) -> String {
+    if os != Os::Windows {
+        return path.to_string();
+    }
+
+    let mut normalized = canonicalize_client_path(path).unwrap_or_else(|_| path.replace('\\', "/"));
+    trim_trailing_windows_separators(&mut normalized);
+    normalized
+}
+
+/// Normalize all client keys in parsed mapping rows before display or rewrite.
+pub fn normalize_folder_maps_for_persistence(pairs: Vec<FolderMap>, os: Os) -> Vec<FolderMap> {
+    pairs
+        .into_iter()
+        .map(|(client, host)| (normalize_client_path_for_persistence(&client, os), host))
+        .collect()
+}
+
+/// Compare two client mapping keys using the same normalization as persistence.
+pub fn client_path_eq_for_os(left: &str, right: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        normalize_windows_path_for_cmp(left) == normalize_windows_path_for_cmp(right)
+    } else {
+        left == right
+    }
+}
+
+/// Return true when `path` is exactly `prefix` or is a child path under it.
+pub fn client_path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        let path = normalize_windows_path_for_cmp(path);
+        let prefix = normalize_windows_path_for_cmp(prefix);
+        return path == prefix
+            || path
+                .strip_prefix(&prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'));
+    }
+
+    path_prefix_matches(path, prefix, os)
 }
 
 fn path_prefix_matches(path: &str, prefix: &str, os: Os) -> bool {
@@ -131,6 +186,18 @@ fn path_prefix_matches(path: &str, prefix: &str, os: Os) -> bool {
             || path
                 .strip_prefix(prefix)
                 .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+}
+
+fn normalize_windows_path_for_cmp(path: &str) -> String {
+    let mut normalized = normalize_client_path_for_persistence(path, Os::Windows);
+    trim_trailing_windows_separators(&mut normalized);
+    normalized.to_ascii_lowercase()
+}
+
+fn trim_trailing_windows_separators(path: &mut String) {
+    while path.len() > 3 && path.ends_with('/') {
+        path.pop();
     }
 }
 
@@ -214,8 +281,14 @@ mod tests {
     fn identity_fallback_when_no_map_matches() {
         let maps = parse_maps("/client::/host");
         assert_eq!(
-            map_to_host("/other/project", &maps).unwrap(),
+            map_to_host_for_os("/other/project", &maps, Os::Mac).unwrap(),
             "/other/project"
+        );
+        assert_eq!(
+            map_to_host_for_os(r"C:\other\project", &maps, Os::Windows),
+            Err(MapError::MappingRequired {
+                path: "C:/other/project".to_string(),
+            })
         );
     }
 
@@ -249,7 +322,18 @@ mod tests {
     #[test]
     fn prefix_match_requires_path_boundary() {
         let maps = parse_maps("/sbx/a::/x");
-        assert_eq!(map_to_host("/sbx/ab", &maps).unwrap(), "/sbx/ab");
+        assert_eq!(
+            map_to_host_for_os("/sbx/ab", &maps, Os::Mac).unwrap(),
+            "/sbx/ab"
+        );
+
+        let maps = parse_maps(r"C:\sbx\a::/x");
+        assert_eq!(
+            map_to_host_for_os(r"C:\sbx\ab", &maps, Os::Windows),
+            Err(MapError::MappingRequired {
+                path: "C:/sbx/ab".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -298,6 +382,56 @@ mod tests {
     }
 
     #[test]
+    fn windows_persistence_strips_verbatim_prefixes() {
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\C:\Users\Alice\Project", Os::Windows),
+            "C:/Users/Alice/Project"
+        );
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\UNC\server\share\Project", Os::Windows),
+            "//server/share/Project"
+        );
+    }
+
+    #[test]
+    fn windows_persistence_normalizes_parsed_mapping_clients() {
+        assert_eq!(
+            normalize_folder_maps_for_persistence(
+                parse_maps(
+                    r"\\?\C:\Users\Alice\Project::/host/project;\\?\UNC\server\share::/host/share"
+                ),
+                Os::Windows,
+            ),
+            vec![
+                (
+                    "C:/Users/Alice/Project".to_string(),
+                    "/host/project".to_string()
+                ),
+                ("//server/share".to_string(), "/host/share".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_mapping_key_compare_strips_verbatim_prefixes() {
+        assert!(client_path_eq_for_os(
+            r"\\?\C:\Users\Alice\Project",
+            "c:/users/alice/project/",
+            Os::Windows,
+        ));
+        assert!(client_path_eq_or_child_for_os(
+            "C:/Users/Alice/Project/Sub",
+            r"\\?\C:\Users\Alice\Project",
+            Os::Windows,
+        ));
+        assert!(!client_path_eq_or_child_for_os(
+            "C:/Users/Alice/Projectile",
+            r"\\?\C:\Users\Alice\Project",
+            Os::Windows,
+        ));
+    }
+
+    #[test]
     fn windows_drive_letter_compare_is_case_insensitive() {
         let maps = parse_maps(r"c:\Users\me::/host/me");
         assert_eq!(
@@ -319,8 +453,20 @@ mod tests {
     fn windows_case_insensitive_prefix_still_requires_boundary() {
         let maps = parse_maps(r"C:\Users\Alice\Project::/host/project");
         assert_eq!(
-            map_to_host_for_os(r"c:\users\alice\projectile", &maps, Os::Windows).unwrap(),
-            "C:/users/alice/projectile"
+            map_to_host_for_os(r"c:\users\alice\projectile", &maps, Os::Windows),
+            Err(MapError::MappingRequired {
+                path: "C:/users/alice/projectile".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn windows_requires_mapping_instead_of_identity_fallback() {
+        assert_eq!(
+            map_to_host_for_os(r"C:\Users\me\project", &[], Os::Windows),
+            Err(MapError::MappingRequired {
+                path: r"C:/Users/me/project".to_string(),
+            })
         );
     }
 

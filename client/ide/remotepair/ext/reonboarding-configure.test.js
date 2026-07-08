@@ -11,6 +11,11 @@ const extension = fs.readFileSync(path.join(extRoot, "extension.js"), "utf8");
 const onboardingMainPath = path.join(extRoot, "onboarding-main.cjs");
 const appDelegate = fs.readFileSync(path.join(repoRoot, "host/app/AppDelegate.swift"), "utf8");
 const onboardingWindow = fs.readFileSync(path.join(repoRoot, "host/app/OnboardingWindow.swift"), "utf8");
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+process.on("exit", () => {
+  if (originalPlatformDescriptor) Object.defineProperty(process, "platform", originalPlatformDescriptor);
+});
 
 let passed = 0;
 let failed = 0;

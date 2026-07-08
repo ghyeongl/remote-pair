@@ -17,7 +17,11 @@ use xpair::host_permissions;
 use xpair::install_host;
 use xpair::launch;
 use xpair::logs;
-use xpair::mapping::{parse_maps, FolderMap};
+use xpair::mapping::{
+    canonicalize_client_path, client_path_eq_or_child_for_os,
+    normalize_client_path_for_persistence, normalize_folder_maps_for_persistence, parse_maps,
+    FolderMap,
+};
 use xpair::notify;
 use xpair::open_gui;
 use xpair::platform::Os;
@@ -60,6 +64,19 @@ fn main() -> ExitCode {
     match cmd {
         "--version" | "-V" | "version" => {
             println!("xpair {VERSION}");
+            if args.get(1).is_some_and(|arg| arg == "--verbose") {
+                println!(
+                    "bridge-serving-marker {}",
+                    host_permissions::BRIDGE_SERVING_MARKER
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        "__caps" => {
+            println!(
+                "bridge-serving-marker {}",
+                host_permissions::BRIDGE_SERVING_MARKER
+            );
             ExitCode::SUCCESS
         }
         "--help" | "-h" | "help" => {
@@ -143,7 +160,13 @@ fn cmd_status(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let aqua_sock = resolve_aqua_sock();
+    let aqua_sock = match resolve_aqua_sock(&path) {
+        Ok(aqua_sock) => aqua_sock,
+        Err(err) => {
+            eprintln!("xpair status: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let status_json = match fs::read_to_string(status::status_file_path(&path)) {
         Ok(status_json) => Some(status_json),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
@@ -199,8 +222,9 @@ fn cmd_map(args: &[String]) -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let pairs = parse_maps(&raw_maps);
-            let modes = parse_maps(&raw_modes);
+            let os = Os::current();
+            let pairs = normalize_folder_maps_for_persistence(parse_maps(&raw_maps), os);
+            let modes = normalize_folder_maps_for_persistence(parse_maps(&raw_modes), os);
             if args.get(1).is_some_and(|arg| arg == "--json") {
                 println!("{}", render_map_json(&pairs, &modes));
             } else {
@@ -216,7 +240,12 @@ fn cmd_map(args: &[String]) -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let client_dir = match canonical_client_dir(&add.client) {
+            let os = Os::current();
+            if let Err(message) = validate_map_add_args_for_os(&add, os) {
+                eprintln!("{message}");
+                return ExitCode::from(2);
+            }
+            let client_dir = match canonical_client_dir_for_os(&add.client, os) {
                 Ok(dir) => dir,
                 Err(()) => {
                     eprintln!("client path not found: {}", add.client);
@@ -231,7 +260,7 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 }
             };
             let pairs = parse_maps(&raw_maps);
-            if is_mapped(&client_dir, &pairs, Os::current()) {
+            if is_mapped(&client_dir, &pairs, os) {
                 println!("already mapped (or under a mapped root): {client_dir}");
                 return ExitCode::SUCCESS;
             }
@@ -243,17 +272,12 @@ fn cmd_map(args: &[String]) -> ExitCode {
             }
 
             let host_dir = add.host.unwrap_or_else(|| client_dir.clone());
-            let entry = format!("{client_dir}::{host_dir}");
-            let new_maps = if raw_maps.is_empty() {
-                entry
-            } else {
-                format!("{raw_maps};{entry}")
-            };
+            let new_maps = append_folder_map_for_os(&raw_maps, &client_dir, &host_dir, os);
             if let Err(err) = config::set(&path, "FOLDER_MAPS", &new_maps) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
             }
-            if let Err(err) = set_map_mode(&path, &client_dir, &method) {
+            if let Err(err) = set_map_mode_for_os(&path, &client_dir, &method, os) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
             }
@@ -265,25 +289,40 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 eprintln!("map rm <clientDir>");
                 return ExitCode::from(2);
             }
-            let client_dir = match canonical_client_dir(&args[1]) {
-                Ok(dir) => dir,
-                Err(()) => {
-                    eprintln!("client path not found: {}", args[1]);
-                    return ExitCode::from(1);
-                }
-            };
             let os = Os::current();
-            let raw_maps = match resolve_raw_maps(&path) {
+            let client_dir = canonical_client_dir_for_os(&args[1], os)
+                .unwrap_or_else(|_| normalize_client_dir_literal_for_os(&args[1], os));
+            let raw_maps = match resolve_raw_maps_with_source(&path) {
                 Ok(raw_maps) => raw_maps,
                 Err(err) => {
                     eprintln!("xpair map: {err}");
                     return ExitCode::from(1);
                 }
             };
-            let kept = remove_client_from_raw_maps(&raw_maps, &client_dir, os);
+            let kept = remove_client_from_raw_maps(&raw_maps.value, &client_dir, os);
             if let Err(err) = config::set(&path, "FOLDER_MAPS", &kept) {
                 eprintln!("xpair map: {err}");
                 return ExitCode::from(1);
+            }
+            if kept.is_empty()
+                && matches!(
+                    raw_maps.source,
+                    RawMapsSource::FileFolderMaps | RawMapsSource::FileSyncRoots
+                )
+            {
+                match config::get(&path, "SYNC_ROOTS") {
+                    Ok(Some(sync_roots)) if !sync_roots.is_empty() => {
+                        if let Err(err) = config::set(&path, "SYNC_ROOTS", "") {
+                            eprintln!("xpair map: {err}");
+                            return ExitCode::from(1);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        eprintln!("xpair map: {err}");
+                        return ExitCode::from(1);
+                    }
+                }
             }
             if let Err(err) = remove_map_mode_for_os(&path, &client_dir, os) {
                 eprintln!("xpair map: {err}");
@@ -324,7 +363,13 @@ fn cmd_ls(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let aqua_sock = resolve_aqua_sock();
+    let aqua_sock = match resolve_aqua_sock(&path) {
+        Ok(aqua_sock) => aqua_sock,
+        Err(err) => {
+            eprintln!("xpair ls: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let transport = SshTransport;
 
     if json {
@@ -354,7 +399,7 @@ fn cmd_ls(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let pairs = parse_maps(&raw_maps);
+    let pairs = normalize_folder_maps_for_persistence(parse_maps(&raw_maps), Os::current());
     let map_list = render_map_list(&pairs);
     let output = if host.is_empty() {
         session::render_text("host", "", "", &map_list)
@@ -384,22 +429,57 @@ fn render_map_list(pairs: &[(String, String)]) -> String {
 
 fn resolve_host(path: &Path) -> std::io::Result<String> {
     if let Some(host) = non_empty_env("REMOTE_HOST") {
+        config::require_valid_host(&host)?;
         return Ok(host);
     }
     config::get_cli(path, "host")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawMapsSource {
+    EnvFolderMaps,
+    EnvSyncRoots,
+    FileFolderMaps,
+    FileSyncRoots,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawMaps {
+    value: String,
+    source: RawMapsSource,
+}
+
 fn resolve_raw_maps(path: &Path) -> std::io::Result<String> {
+    Ok(resolve_raw_maps_with_source(path)?.value)
+}
+
+fn resolve_raw_maps_with_source(path: &Path) -> std::io::Result<RawMaps> {
     if let Some(raw_maps) = non_empty_env("FOLDER_MAPS") {
-        return Ok(raw_maps);
+        return Ok(RawMaps {
+            value: raw_maps,
+            source: RawMapsSource::EnvFolderMaps,
+        });
     }
     if let Some(raw_maps) = non_empty_env("SYNC_ROOTS") {
-        return Ok(raw_maps);
+        return Ok(RawMaps {
+            value: raw_maps,
+            source: RawMapsSource::EnvSyncRoots,
+        });
     }
     if let Some(raw_maps) = config::get(path, "FOLDER_MAPS")?.filter(|maps| !maps.is_empty()) {
-        return Ok(raw_maps);
+        return Ok(RawMaps {
+            value: raw_maps,
+            source: RawMapsSource::FileFolderMaps,
+        });
     }
-    Ok(config::get(path, "SYNC_ROOTS")?.unwrap_or_default())
+    let value = config::get(path, "SYNC_ROOTS")?.unwrap_or_default();
+    let source = if value.is_empty() {
+        RawMapsSource::None
+    } else {
+        RawMapsSource::FileSyncRoots
+    };
+    Ok(RawMaps { value, source })
 }
 
 fn resolve_raw_modes(path: &Path) -> std::io::Result<String> {
@@ -456,10 +536,24 @@ fn parse_map_add_args(args: &[String]) -> Result<MapAddArgs, String> {
     })
 }
 
-fn canonical_client_dir(path: &str) -> Result<String, ()> {
+fn validate_map_add_args_for_os(add: &MapAddArgs, os: Os) -> Result<(), String> {
+    if os == Os::Windows && add.host.is_none() {
+        Err(
+            "map add on Windows requires an explicit mac host path: xpair map add <clientDir> <hostDir>"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn canonical_client_dir_for_os(path: &str, os: Os) -> Result<String, ()> {
     let path = fs::canonicalize(path).map_err(|_| ())?;
     if path.is_dir() {
-        Ok(path.to_string_lossy().into_owned())
+        Ok(normalize_client_path_for_persistence(
+            &path.to_string_lossy(),
+            os,
+        ))
     } else {
         Err(())
     }
@@ -468,36 +562,32 @@ fn canonical_client_dir(path: &str) -> Result<String, ()> {
 fn is_mapped(client_dir: &str, pairs: &[FolderMap], os: Os) -> bool {
     pairs
         .iter()
-        .any(|(client, _)| path_eq_or_child_for_os(client_dir, client, os))
+        .any(|(client, _)| client_path_eq_or_child_for_os(client_dir, client, os))
 }
 
-fn path_eq_or_child_for_os(path: &str, prefix: &str, os: Os) -> bool {
-    if os == Os::Windows {
-        path.eq_ignore_ascii_case(prefix)
-            || (path.len() > prefix.len()
-                && path
-                    .as_bytes()
-                    .get(prefix.len())
-                    .is_some_and(|ch| is_windows_separator(*ch))
-                && path[..prefix.len()].eq_ignore_ascii_case(prefix))
-    } else {
-        path == prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with('/'))
-    }
+fn append_folder_map_for_os(raw_maps: &str, client_dir: &str, host_dir: &str, os: Os) -> String {
+    let mut entries = normalize_folder_maps_for_persistence(parse_maps(raw_maps), os)
+        .into_iter()
+        .map(|(client, host)| format!("{client}::{host}"))
+        .collect::<Vec<_>>();
+    entries.push(format!(
+        "{}::{host_dir}",
+        normalize_client_path_for_persistence(client_dir, os)
+    ));
+    entries.join(";")
 }
 
-fn is_windows_separator(ch: u8) -> bool {
-    matches!(ch, b'/' | b'\\')
-}
-
-fn set_map_mode(path: &Path, client_dir: &str, method: &str) -> std::io::Result<()> {
+fn set_map_mode_for_os(path: &Path, client_dir: &str, method: &str, os: Os) -> std::io::Result<()> {
     let raw = resolve_raw_modes(path)?;
     let mut entries = parse_maps(&raw)
         .into_iter()
-        .filter(|(client, _)| client != client_dir)
-        .map(|(client, mode)| format!("{client}::{mode}"))
+        .filter(|(client, _)| !map_client_eq_for_os(client, client_dir, os))
+        .map(|(client, mode)| {
+            format!(
+                "{}::{mode}",
+                normalize_client_path_for_persistence(&client, os)
+            )
+        })
         .collect::<Vec<_>>();
     entries.push(format!("{client_dir}::{method}"));
     config::set(path, "FOLDER_MAP_MODES", &entries.join(";"))
@@ -513,7 +603,12 @@ fn remove_client_from_raw_maps(raw: &str, client_dir: &str, os: Os) -> String {
     parse_maps(raw)
         .into_iter()
         .filter(|(client, _)| !map_client_eq_for_os(client, client_dir, os))
-        .map(|(client, mode)| format!("{client}::{mode}"))
+        .map(|(client, mode)| {
+            format!(
+                "{}::{mode}",
+                normalize_client_path_for_persistence(&client, os)
+            )
+        })
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -522,16 +617,60 @@ fn map_client_eq_for_os(left: &str, right: &str, os: Os) -> bool {
     if os == Os::Windows {
         normalize_windows_path_for_cmp(left) == normalize_windows_path_for_cmp(right)
     } else {
-        left == right
+        normalize_posix_path_for_cmp(left) == normalize_posix_path_for_cmp(right)
+    }
+}
+
+fn normalize_client_dir_literal_for_os(path: &str, os: Os) -> String {
+    if os == Os::Windows {
+        return normalize_client_path_for_persistence(path, os);
+    }
+
+    let literal = Path::new(path);
+    let absolute = if literal.is_absolute() {
+        literal.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| Path::new(".").to_path_buf())
+            .join(literal)
+    };
+    normalize_posix_path_for_cmp(&absolute.to_string_lossy())
+}
+
+fn normalize_posix_path_for_cmp(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if !parts.is_empty() => {
+                parts.pop();
+            }
+            ".." if !absolute => parts.push(part),
+            ".." => {}
+            _ => parts.push(part),
+        }
+    }
+
+    let mut normalized = String::new();
+    if absolute {
+        normalized.push('/');
+    }
+    normalized.push_str(&parts.join("/"));
+    if normalized.is_empty() {
+        if absolute {
+            "/".to_string()
+        } else {
+            ".".to_string()
+        }
+    } else {
+        normalized
     }
 }
 
 fn normalize_windows_path_for_cmp(path: &str) -> String {
-    let mut normalized = path.replace('/', "\\");
-    if let Some(stripped) = normalized.strip_prefix(r"\\?\") {
-        normalized = stripped.to_string();
-    }
-    while normalized.len() > 3 && normalized.ends_with('\\') {
+    let mut normalized = canonicalize_client_path(path).unwrap_or_else(|_| path.replace('\\', "/"));
+    while normalized.len() > 3 && normalized.ends_with('/') {
         normalized.pop();
     }
     normalized.to_ascii_lowercase()
@@ -570,6 +709,9 @@ fn infer_map_method(client: &str) -> String {
     let Some(host) = non_empty_env("REMOTE_HOST") else {
         return "sync".to_string();
     };
+    if !config::valid_host(&host) {
+        return "sync".to_string();
+    }
     let host = host.rsplit('@').next().unwrap_or(&host);
     let output = std::process::Command::new("mount").output().ok();
     let Some(output) = output else {
@@ -634,7 +776,9 @@ fn run_tool_or_windows_gate(verb: &str, tool: &str, args: &[String]) -> ExitCode
     if Os::current() == Os::Windows {
         match verb {
             "editor" | "desktop" => eprintln!("xpair {verb}: IDE-driven on Windows"),
-            "mount" => eprintln!("xpair mount: replaced by UNC mappings on Windows"),
+            "mount" => eprintln!(
+                "xpair mount: Windows uses UNC paths — add the mapping with: xpair map add <UNC-or-drive path> <host path>"
+            ),
             _ => eprintln!("xpair {verb}: unavailable on Windows"),
         }
         return ExitCode::from(2);
@@ -642,8 +786,13 @@ fn run_tool_or_windows_gate(verb: &str, tool: &str, args: &[String]) -> ExitCode
     tools::run_passthrough(tool, args)
 }
 
-fn resolve_aqua_sock() -> String {
-    non_empty_env("AQUA_SOCK").unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string())
+fn resolve_aqua_sock(path: &Path) -> std::io::Result<String> {
+    if let Some(aqua_sock) = non_empty_env("AQUA_SOCK") {
+        return Ok(aqua_sock);
+    }
+    Ok(config::get(path, "AQUA_SOCK")?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()))
 }
 
 fn non_empty_env(key: &str) -> Option<String> {
@@ -713,10 +862,7 @@ fn run_config(args: &[String]) -> ExitCode {
                 }
             }
         }
-        "maps" => {
-            eprintln!("xpair: 'config maps' is not yet ported to the native client (Rust port in progress)");
-            ExitCode::from(2)
-        }
+        "maps" => cmd_map(&["list".to_string()]),
         _ => {
             eprintln!("config [list|get <key>|set <key> <value>|maps]");
             ExitCode::from(2)
@@ -727,15 +873,90 @@ fn run_config(args: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(name: &str) -> TestDir {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "xpair-main-test-{}-{id}-{name}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            TestDir { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(values: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let saved = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn with_env<T>(values: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = EnvGuard::set(values);
+        f()
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    fn path_string(path: impl AsRef<Path>) -> String {
+        path.as_ref().to_string_lossy().into_owned()
+    }
 
     #[test]
     fn windows_child_containment_accepts_forward_and_backslash_boundaries() {
-        assert!(path_eq_or_child_for_os(
+        assert!(client_path_eq_or_child_for_os(
             r"C:\Users\Alice\Project\Child",
             r"c:\users\alice\project",
             Os::Windows
         ));
-        assert!(path_eq_or_child_for_os(
+        assert!(client_path_eq_or_child_for_os(
             "C:/Users/Alice/Project/Child",
             "c:/users/alice/project",
             Os::Windows
@@ -744,7 +965,7 @@ mod tests {
 
     #[test]
     fn windows_child_containment_still_requires_separator_boundary() {
-        assert!(!path_eq_or_child_for_os(
+        assert!(!client_path_eq_or_child_for_os(
             r"C:\Users\Alice\Projectile",
             r"c:\users\alice\project",
             Os::Windows
@@ -766,6 +987,23 @@ mod tests {
     }
 
     #[test]
+    fn windows_map_rm_comparison_normalizes_long_unc_prefix() {
+        assert!(map_client_eq_for_os(
+            r"\\?\UNC\Server\Share\Project",
+            r"\\server\share\project",
+            Os::Windows
+        ));
+        assert_eq!(
+            remove_client_from_raw_maps(
+                r"\\server\share\project::/host/project;D:\Other::/host/other",
+                r"\\?\UNC\server\share\project",
+                Os::Windows,
+            ),
+            r"D:/Other::/host/other"
+        );
+    }
+
+    #[test]
     fn remove_client_from_raw_maps_uses_windows_normalized_key() {
         assert_eq!(
             remove_client_from_raw_maps(
@@ -773,7 +1011,162 @@ mod tests {
                 "c:/users/alice/project/",
                 Os::Windows,
             ),
-            r"D:\Other::/host/other"
+            r"D:/Other::/host/other"
         );
+    }
+
+    #[test]
+    fn windows_persistence_strips_verbatim_prefixes() {
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\C:\Users\Alice\Project", Os::Windows),
+            "C:/Users/Alice/Project"
+        );
+        assert_eq!(
+            normalize_client_path_for_persistence(r"\\?\UNC\server\share\Project", Os::Windows),
+            "//server/share/Project"
+        );
+    }
+
+    #[test]
+    fn windows_map_list_normalizes_verbatim_clients_for_display() {
+        assert_eq!(
+            normalize_folder_maps_for_persistence(
+                parse_maps(
+                    r"\\?\C:\Users\Alice\Project::/host/project;\\?\UNC\server\share::/host/share"
+                ),
+                Os::Windows,
+            ),
+            vec![
+                (
+                    "C:/Users/Alice/Project".to_string(),
+                    "/host/project".to_string()
+                ),
+                ("//server/share".to_string(), "/host/share".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_map_add_persists_stripped_verbatim_clients() {
+        assert_eq!(
+            append_folder_map_for_os(
+                r"\\?\C:\Users\Alice\Old::/host/old",
+                r"\\?\UNC\server\share\Project",
+                "/host/project",
+                Os::Windows,
+            ),
+            "C:/Users/Alice/Old::/host/old;//server/share/Project::/host/project"
+        );
+    }
+
+    #[test]
+    fn map_rm_posix_comparison_normalizes_deleted_literal_paths() {
+        assert_eq!(
+            remove_client_from_raw_maps(
+                "/tmp/deleted::/host/deleted;/tmp/keep::/host/keep",
+                "/tmp/deleted/",
+                Os::Mac,
+            ),
+            "/tmp/keep::/host/keep"
+        );
+        assert_eq!(
+            remove_client_from_raw_maps(
+                "/tmp/deleted::/host/deleted;/tmp/keep::/host/keep",
+                "/tmp/parent/../deleted",
+                Os::Linux,
+            ),
+            "/tmp/keep::/host/keep"
+        );
+    }
+
+    #[test]
+    fn map_rm_clears_legacy_sync_roots_when_last_mapping_removed() {
+        let tmp = TestDir::new("legacy-sync-rm");
+        let client_dir = tmp.path.join("project");
+        fs::create_dir_all(&client_dir).unwrap();
+        let client_dir_s = path_string(fs::canonicalize(&client_dir).unwrap());
+        let client_env = tmp.path.join("client.env");
+        // Single-quote the value: on windows the canonicalized path carries backslashes
+        // (and a \\?\\ prefix) that the shell-style env parser would otherwise mangle.
+        fs::write(
+            &client_env,
+            format!("SYNC_ROOTS='{}::/host/project'\n", client_dir_s),
+        )
+        .unwrap();
+        let client_env_s = path_string(&client_env);
+
+        with_env(
+            &[
+                ("CLIENT_ENV", Some(&client_env_s)),
+                ("FOLDER_MAPS", None),
+                ("SYNC_ROOTS", None),
+                ("RP_CLIENT_DIR", None),
+            ],
+            || {
+                assert_eq!(cmd_map(&strings(&["rm", &client_dir_s])), ExitCode::SUCCESS);
+            },
+        );
+
+        assert_eq!(
+            config::get(&client_env, "FOLDER_MAPS").unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(
+            config::get(&client_env, "SYNC_ROOTS").unwrap(),
+            Some(String::new())
+        );
+        assert_eq!(resolve_raw_maps(&client_env).unwrap(), "");
+    }
+
+    #[test]
+    fn config_maps_dispatches_to_map_list() {
+        let tmp = TestDir::new("config-maps");
+        let client_env = tmp.path.join("client.env");
+        fs::write(
+            &client_env,
+            "FOLDER_MAPS='/client/project::/host/project'\nFOLDER_MAP_MODES='/client/project::sync'\n",
+        )
+        .unwrap();
+        let client_env_s = path_string(&client_env);
+
+        with_env(
+            &[
+                ("CLIENT_ENV", Some(&client_env_s)),
+                ("FOLDER_MAPS", None),
+                ("SYNC_ROOTS", None),
+                ("FOLDER_MAP_MODES", None),
+                ("RP_CLIENT_DIR", None),
+            ],
+            || {
+                assert_eq!(run_config(&strings(&["maps"])), ExitCode::SUCCESS);
+            },
+        );
+    }
+
+    #[test]
+    fn windows_map_add_requires_explicit_host_path_for_single_arg_form() {
+        let add = parse_map_add_args(&strings(&[r"C:\Users\Alice\Project"])).unwrap();
+        assert_eq!(
+            validate_map_add_args_for_os(&add, Os::Windows),
+            Err(
+                "map add on Windows requires an explicit mac host path: xpair map add <clientDir> <hostDir>"
+                    .to_string()
+            )
+        );
+
+        let add = parse_map_add_args(&strings(&[
+            r"C:\Users\Alice\Project",
+            "/Users/alice/project",
+        ]))
+        .unwrap();
+        assert_eq!(validate_map_add_args_for_os(&add, Os::Windows), Ok(()));
+    }
+
+    #[test]
+    fn resolve_host_rejects_option_like_env_host_before_ssh_use() {
+        with_env(&[("REMOTE_HOST", Some("-oProxyCommand=touch-pwn"))], || {
+            let err = resolve_host(Path::new("/tmp/unused-client.env")).unwrap_err();
+            assert_eq!(err.to_string(), "invalid host: -oProxyCommand=touch-pwn");
+        });
     }
 }

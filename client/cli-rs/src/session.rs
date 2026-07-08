@@ -20,7 +20,7 @@ pub const DEFAULT_AQUA_SOCK: &str = "/tmp/aqua-tmux.sock";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub name: String,
-    pub attached: bool,
+    pub attached: i64,
 }
 
 /// Real SSH transport used by the CLI binary.
@@ -67,7 +67,7 @@ fn pairing_key_path() -> io::Result<PathBuf> {
 /// Parse tab-separated `name<TAB>attached` rows.
 ///
 /// Empty rows are ignored, rows whose names start with `_keeper` are skipped, and missing
-/// or non-numeric attached fields default to detached.
+/// or non-numeric attached fields default to zero.
 pub fn parse_sessions(raw: &str) -> Vec<Session> {
     raw.lines()
         .filter(|line| !line.is_empty())
@@ -76,7 +76,7 @@ pub fn parse_sessions(raw: &str) -> Vec<Session> {
             if name.starts_with("_keeper") {
                 return None;
             }
-            let attached = attached_raw.parse::<i64>().unwrap_or(0) != 0;
+            let attached = attached_raw.parse::<i64>().unwrap_or(0);
             Some(Session {
                 name: name.to_string(),
                 attached,
@@ -100,7 +100,7 @@ pub fn render_json(target: &str, host: &str, sessions: &[Session]) -> String {
         out.push_str("{\"name\":\"");
         push_json_string_body(&mut out, &session.name);
         out.push_str("\",\"attached\":");
-        out.push(if session.attached { '1' } else { '0' });
+        out.push_str(&session.attached.to_string());
         out.push('}');
     }
     out.push_str("]}");
@@ -283,23 +283,23 @@ mod tests {
             vec![
                 Session {
                     name: "alpha".to_string(),
-                    attached: true,
+                    attached: 1,
                 },
                 Session {
                     name: "beta".to_string(),
-                    attached: false,
+                    attached: 0,
                 },
                 Session {
                     name: "gamma".to_string(),
-                    attached: false,
+                    attached: 0,
                 },
                 Session {
                     name: "delta".to_string(),
-                    attached: false,
+                    attached: 0,
                 },
                 Session {
                     name: "multi".to_string(),
-                    attached: true,
+                    attached: 2,
                 },
             ]
         );
@@ -318,17 +318,17 @@ mod tests {
         let sessions = vec![
             Session {
                 name: "a\"b\\c\n\t\u{01}".to_string(),
-                attached: true,
+                attached: 3,
             },
             Session {
                 name: "plain".to_string(),
-                attached: false,
+                attached: 0,
             },
         ];
 
         assert_eq!(
             render_json("host", "host", &sessions),
-            "{\"target\":\"host\",\"host\":\"host\",\"sessions\":[{\"name\":\"a\\\"b\\\\c\\n\\t\\u0001\",\"attached\":1},{\"name\":\"plain\",\"attached\":0}]}"
+            "{\"target\":\"host\",\"host\":\"host\",\"sessions\":[{\"name\":\"a\\\"b\\\\c\\n\\t\\u0001\",\"attached\":3},{\"name\":\"plain\",\"attached\":0}]}"
         );
     }
 

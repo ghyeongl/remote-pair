@@ -1,5 +1,5 @@
 import { ShieldCheck, BarChart3 } from "lucide-react";
-import { StepHeader } from "../StepHero";
+import { StepHeader } from "@shared/components/onboarding/StepHero";
 import { useT } from "@/lib/i18n";
 
 export type ConsentKind = "crash" | "analytics";

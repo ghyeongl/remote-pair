@@ -23,11 +23,15 @@ function unavailableSessionList() {
 }
 
 function sessionUnavailableCause(name) {
-  return `Session "${name}" is no longer available. The list was refreshed; choose another session or start a new one.`;
+  return `Session "${name}" no longer exists. The list was refreshed; choose another session or start a new one.`;
 }
 
 function sessionListUnavailableCause() {
   return "Session list unavailable. Check the host connection, then retry.";
+}
+
+function sessionAttachedElsewhereCause() {
+  return "Some sessions are attached in another window or device.";
 }
 
 async function listSessionsFromCli(runXpairCli, opts = {}) {
@@ -74,8 +78,11 @@ async function checkSessionAvailableFromCli(runXpairCli, name, opts = {}) {
   if (!session) {
     return { ...list, ok: false, stale: true, cause: sessionUnavailableCause(sessionName) };
   }
+  if (session.attached !== 0) {
+    return { ...list, ok: false, attachedElsewhere: true, session, cause: sessionAttachedElsewhereCause() };
+  }
 
   return { ...list, ok: true, session };
 }
 
-module.exports = { normalizeSessionList, listSessionsFromCli, checkSessionAvailableFromCli };
+module.exports = { SESSION_NAME_RE, normalizeSessionList, listSessionsFromCli, checkSessionAvailableFromCli };

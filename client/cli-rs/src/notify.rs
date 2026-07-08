@@ -163,8 +163,18 @@ pub fn run_with_transport<T: Transport + ?Sized, W: Write, E: Write>(
     out: &mut W,
     err: &mut E,
 ) -> ExitCode {
-    let req = parse_notify_args(args);
     let settings = RuntimeSettings::load(client_env_path);
+    run_with_transport_and_settings(args, &settings, transport, out, err)
+}
+
+fn run_with_transport_and_settings<T: Transport + ?Sized, W: Write, E: Write>(
+    args: &[String],
+    settings: &RuntimeSettings,
+    transport: &T,
+    out: &mut W,
+    err: &mut E,
+) -> ExitCode {
+    let req = parse_notify_args(args);
 
     let Some(host) = settings
         .remote_host
@@ -253,9 +263,14 @@ struct RuntimeSettings {
 
 impl RuntimeSettings {
     fn load(client_env_path: &Path) -> RuntimeSettings {
+        RuntimeSettings::load_with_home(client_env_path, home_dir())
+    }
+
+    fn load_with_home(client_env_path: &Path, home: Option<PathBuf>) -> RuntimeSettings {
         RuntimeSettings {
-            host_dir: host_dir(client_env_path),
-            remote_host: non_empty_value(client_env_path, "REMOTE_HOST"),
+            host_dir: host_dir(client_env_path, home.as_deref()),
+            remote_host: non_empty_value(client_env_path, "REMOTE_HOST")
+                .filter(|host| config::valid_host(host)),
         }
     }
 }
@@ -460,7 +475,7 @@ fn next_char(s: &str, idx: usize) -> Option<char> {
     s.get(idx..)?.chars().next()
 }
 
-fn host_dir(client_env_path: &Path) -> PathBuf {
+fn host_dir(client_env_path: &Path, home: Option<&Path>) -> PathBuf {
     if let Some(value) = non_empty_env("RP_HOST_DIR").or_else(|| non_empty_env("RP_DIR")) {
         return PathBuf::from(value);
     }
@@ -478,11 +493,11 @@ fn host_dir(client_env_path: &Path) -> PathBuf {
         return PathBuf::from(value);
     }
 
-    default_rp_dir().unwrap_or_else(|| PathBuf::from("."))
+    default_rp_dir(home).unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn default_rp_dir() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(".xpair").join("host"))
+fn default_rp_dir(home: Option<&Path>) -> Option<PathBuf> {
+    home.map(|home| home.join(".xpair").join("host"))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -606,7 +621,7 @@ mod tests {
     }
 
     fn without_env<T>(keys: &[&'static str], f: impl FnOnce() -> T) -> T {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = EnvGuard::remove(keys);
         f()
     }
@@ -834,11 +849,15 @@ mod tests {
     fn run_honors_empty_notify_conf_as_all_off() {
         without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
             let tmp = TestDir::new("all-off");
+            // Single-quote the path: on Windows it contains backslashes, which the
+            // shell-style env parser would otherwise treat as escapes.
             tmp.write_client_env(&format!(
-                "REMOTE_HOST=mac-mini\nRP_HOST_DIR={}\n",
+                "REMOTE_HOST=mac-mini\nRP_HOST_DIR='{}'\n",
                 tmp.host_dir().to_string_lossy()
             ));
             tmp.write_notify_conf("ENABLED_TYPES=\n");
+            let settings =
+                RuntimeSettings::load_with_home(&tmp.client_env_path(), Some(tmp.path.clone()));
             let transport = MockTransport::new();
             transport.push_response(
                 0,
@@ -850,9 +869,9 @@ mod tests {
             let mut out = Vec::new();
             let mut err = Vec::new();
 
-            let code = run_with_transport(
+            let code = run_with_transport_and_settings(
                 &args(&[]),
-                &tmp.client_env_path(),
+                &settings,
                 &transport,
                 &mut out,
                 &mut err,
@@ -868,11 +887,15 @@ mod tests {
     fn run_reads_notify_conf_from_host_dir_not_client_dir() {
         without_env(&["REMOTE_HOST", "RP_DIR", "RP_HOST_DIR"], || {
             let tmp = TestDir::new("host-conf");
+            // Single-quote the path: on Windows it contains backslashes, which the
+            // shell-style env parser would otherwise treat as escapes.
             tmp.write_client_env(&format!(
-                "REMOTE_HOST=mac-mini\nRP_HOST_DIR={}\n",
+                "REMOTE_HOST=mac-mini\nRP_HOST_DIR='{}'\n",
                 tmp.host_dir().to_string_lossy()
             ));
             fs::write(tmp.path.join("notify.conf"), "ENABLED_TYPES=\n").unwrap();
+            let settings =
+                RuntimeSettings::load_with_home(&tmp.client_env_path(), Some(tmp.path.clone()));
             let transport = MockTransport::new();
             transport.push_response(
                 0,
@@ -884,9 +907,9 @@ mod tests {
             let mut out = Vec::new();
             let mut err = Vec::new();
 
-            let code = run_with_transport(
+            let code = run_with_transport_and_settings(
                 &args(&[]),
-                &tmp.client_env_path(),
+                &settings,
                 &transport,
                 &mut out,
                 &mut err,

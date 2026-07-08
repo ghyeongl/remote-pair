@@ -1,7 +1,7 @@
 import { Check, Sparkles } from "lucide-react";
 import type { Mapping } from "./StepMappings";
 import type { DiscoveredHost } from "./StepDiscover";
-import { StepHero, StepHeader } from "@/components/onboarding/StepHero";
+import { StepHero, StepHeader } from "@shared/components/onboarding/StepHero";
 import { useT } from "@/lib/i18n";
 
 type Props = { host: DiscoveredHost | null; mappings: Mapping[] };

@@ -6,10 +6,10 @@
 //! small and uncovered.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config;
 use crate::platform::{self, Os};
@@ -297,7 +297,8 @@ impl RuntimeSettings {
         if local_host_capable(&host_dir, &app_name, FORWARD_APP) {
             local_log_dirs.push(host_dir.join("logs"));
         }
-        let remote_host = non_empty_value(client_env_path, "REMOTE_HOST");
+        let remote_host =
+            non_empty_value(client_env_path, "REMOTE_HOST").filter(|host| config::valid_host(host));
 
         RuntimeSettings {
             local_log_dirs,
@@ -379,36 +380,101 @@ fn run_local_tail<W: Write, E: Write>(
         return Ok(ExitCode::SUCCESS);
     }
 
-    let mut argv = vec!["tail".to_string(), "-n".to_string(), n.to_string()];
     if follow {
-        argv.push("-F".to_string());
-    }
-    argv.extend(files.into_iter().map(path_string));
-
-    if follow {
-        let status = Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()?;
-        return Ok(exit_code_from_i32(status.code().unwrap_or(1)));
+        return follow_local_logs(&files, n, out);
     }
 
-    let output = Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()?;
+    let _ = err;
+    write_local_log_tail(&files, n, out)?;
+    Ok(ExitCode::SUCCESS)
+}
 
-    if output.status.success() {
-        out.write_all(&output.stdout).map_err(io::Error::other)?;
-        Ok(ExitCode::SUCCESS)
-    } else {
-        let _ = writeln!(out, "(no local logs at {label})");
-        let _ = err;
-        Ok(ExitCode::SUCCESS)
+fn write_local_log_tail<W: Write>(files: &[PathBuf], n: u32, out: &mut W) -> io::Result<()> {
+    let multiple = files.len() > 1;
+    for (idx, file) in files.iter().enumerate() {
+        if multiple {
+            if idx > 0 {
+                writeln!(out)?;
+            }
+            writeln!(out, "==> {} <==", path_string(file))?;
+        }
+        write_file_tail(file, n, out)?;
     }
+    Ok(())
+}
+
+fn write_file_tail<W: Write>(file: &Path, n: u32, out: &mut W) -> io::Result<()> {
+    let bytes = fs::read(file)?;
+    let text = String::from_utf8_lossy(&bytes);
+    out.write_all(last_n_lines(&text, n).as_bytes())
+}
+
+fn last_n_lines(text: &str, n: u32) -> String {
+    if n == 0 || text.is_empty() {
+        return String::new();
+    }
+
+    let lines = text.split_inclusive('\n').collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(n as usize);
+    lines[start..].concat()
+}
+
+#[derive(Debug)]
+struct FollowState {
+    path: PathBuf,
+    offset: u64,
+}
+
+fn follow_local_logs<W: Write>(files: &[PathBuf], n: u32, out: &mut W) -> io::Result<ExitCode> {
+    write_local_log_tail(files, n, out)?;
+    out.flush()?;
+
+    let mut states = files
+        .iter()
+        .map(|path| {
+            let offset = fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            FollowState {
+                path: path.clone(),
+                offset,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    loop {
+        for state in &mut states {
+            read_appended_bytes(state, out)?;
+        }
+        out.flush()?;
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn read_appended_bytes<W: Write>(state: &mut FollowState, out: &mut W) -> io::Result<()> {
+    let metadata = match fs::metadata(&state.path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            state.offset = 0;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+
+    let len = metadata.len();
+    if len < state.offset {
+        state.offset = 0;
+    }
+    if len <= state.offset {
+        return Ok(());
+    }
+
+    let mut file = fs::File::open(&state.path)?;
+    file.seek(SeekFrom::Start(state.offset))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    state.offset = len;
+    out.write_all(&bytes)
 }
 
 fn local_log_files(log_dirs: &[PathBuf]) -> io::Result<(Vec<PathBuf>, String)> {
@@ -823,6 +889,58 @@ mod tests {
                 path_string(log_dir.join("*.log")),
             ]
         );
+    }
+
+    #[test]
+    fn local_tail_reads_last_lines_in_rust_with_multi_file_headers() {
+        let root = std::env::temp_dir().join(format!(
+            "xpair-logs-tail-rust-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.log");
+        let second = root.join("second.log");
+        fs::write(&first, "a1\na2\na3\n").unwrap();
+        fs::write(&second, "b1\nb2\n").unwrap();
+        let mut out = Vec::new();
+
+        write_local_log_tail(&[first.clone(), second.clone()], 2, &mut out).unwrap();
+
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                "==> {} <==\na2\na3\n\n==> {} <==\nb1\nb2\n",
+                path_string(&first),
+                path_string(&second)
+            )
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_follow_reader_emits_only_appended_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "xpair-logs-follow-rust-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("follow.log");
+        fs::write(&file, "before\n").unwrap();
+        let mut state = FollowState {
+            path: file.clone(),
+            offset: fs::metadata(&file).unwrap().len(),
+        };
+        fs::write(&file, "before\nafter\n").unwrap();
+        let mut out = Vec::new();
+
+        read_appended_bytes(&mut state, &mut out).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "after\n");
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

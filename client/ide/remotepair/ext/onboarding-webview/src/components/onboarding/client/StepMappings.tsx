@@ -1,13 +1,13 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { ChevronRight, Folder, FolderOpen, FolderTree, Home, Loader2, Plus, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@shared/components/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@shared/components/ui/dialog";
 import { useT } from "@/lib/i18n";
 
 export type MappingMode = "mount" | "sync";

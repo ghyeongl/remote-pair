@@ -21,15 +21,15 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::UdpSocket;
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config;
-use crate::platform::Os;
 use crate::session;
+use crate::tools;
 
 /// Roles that mark a peer as advertising the Xpair service (key-auth `connect`, not plain `setup`).
 const XPAIR_ROLES: &[&str] = &["host", "both", "client"];
@@ -406,7 +406,15 @@ pub fn build_peers(
         } else {
             name.clone()
         };
-        let status = status_for(&name, &addr, &p.role, aliases, remote_host, &present);
+        let status = status_for(
+            &name,
+            &addr,
+            &p.role,
+            &target,
+            aliases,
+            remote_host,
+            &present,
+        );
         out.push(OutPeer {
             name,
             addrs: p.addrs.clone(),
@@ -444,6 +452,7 @@ fn status_for(
     name: &str,
     addr: &str,
     role: &str,
+    target: &str,
     aliases: &BTreeSet<String>,
     remote_host: &str,
     present: &impl Fn(&str) -> Option<bool>,
@@ -451,9 +460,16 @@ fn status_for(
     let known = aliases.contains(name)
         || aliases.contains(addr)
         || name == remote_host
-        || addr == remote_host;
+        || addr == remote_host
+        || target == remote_host;
     if known {
-        let probe_target = if aliases.contains(name) { name } else { addr };
+        let probe_target = if aliases.contains(name) {
+            name
+        } else if aliases.contains(addr) {
+            addr
+        } else {
+            target
+        };
         return if present(probe_target) == Some(true) {
             "reconnect".to_string()
         } else {
@@ -502,10 +518,16 @@ pub fn render_peers_json(peers: &[OutPeer]) -> String {
 // Tailscale binary location (pure selector + thin shims)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// First existing candidate path, or `None`. Pure: `exists` is injected (real = `Path::is_file`).
+/// First executable candidate path, or `None`. Pure: the resolver is injected
+/// (real = the crate's executable-path helper).
 /// Ports `rp_tailscale_bin()` selection (`client/cli/xpair:1457-1467`).
-pub fn find_tailscale(candidates: &[String], exists: impl Fn(&str) -> bool) -> Option<String> {
-    candidates.iter().find(|c| exists(c)).cloned()
+pub fn find_tailscale(
+    candidates: &[String],
+    mut resolve_executable: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    candidates
+        .iter()
+        .find_map(|candidate| resolve_executable(candidate))
 }
 
 /// Build the ordered Tailscale candidate list: the macOS absolute paths, then `tailscale[.exe]`
@@ -529,7 +551,6 @@ fn tailscale_candidates() -> Vec<String> {
 /// CLI entrypoint for `xpair discover`.
 pub fn run(args: &[String]) -> ExitCode {
     let parsed = parse_args(args);
-    let os = Os::current();
     let mut stdout = io::stdout();
 
     if let Some(host) = parsed.fingerprint_host {
@@ -539,7 +560,9 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 
     let mut records = listen_lan_beacons(parsed.timeout);
-    if let Some(bin) = find_tailscale(&tailscale_candidates(), |p| Path::new(p).is_file()) {
+    if let Some(bin) = find_tailscale(&tailscale_candidates(), |p| {
+        tools::executable_path(PathBuf::from(p)).map(|path| path.to_string_lossy().into_owned())
+    }) {
         if let Some(json) = run_tailscale_status(&bin) {
             let metadata = fetch_tailscale_metadata_concurrent(
                 tailscale_metadata_addrs(&json),
@@ -555,7 +578,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let aliases = parse_ssh_config_aliases(&read_ssh_config());
     let remote_host = resolve_remote_host();
     let peers = build_peers(&records, &aliases, &remote_host, |target| {
-        ssh_host_app_present(os, target)
+        ssh_host_app_present(target)
     });
 
     let _ = writeln!(stdout, "{}", render_peers_json(&peers));
@@ -839,35 +862,8 @@ where
 /// `host_app_present` SSH probe shim (uncovered — network). Returns `Some(true)` when
 /// XpairHost.app is confirmed installed, `Some(false)`/`None` otherwise (both → `setup`).
 /// Hardened ssh opts (publickey-only, batch, tight timeout) keep it from hanging on a cold link.
-fn ssh_host_app_present(os: Os, target: &str) -> Option<bool> {
-    let mut argv = vec![
-        "-o".to_string(),
-        "BatchMode=yes".to_string(),
-        "-o".to_string(),
-        "ConnectTimeout=4".to_string(),
-        "-o".to_string(),
-        "ConnectionAttempts=1".to_string(),
-    ];
-    argv.extend(
-        os.ssh_mux_neutralizer_args()
-            .iter()
-            .map(|arg| arg.to_string()),
-    );
-    argv.extend([
-        "-o".to_string(),
-        "PreferredAuthentications=publickey".to_string(),
-        "-o".to_string(),
-        "NumberOfPasswordPrompts=0".to_string(),
-        "-o".to_string(),
-        "StrictHostKeyChecking=accept-new".to_string(),
-    ]);
-    argv.extend(session::pairing_identity_args());
-    argv.extend([
-        "-T".to_string(),
-        "-n".to_string(),
-        target.to_string(),
-        "[ -d /Applications/XpairHost.app ] || [ -d $HOME/Applications/XpairHost.app ]".to_string(),
-    ]);
+fn ssh_host_app_present(target: &str) -> Option<bool> {
+    let argv = host_app_present_ssh_args(target, &session::pairing_identity_args());
     let status = Command::new("ssh")
         .args(&argv)
         .stdin(Stdio::null())
@@ -878,14 +874,50 @@ fn ssh_host_app_present(os: Os, target: &str) -> Option<bool> {
     Some(status.success())
 }
 
+fn host_app_present_ssh_args(target: &str, identity_args: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=4".to_string(),
+        "-o".to_string(),
+        "ConnectionAttempts=1".to_string(),
+        "-o".to_string(),
+        "ControlMaster=no".to_string(),
+        "-o".to_string(),
+        "ControlPath=none".to_string(),
+        "-o".to_string(),
+        "PreferredAuthentications=publickey".to_string(),
+        "-o".to_string(),
+        "NumberOfPasswordPrompts=0".to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+        "-o".to_string(),
+        "UserKnownHostsFile=/dev/null".to_string(),
+    ];
+    argv.extend(identity_args.iter().cloned());
+    argv.extend([
+        "-T".to_string(),
+        "-n".to_string(),
+        target.to_string(),
+        "[ -d /Applications/XpairHost.app ] || [ -d $HOME/Applications/XpairHost.app ]".to_string(),
+    ]);
+    argv
+}
+
 fn resolve_remote_host() -> String {
     if let Some(host) = non_empty_env("REMOTE_HOST") {
-        return host;
+        return if config::valid_host(&host) {
+            host
+        } else {
+            String::new()
+        };
     }
 
     config::default_client_env_path()
         .ok()
         .and_then(|path| config::get_cli(path, "host").ok())
+        .filter(|host| config::valid_host(host))
         .unwrap_or_default()
 }
 
@@ -1651,18 +1683,21 @@ mod tests {
     fn tailscale_metadata_fetch_respects_overall_deadline() {
         let started = Instant::now();
 
+        // Generous margins for loaded CI runners: the property under test is only
+        // "returns at the deadline instead of waiting for the workers" — workers
+        // sleep 2s, so anything under 1s proves the deadline fired.
         let metadata = fetch_tailscale_metadata_concurrent(
             vec!["a".to_string(), "b".to_string()],
-            Duration::from_millis(50),
+            Duration::from_millis(100),
             |_addr| {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_millis(2000));
                 Some(PairingMetadata::default())
             },
         );
 
         assert!(metadata.is_empty());
         assert!(
-            started.elapsed() < Duration::from_millis(150),
+            started.elapsed() < Duration::from_millis(1000),
             "metadata lookup should return at the overall deadline"
         );
     }
@@ -1743,6 +1778,25 @@ mod tests {
         let peers = build_peers(&recs, &aliases(&[]), "", |_| None);
         assert_eq!(peers[0].target, "alice@100.64.0.5");
         assert_eq!(peers[0].host_user.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn status_known_when_computed_target_matches_remote_host() {
+        let recs = vec![rec_user(
+            "peer",
+            "100.64.0.5",
+            "tailscale",
+            "SHA256:z",
+            "host",
+            "alice",
+        )];
+        let peers = build_peers(&recs, &aliases(&[]), "alice@100.64.0.5", |target| {
+            assert_eq!(target, "alice@100.64.0.5");
+            Some(false)
+        });
+
+        assert_eq!(peers[0].target, "alice@100.64.0.5");
+        assert_eq!(peers[0].status, "setup");
     }
 
     #[test]
@@ -1848,14 +1902,51 @@ mod tests {
     // ── tailscale binary location ──
 
     #[test]
-    fn find_tailscale_returns_first_existing() {
+    fn find_tailscale_returns_first_executable() {
         let cands = vec![
             "/nope/tailscale".to_string(),
+            "/stale/tailscale".to_string(),
             "/opt/homebrew/bin/tailscale".to_string(),
         ];
-        let found = find_tailscale(&cands, |p| p == "/opt/homebrew/bin/tailscale");
+        let found = find_tailscale(&cands, |p| {
+            (p == "/opt/homebrew/bin/tailscale").then(|| p.to_string())
+        });
         assert_eq!(found, Some("/opt/homebrew/bin/tailscale".to_string()));
-        assert_eq!(find_tailscale(&cands, |_| false), None);
+        assert_eq!(find_tailscale(&cands, |_| None), None);
+    }
+
+    #[test]
+    fn host_app_probe_neutralizes_mux_for_every_platform() {
+        let actual = host_app_present_ssh_args("gh-mac-m1", &["-i".into(), "/tmp/key".into()]);
+        assert_eq!(
+            actual,
+            args(&[
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=4",
+                "-o",
+                "ConnectionAttempts=1",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
+                "-o",
+                "PreferredAuthentications=publickey",
+                "-o",
+                "NumberOfPasswordPrompts=0",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-i",
+                "/tmp/key",
+                "-T",
+                "-n",
+                "gh-mac-m1",
+                "[ -d /Applications/XpairHost.app ] || [ -d $HOME/Applications/XpairHost.app ]",
+            ])
+        );
     }
 
     // ── JSON parser internals ──

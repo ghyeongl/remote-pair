@@ -16,6 +16,11 @@ on:
       version:
         description: 'Version without leading v (e.g. 0.4.0)'
         required: true
+      include_win32_ide:
+        description: 'Opt in to win32 IDE release wiring once P5 artifact promotion is accepted'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -140,6 +145,11 @@ jobs:
           # latest, so the host Updater (tracks /releases/latest, excludes pre-releases) ignores them.
           PRE=""; case "$RP_VERSION" in *[a-z]*) PRE="--prerelease --latest=false";; esac
           gh release create "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --title "v${RP_VERSION}" --generate-notes $PRE
+
+      - name: Win32 IDE release opt-in placeholder
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_win32_ide }}
+        run: |
+          echo "::notice::win32 IDE release publication is intentionally disabled until artifact promotion from win32-ide-build.yml is accepted."
 
   windows-msi:
     name: build and upload Windows MSI

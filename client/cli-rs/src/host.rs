@@ -55,13 +55,16 @@ pub(crate) struct AppIdentity {
 }
 
 impl AppIdentity {
-    fn load() -> AppIdentity {
+    fn load(rp_host_dir: &Path) -> AppIdentity {
         AppIdentity {
-            app_name: non_empty_env("APP_NAME").unwrap_or_else(|| DEFAULT_APP_NAME.to_string()),
-            bundle_prefix: non_empty_env("BUNDLE_PREFIX")
+            app_name: resolve_host_env_stack_value(rp_host_dir, "APP_NAME")
+                .unwrap_or_else(|| DEFAULT_APP_NAME.to_string()),
+            bundle_prefix: resolve_host_env_stack_value(rp_host_dir, "BUNDLE_PREFIX")
                 .unwrap_or_else(|| DEFAULT_BUNDLE_PREFIX.to_string()),
-            forward_app: FORWARD_APP.to_string(),
-            forward_bundle: FORWARD_BUNDLE.to_string(),
+            forward_app: resolve_host_env_stack_value(rp_host_dir, "FORWARD_APP")
+                .unwrap_or_else(|| FORWARD_APP.to_string()),
+            forward_bundle: resolve_host_env_stack_value(rp_host_dir, "FORWARD_BUNDLE")
+                .unwrap_or_else(|| FORWARD_BUNDLE.to_string()),
         }
     }
 }
@@ -109,7 +112,7 @@ impl LocalContext {
 
         LocalContext {
             os: Os::current(),
-            identity: AppIdentity::load(),
+            identity: AppIdentity::load(&rp_host_dir),
             common: load_host_common(&rp_host_dir, &home),
             host_env: load_host_env(&rp_host_dir),
             home,
@@ -386,10 +389,13 @@ fn load_host_common(rp_host_dir: &Path, home: &Path) -> HostCommon {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or(default_local_bin),
-        aqua_sock: config::get(&common_env, "AQUA_SOCK")
-            .ok()
-            .flatten()
-            .filter(|value| !value.is_empty())
+        aqua_sock: non_empty_env("AQUA_SOCK")
+            .or_else(|| {
+                config::get(&common_env, "AQUA_SOCK")
+                    .ok()
+                    .flatten()
+                    .filter(|value| !value.is_empty())
+            })
             .unwrap_or_else(|| DEFAULT_AQUA_SOCK.to_string()),
     }
 }
@@ -410,6 +416,15 @@ fn load_host_env(rp_host_dir: &Path) -> HostEnv {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_APPROVE_TRIGGER)),
     }
+}
+
+fn resolve_host_env_stack_value(rp_host_dir: &Path, key: &str) -> Option<String> {
+    non_empty_env(key).or_else(|| {
+        config::get(rp_host_dir.join("host.env"), key)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn default_rp_host_dir() -> PathBuf {
@@ -601,6 +616,35 @@ mod tests {
         args.iter().map(|arg| (*arg).to_string()).collect()
     }
 
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> EnvGuard {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            EnvGuard { key, old }
+        }
+
+        fn unset(key: &'static str) -> EnvGuard {
+            let old = std::env::var(key).ok();
+            std::env::remove_var(key);
+            EnvGuard { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn probe_up_short_circuits() {
         let tmp = TestDir::new("up");
@@ -778,5 +822,50 @@ mod tests {
             runtime.calls[0],
             CommandSpec::new("launchctl", strings(&["list"]))
         );
+    }
+
+    #[test]
+    fn host_common_prefers_aqua_sock_env_over_common_env() {
+        let _guard = EnvGuard::set("AQUA_SOCK", "/tmp/env-aqua.sock");
+        let tmp = TestDir::new("aqua-env");
+        let rp_host_dir = tmp.path.join("host");
+        fs::create_dir_all(&rp_host_dir).unwrap();
+        fs::write(
+            rp_host_dir.join("common.env"),
+            "AQUA_SOCK=/tmp/file-aqua.sock\n",
+        )
+        .unwrap();
+
+        let common = load_host_common(&rp_host_dir, &tmp.path.join("home"));
+
+        assert_eq!(common.aqua_sock, "/tmp/env-aqua.sock");
+    }
+
+    #[test]
+    fn app_identity_loads_from_process_env_then_host_env_stack() {
+        let _app_guard = EnvGuard::set("APP_NAME", "EnvHost");
+        let _bundle_guard = EnvGuard::unset("BUNDLE_PREFIX");
+        let _forward_app_guard = EnvGuard::unset("FORWARD_APP");
+        let _forward_bundle_guard = EnvGuard::unset("FORWARD_BUNDLE");
+        let tmp = TestDir::new("identity-env-stack");
+        let rp_host_dir = tmp.path.join("host");
+        fs::create_dir_all(&rp_host_dir).unwrap();
+        fs::write(
+            rp_host_dir.join("common.env"),
+            "APP_NAME=CommonHost\nBUNDLE_PREFIX=com.example.common\nFORWARD_APP=CommonForward\nFORWARD_BUNDLE=com.example.common-forward\n",
+        )
+        .unwrap();
+        fs::write(
+            rp_host_dir.join("host.env"),
+            "APP_NAME=FileHost\nBUNDLE_PREFIX=com.example.host\nFORWARD_APP=FileForward\nFORWARD_BUNDLE=com.example.forward\n",
+        )
+        .unwrap();
+
+        let identity = AppIdentity::load(&rp_host_dir);
+
+        assert_eq!(identity.app_name, "EnvHost");
+        assert_eq!(identity.bundle_prefix, "com.example.host");
+        assert_eq!(identity.forward_app, "FileForward");
+        assert_eq!(identity.forward_bundle, "com.example.forward");
     }
 }

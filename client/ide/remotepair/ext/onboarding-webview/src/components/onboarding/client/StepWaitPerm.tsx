@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Shield, ShieldX } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { StepDeadEnd } from "@/components/onboarding/StepDeadEnd";
+import { Button } from "@shared/components/ui/button";
+import { StepDeadEnd } from "@shared/components/onboarding/StepDeadEnd";
 import { useT } from "@/lib/i18n";
 import type { DiscoveredHost } from "./StepDiscover";
 
@@ -44,7 +44,7 @@ export function StepWaitPerm({
       if (host.pairingMetaStatus === "error") {
         setError(
           host.pairingMetaError ||
-            "Host is not broadcasting pairing details. Open Connect on the host, then rescan.",
+            t("wait.discoveryMissing"),
         );
       } else {
         setError("");

@@ -24,7 +24,7 @@ The audit body below (findings F01–F71, per-WS design) is the frozen source re
 | WS10 | wizard UX **+ pull-pairing + LAN beacon + border/logo** (see expanded section) | #78 | 🔵 in review |
 | WS11 | bench scoring/RTX/rate math | #71 | ✅ merged |
 | WS12 | onboarding-ui shared source (D1 build-time dist) | — | ⏳ next |
-| WS13 | win32 gates | — | ⏸ parked until Rust CLI #37 |
+| WS13 | win32 gates | — | ▶ unparked — now phase P3 of docs/win32-client-roadmap.md |
 | WS14 | real host folder browsing (`listHostDir`) | — | ⏳ after WS10 |
 | WS15 | DC ownership (`negotiated:true`) | — | ⏳ own soak-tested branch |
 | **WS16** | host permission model: File Sharing REQUIRED, Sentry consent UI default-OFF (new — from live QA) | — | ⏳ queued |
@@ -59,7 +59,7 @@ Global rules:
 | after in-flight branch merges | WS8 (dead-code sweep + IPC allowlist), WS10 (wizard UX), WS12 (onboarding-ui single source) | WS2 + in-flight |
 | after WS8 + WS10 | WS14 (real host folder browsing, D5) | WS8, WS10 |
 | own branch, soak-tested | WS15 (DC ownership, D4) | WS7 |
-| **parked** until PR #37 (Rust CLI) merges | WS13 (win32 gates) — decision D2: mac-only until then | PR #37 |
+| driven by docs/win32-client-roadmap.md (phase P3) | WS13 (win32 gates) — D2 superseded by the roadmap | PR #37 |
 
 ---
 
@@ -250,13 +250,11 @@ This is a surface-reduction pass: the onboarding bridge/preload expose ~26 dead 
 
 **Acceptance**: both apps build from the shared source; `diff -r` of the extracted files against pre-refactor copies is empty (pure move); onboarding renders in both surfaces; no committed dist drift possible (whichever D1 option).
 
-## WS13 — `fix/win32-gates` — **PARKED** (decision D2)
+## WS13 — `fix/win32-gates` — **UNPARKED** (superseded: see docs/win32-client-roadmap.md, phase P3)
 
-**Findings**: F19, F20 — accepted as known-latent. **Decision D2 (resolved)**: Windows support arrives via the Rust CLI (PR #37); until it merges, the product is mac-only and no win32 gating work is done. Do not start this WS; the plan below is kept so the findings aren't lost when PR #37 lands:
-- F19 — `extension.js:1625` `runXpairCli`: branch on `process.platform` — win32 spawns the executable argv-style (no login-shell wrapper, no `shSingleQuote`); gate `sshControlPath`/`sshRun`/`spawnTunnel` ControlMaster usage behind `!== 'win32'`.
-- F20 — skip the pre-workbench onboarding gate on `process.platform !== 'darwin'` (open the workbench normally, show a "host setup requires the CLI — coming to Windows" notice) until a win32 CLI exists. Long-term: platform-branch `rpBin`/`installCli`/`openHostOnboarding`.
+**Findings**: F19, F20. **Decision D2 (superseded by docs/win32-client-roadmap.md)**: Windows support arrives via the Rust CLI (PR #37), which the roadmap now actively drives to merge. **This section is a pointer only** — the binding design for F19/F20 is the roadmap's **phase P3** (argv-safe spawn on all platforms, ControlMaster gated off win32, MSI-aware `rpBin`/`installCli`, pre-workbench gate proceeds on Windows when the MSI-installed CLI probes OK). The earlier sketch here is deleted to avoid a second, contradicting spec: it predates the MSI channel and would have shipped a dead-end "coming to Windows" notice.
 
-**Acceptance**: mac behavior byte-identical (t_15/t_23 green); code inspection shows no POSIX-shell spawn reachable on win32.
+**Acceptance**: per roadmap P3.
 
 ## WS14 — `feat/onboarding-host-browse` (D5) — after WS8 + WS10
 
