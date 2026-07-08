@@ -1194,13 +1194,18 @@ function gatewayMacStatus({ updateBaseline = false } = {}) {
   return gatewayMacVerdict(current, stored, updateBaseline);
 }
 
-/** True only when the FULL password-bootstrap toolchain is present: the installed CLI understands
- *  install-host --password-stdin AND its sibling xpair-askpass supports the FIFO (RP_ASKPASS_FIFO)
- *  handoff. Both are bash scripts on disk, so read them and look for the markers — cliReady() only
- *  proves `xpair status` runs, which an old toolchain also passes. Conservative: unreadable → false. */
+/** True when the installed CLI can accept install-host --password-stdin. On Windows the native
+ *  Rust MSI exe has supported the flag since its first release and generates its own askpass at
+ *  runtime, so there is no xpair-askpass sibling to scan. On script CLIs (darwin/linux), require
+ *  both the flag and the FIFO-capable sibling askpass marker; this mirrors the serving-gate
+ *  rationale from #86 round 3: old script CLIs can pass `xpair status` while lacking a required
+ *  onboarding capability. Conservative for scripts: unreadable → false. */
 function cliSupportsPasswordStdin() {
   const bin = rpBinAbs();
   if (!bin) return false;
+  if (process.platform === "win32") {
+    return true;
+  }
   try {
     if (!fs.readFileSync(bin, "utf8").includes("--password-stdin")) return false;
     // xpair-askpass ships next to the CLI (rp_askpass_path resolves it as a sibling). A CLI that
@@ -2297,6 +2302,7 @@ const bridge = {
 	    parseOpenSSHEd25519PrivateKey,
 	    gatewayMacStatus,
 	    sshControlMasterArgs,
+	    cliSupportsPasswordStdin,
 	    currentGatewayMacWin32,
 	  },
 };

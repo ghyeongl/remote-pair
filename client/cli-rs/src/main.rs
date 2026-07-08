@@ -224,7 +224,7 @@ fn cmd_map(args: &[String]) -> ExitCode {
             let pairs = normalize_folder_maps_for_persistence(parse_maps(&raw_maps), os);
             let modes = normalize_folder_maps_for_persistence(parse_maps(&raw_modes), os);
             if args.get(1).is_some_and(|arg| arg == "--json") {
-                println!("{}", render_map_json(&pairs, &modes));
+                println!("{}", render_map_json(&pairs, &modes, &path));
             } else {
                 print!("{}", render_map_list(&pairs));
             }
@@ -263,7 +263,9 @@ fn cmd_map(args: &[String]) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
 
-            let method = add.method.unwrap_or_else(|| infer_map_method(&client_dir));
+            let method = add
+                .method
+                .unwrap_or_else(|| infer_map_method(&client_dir, &path));
             if !matches!(method.as_str(), "mount" | "sync") {
                 eprintln!("invalid method: {method} (mount|sync)");
                 return ExitCode::from(2);
@@ -674,7 +676,7 @@ fn normalize_windows_path_for_cmp(path: &str) -> String {
     normalized.to_ascii_lowercase()
 }
 
-fn render_map_json(pairs: &[FolderMap], modes: &[FolderMap]) -> String {
+fn render_map_json(pairs: &[FolderMap], modes: &[FolderMap], client_env_path: &Path) -> String {
     let mut out = String::from("[");
     for (idx, (client, host)) in pairs.iter().enumerate() {
         if idx > 0 {
@@ -685,29 +687,29 @@ fn render_map_json(pairs: &[FolderMap], modes: &[FolderMap]) -> String {
         out.push_str(",\"host\":");
         push_json_quoted(&mut out, host);
         out.push_str(",\"method\":");
-        push_json_quoted(&mut out, &map_mode_for(client, modes));
+        push_json_quoted(&mut out, &map_mode_for(client, modes, client_env_path));
         out.push('}');
     }
     out.push(']');
     out
 }
 
-fn map_mode_for(client: &str, modes: &[FolderMap]) -> String {
+fn map_mode_for(client: &str, modes: &[FolderMap], client_env_path: &Path) -> String {
     modes
         .iter()
         .find(|(mode_client, _)| mode_client == client)
         .map(|(_, mode)| mode.clone())
-        .unwrap_or_else(|| infer_map_method(client))
+        .unwrap_or_else(|| infer_map_method(client, client_env_path))
 }
 
-fn infer_map_method(client: &str) -> String {
+fn infer_map_method(client: &str, client_env_path: &Path) -> String {
     if !client.starts_with("/Volumes/") {
         return "sync".to_string();
     }
-    let Some(host) = non_empty_env("REMOTE_HOST") else {
+    let Ok(host) = resolve_host(client_env_path) else {
         return "sync".to_string();
     };
-    if !config::valid_host(&host) {
+    if host.is_empty() {
         return "sync".to_string();
     }
     let host = host.rsplit('@').next().unwrap_or(&host);
@@ -1114,6 +1116,55 @@ mod tests {
             Some(String::new())
         );
         assert_eq!(resolve_raw_maps(&client_env).unwrap(), "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn map_method_infers_mount_from_remote_host_in_client_env() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TestDir::new("map-method-client-env-host");
+        let bin = tmp.path.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let mount = bin.join("mount");
+        fs::write(
+            &mount,
+            "#!/bin/sh\n\
+             echo '/dev/disk4s1 on /Volumes/ExternalSSD (apfs, local, nodev)'\n\
+             echo '//alice@test-host/proj on /Volumes/proj (smbfs, nodev, nosuid, mounted by alice)'\n",
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&mount).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&mount, perms).unwrap();
+
+        let client_env = tmp.path.join("client.env");
+        fs::write(&client_env, "REMOTE_HOST=user@test-host\n").unwrap();
+        let client_env_s = path_string(&client_env);
+        let path = format!(
+            "{}:{}",
+            path_string(&bin),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        with_env(
+            &[
+                ("CLIENT_ENV", Some(&client_env_s)),
+                ("REMOTE_HOST", None),
+                ("RP_CLIENT_DIR", None),
+                ("PATH", Some(&path)),
+            ],
+            || {
+                assert_eq!(
+                    infer_map_method("/Volumes/proj/subdir", &client_env),
+                    "mount"
+                );
+                assert_eq!(
+                    infer_map_method("/Volumes/ExternalSSD/proj", &client_env),
+                    "sync"
+                );
+            },
+        );
     }
 
     #[test]

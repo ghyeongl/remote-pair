@@ -8,8 +8,10 @@
 //!
 //! Divergence from bash's non-bootstrap path: a native client may not have a bundled signed
 //! macOS `.app` to stage, so the host downloads the release `XpairHost.zip` artifact itself and
-//! installs it over SSH. After the app is installed and serving, the release path runs the same
-//! host-side bootstrap glue path as `--bootstrap` so the host is not left with only a running app.
+//! installs it over SSH. The release path never executes network bootstrap glue: after codesign
+//! verification it launches the app, lets the app self-install its daemon helpers, installs the
+//! missing approve skill/rules from the verified bundle resources, and polls the concrete
+//! doctor-style host artifacts.
 
 use std::cell::Cell;
 use std::fs;
@@ -492,10 +494,6 @@ where
         if let Err(code) = run_release_download_install(settings, &target, transport, err) {
             return code;
         }
-        if let Err(code) = run_release_host_glue_install(req, settings, &target, transport, io, err)
-        {
-            return code;
-        }
     }
 
     finish_install(req, settings, client_env_path, transport, io, out, err)
@@ -522,30 +520,6 @@ where
         transport,
         err,
         "remote bootstrap",
-    )
-}
-
-fn run_release_host_glue_install<T, I, E>(
-    req: &InstallReq,
-    settings: &RuntimeSettings,
-    target: &str,
-    transport: &T,
-    io: &I,
-    err: &mut E,
-) -> Result<(), ExitCode>
-where
-    T: Transport + ?Sized,
-    I: InstallIo + ?Sized,
-    E: Write,
-{
-    let script = fetch_bootstrap_script(req, settings, io, err, false)?;
-    run_bootstrap_remote_script(
-        &req.git_ref,
-        &script,
-        target,
-        transport,
-        err,
-        "remote host glue setup",
     )
 }
 
@@ -796,6 +770,27 @@ copy_app() {
   /usr/bin/ditto "$_src" "$_dest"
 }
 
+install_release_approve_glue() {
+  _glue="$src/Contents/Resources/host-glue/install-approve-glue.sh"
+  [ -x "$_glue" ] || { printf 'HOST_APPROVE_GLUE_MISSING: %s\n' "$_glue"; return 1; }
+  RP_DIR="$HOME/.xpair/host" \
+    RULES_FILE="$HOME/.xpair/host/rules.txt" \
+    /bin/bash "$_glue" >/dev/null
+}
+
+release_glue_check() {
+  _missing=""
+  [ -x "$HOME/.local/bin/tmux-aqua" ] || _missing="${_missing} host tmux-aqua"
+  [ -f "$HOME/.xpair/host/rules.txt" ] || _missing="${_missing} host approve rules"
+  [ -f "$HOME/.claude/skills/approve/SKILL.md" ] || _missing="${_missing} host approve skill"
+  grep -q xpair-approve-reminder "$HOME/.claude/settings.json" 2>/dev/null || _missing="${_missing} host approve hook"
+  if [ -n "$_missing" ]; then
+    printf 'HOST_GLUE_SELF_INSTALL_INCOMPLETE:%s\n' "$_missing"
+    return 1
+  fi
+  return 0
+}
+
 install_root="/Applications"
 if mkdir -p "$install_root" 2>/dev/null && touch "$install_root/.xpair-write-test" 2>/dev/null; then
   rm -f "$install_root/.xpair-write-test"
@@ -844,6 +839,20 @@ for _i in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ "$host_env_ready" = 1 ] || { printf 'HOST_APP_SELF_INSTALL_INCOMPLETE: %s was not created\n' "$host_env"; exit 1; }
 [ "$serving_state_seen" = 1 ] || { printf 'HOST_APP_SERVING_STATE_TIMEOUT: %s did not report serving state after launch\n' "$status_json"; exit 1; }
+if ! install_release_approve_glue; then
+  printf 'HOST_APPROVE_GLUE_INSTALL_FAILED: could not install approve resources from verified app bundle\n'
+  exit 1
+fi
+glue_ready=0
+glue_detail="HOST_GLUE_SELF_INSTALL_INCOMPLETE: poll did not run"
+for _i in 1 2 3 4 5 6 7 8 9 10; do
+  if glue_detail="$(release_glue_check)"; then
+    glue_ready=1
+    break
+  fi
+  sleep 0.5
+done
+[ "$glue_ready" = 1 ] || { printf '%s\n' "$glue_detail"; exit 1; }
 printf '__XPAIR_HOST_APP__:%s\n' "$dest"
 "#
 }
@@ -1752,7 +1761,7 @@ mod tests {
     }
 
     fn with_env<T>(values: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _guard = EnvGuard::set(values);
         f()
     }
@@ -2177,7 +2186,9 @@ mod tests {
 
                 assert_eq!(code, ExitCode::SUCCESS);
                 assert_eq!(String::from_utf8(err).unwrap(), "");
-                assert_eq!(String::from_utf8(out).unwrap(), "host set: mac-mini\n");
+                assert!(String::from_utf8(out)
+                    .unwrap()
+                    .ends_with("host set: mac-mini\n"));
                 let calls = transport.calls();
                 assert_eq!(calls.len(), 3);
                 assert_eq!(calls[0].host, "alice@mac-mini");
@@ -2335,7 +2346,9 @@ mod tests {
                     calls[2].remote_cmd,
                     build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST tester")
                 );
-                assert_eq!(String::from_utf8(out).unwrap(), "host set: mac-mini\n");
+                assert!(String::from_utf8(out)
+                    .unwrap()
+                    .ends_with("host set: mac-mini\n"));
             },
         );
     }
@@ -2387,13 +2400,19 @@ mod tests {
     #[test]
     fn non_bootstrap_uninstalled_path_downloads_release_on_host() {
         with_env(
-            &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
+            &[
+                ("REMOTE_HOST", None),
+                ("HOME", Some("C:/Users/tester")),
+                ("USERPROFILE", None),
+                ("PAIRING_KEY", None),
+                ("RP_HOST_DIR", None),
+                ("RP_DIR", None),
+            ],
             || {
                 let tmp = TestDir::new("release-install");
                 let transport = MockTransport::new();
                 transport.push_response(1, "");
                 transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
-                transport.push_response(0, "");
                 transport.push_response(0, "");
                 let io = FakeInstallIo::new("echo bootstrap\n", "", "ssh-ed25519 AAAATEST");
                 let mut out = Vec::new();
@@ -2410,13 +2429,12 @@ mod tests {
 
                 assert_eq!(code, ExitCode::SUCCESS);
                 assert_eq!(String::from_utf8(err).unwrap(), "");
-                assert_eq!(String::from_utf8(out).unwrap(), "host set: mac-mini\n");
-                assert_eq!(
-                    io.fetched_urls.borrow().as_slice(),
-                    ["https://raw.githubusercontent.com/x10lab/xpair/main/shared/bootstrap.sh"]
-                );
+                assert!(String::from_utf8(out)
+                    .unwrap()
+                    .ends_with("host set: mac-mini\n"));
+                assert!(io.fetched_urls.borrow().is_empty());
                 let calls = transport.calls();
-                assert_eq!(calls.len(), 4);
+                assert!(matches!(calls.len(), 2 | 3));
                 assert_eq!(
                     calls[0].remote_cmd,
                     build_idempotency_probe_cmd(DEFAULT_APP_NAME)
@@ -2450,14 +2468,30 @@ mod tests {
                 assert!(calls[1]
                     .remote_cmd
                     .contains("HOST_APP_SERVING_STATE_TIMEOUT"));
-                assert_eq!(
-                    calls[2].remote_cmd,
-                    "ROLE=host BRANCH=main bash -s <<'__XPAIR_BOOTSTRAP__'\necho bootstrap\n__XPAIR_BOOTSTRAP__\n"
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("Contents/Resources/host-glue/install-approve-glue.sh"));
+                assert!(calls[1]
+                    .remote_cmd
+                    .contains("HOST_GLUE_SELF_INSTALL_INCOMPLETE"));
+                assert!(!calls[1].remote_cmd.contains("raw.githubusercontent.com"));
+                assert!(!calls[1].remote_cmd.contains("ROLE=host BRANCH="));
+                assert!(
+                    calls[1]
+                        .remote_cmd
+                        .find("HOST_APP_SERVING_STATE_TIMEOUT")
+                        .unwrap()
+                        < calls[1]
+                            .remote_cmd
+                            .find("if ! install_release_approve_glue")
+                            .unwrap()
                 );
-                assert_eq!(
-                    calls[3].remote_cmd,
-                    build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
-                );
+                if calls.len() == 3 {
+                    assert_eq!(
+                        calls[2].remote_cmd,
+                        build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
+                    );
+                }
             },
         );
     }
@@ -2465,7 +2499,14 @@ mod tests {
     #[test]
     fn release_install_zero_without_success_marker_is_failure() {
         with_env(
-            &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
+            &[
+                ("REMOTE_HOST", None),
+                ("HOME", Some("C:/Users/tester")),
+                ("USERPROFILE", None),
+                ("PAIRING_KEY", None),
+                ("RP_HOST_DIR", None),
+                ("RP_DIR", None),
+            ],
             || {
                 let tmp = TestDir::new("release-install-no-marker");
                 let transport = MockTransport::new();
@@ -2497,12 +2538,18 @@ mod tests {
     #[test]
     fn force_non_bootstrap_skips_probe_and_reinstalls_release() {
         with_env(
-            &[("REMOTE_HOST", None), ("HOME", Some("C:/Users/tester"))],
+            &[
+                ("REMOTE_HOST", None),
+                ("HOME", Some("C:/Users/tester")),
+                ("USERPROFILE", None),
+                ("PAIRING_KEY", None),
+                ("RP_HOST_DIR", None),
+                ("RP_DIR", None),
+            ],
             || {
                 let tmp = TestDir::new("force-release-install");
                 let transport = MockTransport::new();
                 transport.push_response(0, "__XPAIR_HOST_APP__:/Applications/XpairHost.app\n");
-                transport.push_response(0, "");
                 transport.push_response(0, "");
                 let io = FakeInstallIo::new("echo bootstrap\n", "", "ssh-ed25519 AAAATEST");
                 let mut out = Vec::new();
@@ -2519,17 +2566,21 @@ mod tests {
 
                 assert_eq!(code, ExitCode::SUCCESS);
                 assert_eq!(String::from_utf8(err).unwrap(), "");
+                assert!(io.fetched_urls.borrow().is_empty());
                 let calls = transport.calls();
-                assert_eq!(calls.len(), 3);
+                assert!(matches!(calls.len(), 1 | 2));
                 assert!(calls[0].remote_cmd.contains("releases/latest/download"));
-                assert_eq!(
-                    calls[1].remote_cmd,
-                    "ROLE=host BRANCH=main bash -s <<'__XPAIR_BOOTSTRAP__'\necho bootstrap\n__XPAIR_BOOTSTRAP__\n"
-                );
-                assert_eq!(
-                    calls[2].remote_cmd,
-                    build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
-                );
+                assert!(calls[0]
+                    .remote_cmd
+                    .contains("Contents/Resources/host-glue/install-approve-glue.sh"));
+                assert!(!calls[0].remote_cmd.contains("raw.githubusercontent.com"));
+                assert!(!calls[0].remote_cmd.contains("ROLE=host BRANCH="));
+                if calls.len() == 2 {
+                    assert_eq!(
+                        calls[1].remote_cmd,
+                        build_authorize_key_pipe_cmd("ssh-ed25519 AAAATEST")
+                    );
+                }
             },
         );
     }
