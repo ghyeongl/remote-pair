@@ -7,7 +7,7 @@
 
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 
 use crate::config;
 use crate::platform::{self, Os};
@@ -34,15 +34,12 @@ struct SshTransport {
 impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
         let argv = build_ssh_argv(self.os, host, remote_cmd);
-        let out = Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()?;
-
+        let mut command = Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        let (code, stdout) = crate::transport::capture_stdout(command)?;
         Ok(Output {
-            code: out.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            code: code.unwrap_or(1),
+            stdout,
         })
     }
 }

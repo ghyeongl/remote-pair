@@ -32,19 +32,17 @@ pub struct SshTransport;
 impl Transport for SshTransport {
     fn ssh_exec(&self, host: &str, remote_cmd: &str) -> io::Result<Output> {
         let os = Os::current();
-        let out = Command::new("ssh")
+        let mut command = Command::new("ssh");
+        command
             .args(pairing_identity_args())
             .args(os.ssh_mux_neutralizer_args())
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"])
             .arg(host)
-            .arg(remote_cmd)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()?;
-
+            .arg(remote_cmd);
+        let (code, stdout) = crate::transport::capture_stdout(command)?;
         Ok(Output {
-            code: out.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            code: code.unwrap_or(1),
+            stdout,
         })
     }
 }
