@@ -19,11 +19,6 @@ if (!process.env.RP_SSH_CM_TAG) process.env.RP_SSH_CM_TAG = String(process.pid)
 const bridge = require('./onboarding-bridge.js')
 let telemetry = null
 try { telemetry = require('./telemetry.js') } catch { /* telemetry optional */ }
-// Seed build-baked PostHog/Sentry keys into telemetry.env BEFORE any onboarding claim/capture.
-// The pre-workbench onboarding runs in this process ahead of the workbench extension's activate(),
-// so seeding only there would miss a fresh user's onboarding opt-in (and app_first_launch would be
-// claimed keyless, unretriable). Idempotent; no-op when the bundle carries no baked file.
-try { if (telemetry && telemetry.seedBakedKeys) telemetry.seedBakedKeys() } catch { /* */ }
 // CLIENT→HOST liveness heartbeat — started here so the onboarding window already counts as a
 // connected client. The workbench keeps it going afterwards, so stop is OPTIONAL here.
 let heartbeat = null
@@ -56,6 +51,14 @@ function selfHealIdeDataDirs() {
 }
 
 selfHealIdeDataDirs()
+
+// Seed build-baked PostHog/Sentry keys into telemetry.env BEFORE any onboarding claim/capture,
+// but AFTER selfHealIdeDataDirs() — seeding earlier would create ~/.xpair/client/telemetry.env
+// ahead of the self-heal, whose "no client.env" check would then rename ~/.xpair/client → ide.
+// The pre-workbench onboarding runs in this process ahead of the workbench extension's activate(),
+// so seeding only there would miss a fresh user's onboarding opt-in (app_first_launch would be
+// claimed keyless, unretriable). Idempotent; no-op when the bundle carries no baked file.
+try { if (telemetry && telemetry.seedBakedKeys) telemetry.seedBakedKeys() } catch { /* */ }
 
 /** Sentinel that forces onboarding on the next launch (written by the IDE's "Re-run setup"
  *  command, which can't pass an env var across an app quit+relaunch). Deleted once onboarding
