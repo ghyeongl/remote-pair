@@ -97,6 +97,7 @@ Sweep the client onboarding Electron surface with the P3 bridge in place: hardco
 | W4 | Sync-method mappings on win32? | **Deferred** — UNC-only first; robocopy/unison design later. |
 | W5 | Where does `self-update` get Windows bits? | **GitHub Releases** (existing convention: stable-named asset + tag compare), NOT a new latest.json. |
 | W6 | `onboard` verb in the Rust CLI? | **Deferred indefinitely** (adopts PR #37's out-of-repo decision "D8"): the IDE onboarding bridge drives the individual verbs directly, so a CLI onboard wizard is redundant; the verb stays wired to exit 2 with guidance. All "D8" references in this document mean W6. |
+| W7 | Stable Windows updater: `/releases/latest` vs scan? | **Follow-up (deferred)** — today stable `self_update.rs` reads `/releases/latest`, so a mac-failure MSI fallback (published `--latest=false`) isn't auto-delivered until the mac job is rerun and promotes the real latest. Full decouple = make the stable channel scan the release list for the newest non-prerelease with an MSI asset (mirror the alpha `releases?per_page=30` path) + update the onboarding download URL. Own PR + tests + Codex rounds when we approach a stable release; not grafted under alpha time pressure. |
 
 ## Sequencing & ownership
 

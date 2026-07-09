@@ -29,10 +29,24 @@ EXEC="$APP_NAME"
 DEPLOY_HOST="${REMOTE_HOST:-gh-mac-m1}"
 
 # ── signing identity ──
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_CN"; then
-  SIGN_ID="$SIGN_CN"; echo "signing: stable cert '$SIGN_CN' (grant survives rebuilds/updates)"
+# Functional probe, not a trust/presence check: an imported-but-untrusted cert matches
+# find-identity yet may still fail to codesign, and a `-v` (trusted) check is wrong the other way
+# (CI's cert signs even though `find-identity -v` won't list it). So actually attempt to sign a
+# throwaway binary with the cert and adopt it only if that succeeds; else fall back to ad-hoc.
+# Signing only needs the private key, not a trust anchor, and the downstream
+# `codesign --verify --strict` validates the signature seal (not cert trust), so it still passes.
+_can_codesign_with() {
+  local cn="$1" probe rc
+  probe="$(mktemp -t rp-signprobe)" || return 1
+  cp /usr/bin/true "$probe" 2>/dev/null || { rm -f "$probe"; return 1; }
+  codesign --force --sign "$cn" "$probe" >/dev/null 2>&1; rc=$?
+  rm -f "$probe"
+  return $rc
+}
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_CN" && _can_codesign_with "$SIGN_CN"; then
+  SIGN_ID="$SIGN_CN"; echo "signing: stable cert '$SIGN_CN' (functional codesign probe passed; grant survives rebuilds/updates)"
 else
-  SIGN_ID="-"; echo "⚠ signing: ad-hoc (cert '$SIGN_CN' missing → re-toggle on every rebuild). ./host/make-signing-cert.sh recommended"
+  SIGN_ID="-"; echo "⚠ signing: ad-hoc (cert '$SIGN_CN' cannot codesign → re-toggle on every rebuild). ./host/make-signing-cert.sh recommended"
 fi
 
 # ── build the in-process onboarding (React) — bundled into Contents/Resources/onboarding ──
