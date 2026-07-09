@@ -364,13 +364,6 @@ if is_client; then
   use_client_manifest
   say "[client] launcher + Service"
   install -d "$RP_CLIENT_DIR/bin" 2>/dev/null || mkdir -p "$RP_CLIENT_DIR/bin"
-  # Build-injected telemetry keys (PostHog/Sentry) shipped in the app bundle → telemetry.env.
-  # telemetry.js reads these at runtime; they stay dormant until the user opts in (consent gate
-  # unchanged). No-op when this bundle carries no baked keys (e.g. local dev builds).
-  if [ -f "$HERE/telemetry.build.env" ]; then
-    say "[client] telemetry keys → $RP_CLIENT_DIR/telemetry.env"
-    _seed_telemetry_env "$HERE/telemetry.build.env" "$RP_CLIENT_DIR/telemetry.env"
-  fi
   [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize" 755
   say "[client] shared logger → $RP_CLIENT_DIR/bin/logging.sh"
   install_file "$HERE/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" 644

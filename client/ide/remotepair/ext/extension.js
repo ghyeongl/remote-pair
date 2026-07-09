@@ -2269,6 +2269,7 @@ function activate(context) {
     // Stamp the install creation time at FIRST RUN, INDEPENDENT of consent. A bare epoch-ms with
     // no id is not PII, so this is safe pre-consent and gives time_to_wow_ms a real elapsed base
     // (first launch → first session) instead of ~0. Idempotent across activations.
+    telemetry.seedBakedKeys(); // materialize build-baked PostHog/Sentry keys into telemetry.env (idempotent)
     telemetry.firstRunStamp();
     // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
     // (window closed before Done) whose event never sent — the claim persists until

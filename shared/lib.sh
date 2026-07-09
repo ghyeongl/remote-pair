@@ -171,25 +171,6 @@ _migrate_env_key_nonempty() {
   [ -n "$value" ]
 }
 
-# Materialize build-baked telemetry keys (PostHog project key / Sentry DSN, both publishable
-# client keys) from a bundled telemetry.build.env into telemetry.env. Upserts ONLY the baked
-# keys via _migrate_env_set, leaving consent / anon-id / install-ts lines untouched. Idempotent.
-# Values are never echoed (secret-safe). No-op when the bundle carries no baked file.
-_seed_telemetry_env() {
-  local src="$1" dst="$2" line key val
-  [ -f "$src" ] || return 0
-  mkdir -p "$(dirname "$dst")" 2>/dev/null || true
-  [ -f "$dst" ] || : > "$dst"
-  while IFS= read -r line; do
-    case "$line" in
-      POSTHOG_KEY=*|SENTRY_DSN=*) key="${line%%=*}"; val="${line#*=}" ;;
-      *) continue ;;
-    esac
-    [ -n "$val" ] && _migrate_env_set "$dst" "$key" "$val"
-  done < "$src"
-  chmod 600 "$dst" 2>/dev/null || true
-}
-
 _migrate_client_env_has_real_config() {
   local file="$1"
   _migrate_env_key_nonempty "$file" REMOTE_HOST || _migrate_env_key_nonempty "$file" FOLDER_MAPS
