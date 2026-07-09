@@ -45,6 +45,9 @@ jobs:
       - name: SoT drift guards
         run: bash shared/check-ide-selfcontained.sh && bash shared/screen-protocol/check-screen-protocol.sh && bash shared/identity/check-identity.sh
 
+      - name: Injected-patch hunk counts (catch truncated file-creation hunks pre-release)
+        run: bash client/ide/remotepair/patches/check-hunk-counts.sh
+
       - name: Swift compile-check (RemotePairHost, no signing)
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
