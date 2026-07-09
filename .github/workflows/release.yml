@@ -152,7 +152,9 @@ jobs:
           # Otherwise create it fresh. Makes reruns-after-a-signing-fix land cleanly.
           if gh release view "v${RP_VERSION}" >/dev/null 2>&1; then
             gh release upload "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --clobber
-            [ -z "$PRE" ] && gh release edit "v${RP_VERSION}" --latest || true
+            # FINAL tags only: promote the (possibly fallback-created --latest=false) release to
+            # latest. Let a failure fail the job — a silently un-promoted latest breaks mac updaters.
+            if [ -z "$PRE" ]; then gh release edit "v${RP_VERSION}" --latest; fi
           else
             gh release create "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --title "v${RP_VERSION}" --generate-notes $PRE
           fi
@@ -230,20 +232,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # gh writes to stderr on a missing release; Actions defaults ErrorActionPreference=Stop,
-          # which would turn that native stderr into a terminating NativeCommandError before the
-          # $LASTEXITCODE check runs. Continue lets us branch on the exit code ourselves.
-          $ErrorActionPreference = 'Continue'
+          # Keep the default Stop here so a Copy-Item failure is fatal (never upload a stale alias).
           $releaseTag = "v${{ steps.release_ver.outputs.version }}"
+          $ver = "${{ steps.release_ver.outputs.version }}"
           $versioned = "xpair-${{ steps.ver.outputs.version }}-x64.msi"
           $stable = "xpair-cli.msi"
           Copy-Item -Force $versioned $stable
-          # Ensure the Release exists. Normally the mac `release` job creates it; if that job
-          # failed (e.g. signing) it won't, so create it here. Alpha/beta tags (a letter in the
-          # version) publish as a pre-release, matching the mac job's own gate.
-          gh release view $releaseTag 2>$null | Out-Null
-          if ($LASTEXITCODE -ne 0) {
-            $ver = "${{ steps.release_ver.outputs.version }}"
+          # gh writes to stderr on a missing release; Actions defaults ErrorActionPreference=Stop,
+          # which would turn that native stderr into a terminating NativeCommandError before the
+          # $LASTEXITCODE check runs. Continue (scoped to the gh probes below) lets us branch on the
+          # exit code ourselves.
+          $ErrorActionPreference = 'Continue'
+          # Ensure the Release exists. Normally the mac `release` job creates it; if that job failed
+          # (e.g. signing) it won't, so create it here. Poll first: whether the mac job just created
+          # it or not, a fresh release can be briefly invisible (gh#6599), so a single probe would
+          # wrongly fall into the create path on a transient miss.
+          $exists = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            gh release view $releaseTag 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $exists = $true; break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $exists) {
             # A fallback release carries ONLY the MSI (no XpairHost.zip/Xpair.zip), so it must
             # never become /releases/latest — that would break mac Updater.swift / install_host.rs
             # which pull the mac zips from latest. Always --latest=false; alpha also --prerelease.
