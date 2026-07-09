@@ -19,6 +19,11 @@ if (!process.env.RP_SSH_CM_TAG) process.env.RP_SSH_CM_TAG = String(process.pid)
 const bridge = require('./onboarding-bridge.js')
 let telemetry = null
 try { telemetry = require('./telemetry.js') } catch { /* telemetry optional */ }
+// Seed build-baked PostHog/Sentry keys into telemetry.env BEFORE any onboarding claim/capture.
+// The pre-workbench onboarding runs in this process ahead of the workbench extension's activate(),
+// so seeding only there would miss a fresh user's onboarding opt-in (and app_first_launch would be
+// claimed keyless, unretriable). Idempotent; no-op when the bundle carries no baked file.
+try { if (telemetry && telemetry.seedBakedKeys) telemetry.seedBakedKeys() } catch { /* */ }
 // CLIENT→HOST liveness heartbeat — started here so the onboarding window already counts as a
 // connected client. The workbench keeps it going afterwards, so stop is OPTIONAL here.
 let heartbeat = null
