@@ -245,8 +245,10 @@ done
 # Done this way, the Authority of the screenshare binaries (screen·rp-screencap·rp-input-inject) is baked in with the stable cert
 # so the Screen Recording grant survives .app updates (designated requirement = cert leaf).
 # The shell script (approve-router.sh) must also be signed individually so that --verify --strict passes after the outer non-deep signing.
-for bin in "$HELP"/*; do
-  [ -f "$bin" ] || continue
+# find -type f (not "$HELP"/*) so nested subdirs are signed too: Helpers/hooks/*.sh are nested
+# code objects that codesign --verify --strict rejects if unsigned. Process substitution keeps
+# the loop in this shell so a failing exit aborts the build (a `find | while` subshell wouldn't).
+while IFS= read -r bin; do
   if file -b "$bin" | grep -q 'Mach-O'; then
     codesign -s "$SIGN_ID" --force --options runtime --timestamp=none "$bin" \
       || { echo "✗ Helpers individual signing failed (Mach-O): $bin" >&2; exit 1; }
@@ -255,7 +257,7 @@ for bin in "$HELP"/*; do
     codesign -s "$SIGN_ID" --force --timestamp=none "$bin" \
       || { echo "✗ Helpers individual signing failed (script): $bin" >&2; exit 1; }
   fi
-done
+done < <(find "$HELP" -type f)
 codesign -s "$SIGN_ID" --force "$APP"
 echo "built + signed (inside-out): $APP (v$VERSION, $BUNDLE_PREFIX)"
 codesign -dv "$APP" 2>&1 | grep -iE 'Authority|^Identifier' || true
