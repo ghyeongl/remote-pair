@@ -146,7 +146,16 @@ jobs:
           # Alpha builds (version has a letter suffix, e.g. 0.5.0a38) → mark Pre-release and NOT
           # latest, so the host Updater (tracks /releases/latest, excludes pre-releases) ignores them.
           PRE=""; case "$RP_VERSION" in *[a-z]*) PRE="--prerelease --latest=false";; esac
-          gh release create "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --title "v${RP_VERSION}" --generate-notes $PRE
+          # Idempotent publish: a prior windows-msi fallback may have already created this release
+          # (MSI-only, --latest=false). If so, upload the mac assets into it — and for FINAL tags
+          # promote it to latest now that the mac zips are present (closes the fallback's latest gap).
+          # Otherwise create it fresh. Makes reruns-after-a-signing-fix land cleanly.
+          if gh release view "v${RP_VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --clobber
+            [ -z "$PRE" ] && gh release edit "v${RP_VERSION}" --latest || true
+          else
+            gh release create "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --title "v${RP_VERSION}" --generate-notes $PRE
+          fi
 
       - name: Win32 IDE release opt-in placeholder
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_win32_ide }}
@@ -160,7 +169,8 @@ jobs:
     # if:always() runs this even when `release` fails; the upload step creates the Release
     # if the mac job didn't (see "Ensure release exists").
     needs: release
-    if: ${{ always() }}
+    # Run even when the mac `release` job fails (decoupled MSI), but NOT after a manual cancel.
+    if: ${{ !cancelled() }}
     runs-on: [self-hosted, Windows, X64, Win11]
     defaults:
       run:
@@ -234,9 +244,19 @@ jobs:
           gh release view $releaseTag 2>$null | Out-Null
           if ($LASTEXITCODE -ne 0) {
             $ver = "${{ steps.release_ver.outputs.version }}"
-            $pre = if ($ver -match '[a-zA-Z]') { @("--prerelease","--latest=false") } else { @() }
+            # A fallback release carries ONLY the MSI (no XpairHost.zip/Xpair.zip), so it must
+            # never become /releases/latest — that would break mac Updater.swift / install_host.rs
+            # which pull the mac zips from latest. Always --latest=false; alpha also --prerelease.
+            $pre = @("--latest=false")
+            if ($ver -match '[a-zA-Z]') { $pre += "--prerelease" }
             gh release create $releaseTag --title $releaseTag --notes "Windows CLI MSI ($versioned)." @pre
             if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
+            # gh#6599: a just-created release can 404 for a few seconds; poll before uploading.
+            for ($i = 0; $i -lt 10; $i++) {
+              gh release view $releaseTag 2>$null | Out-Null
+              if ($LASTEXITCODE -eq 0) { break }
+              Start-Sleep -Seconds 3
+            }
           }
           gh release upload $releaseTag $versioned $stable --clobber
           if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }
