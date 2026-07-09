@@ -257,6 +257,11 @@ jobs:
             # A fallback release carries ONLY the MSI (no XpairHost.zip/Xpair.zip), so it must
             # never become /releases/latest — that would break mac Updater.swift / install_host.rs
             # which pull the mac zips from latest. Always --latest=false; alpha also --prerelease.
+            # ponytail: deliberate tradeoff — the STABLE Windows updater reads /releases/latest
+            # (self_update.rs Channel::Stable), so during a mac-failure window it won't auto-deliver
+            # this MSI. It self-heals: the mac idempotent-publish rerun promotes the real latest.
+            # Alpha is unaffected (its updater scans the release list). Full decouple (stable updater
+            # scans too, mirroring alpha) is tracked in docs/win32-client-roadmap.md.
             $pre = @("--latest=false")
             if ($ver -match '[a-zA-Z]') { $pre += "--prerelease" }
             gh release create $releaseTag --title $releaseTag --notes "Windows CLI MSI ($versioned)." @pre
