@@ -125,7 +125,9 @@ jobs:
           # In CI ($GITHUB_ACTIONS set) build.sh defaults RP_LOCAL_IDENTITY=0 (prod identity, not
           # XpairLocal); set it explicitly for clarity. RP_BUILD_VER pins the version to the tag
           # (skips the shared shared/.build-counter so the release version == the tag, no drift).
-          ( cd client/ide && RP_LOCAL_IDENTITY=0 RP_BUILD_VER="${RP_VERSION}" ./build.sh )
+          # RP_POSTHOG_KEY / RP_SENTRY_DSN (repo secrets) → build.sh bakes them into the bundled CLI;
+          # install.sh materializes into ~/.xpair/client/telemetry.env. Empty (forks) => no bake => telemetry inert.
+          ( cd client/ide && RP_POSTHOG_KEY="${{ secrets.RP_POSTHOG_KEY }}" RP_SENTRY_DSN="${{ secrets.RP_SENTRY_DSN }}" RP_LOCAL_IDENTITY=0 RP_BUILD_VER="${RP_VERSION}" ./build.sh )
           IDE_APP="client/ide/dist/VSCode-darwin-arm64/Xpair.app"
           [ -d "$IDE_APP" ] || { echo "::error::IDE build did not produce $IDE_APP — prod-identity build failed (got XpairLocal?)"; exit 1; }
           codesign -dvv "$IDE_APP" 2>&1 | grep -q "Authority=RemotePair Local Signing" \

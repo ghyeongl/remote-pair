@@ -206,6 +206,22 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
   for f in install.sh config.sh lib.sh logging.sh; do
     cp "$SHARED/$f" "$_cli/shared/$f"
   done
+  # Bake publishable telemetry keys (PostHog project key / Sentry DSN) from CI secrets into the
+  # extension bundle; telemetry.js seeds them into ~/.xpair/client/telemetry.env at activation.
+  # Publishable client keys => world-readable (0644) so any macOS user of the shared /Applications
+  # app can read it. Absent env (local builds) => no file => telemetry stays inert. Never echoed.
+  # The extension's ext/ source dir IS the packaged extension root (dev-build.sh copies ext/* into
+  # extensions/remotepair/), so telemetry.js lands at .../remotepair/telemetry.js and its
+  # seedBakedKeys() reads __dirname-relative — bake alongside it at the extension root = dirname
+  # of the bundled cli dir.
+  # ponytail: mac client only — the win32 IDE release is a disabled placeholder today; bake into
+  # its extension root too if/when that release path is enabled.
+  _extroot="$(dirname "$_cli")"
+  _tenv="$_extroot/telemetry.build.env"
+  : > "$_tenv"
+  [ -n "${RP_POSTHOG_KEY:-}" ] && printf 'POSTHOG_KEY=%s\n' "$RP_POSTHOG_KEY" >> "$_tenv"
+  [ -n "${RP_SENTRY_DSN:-}" ]  && printf 'SENTRY_DSN=%s\n'  "$RP_SENTRY_DSN"  >> "$_tenv"
+  if [ -s "$_tenv" ]; then chmod 644 "$_tenv"; echo "→ baked telemetry keys into extension bundle (telemetry.build.env)"; else rm -f "$_tenv"; fi
   # The client CLI scripts install.sh installs to ~/.local/bin (+ the Service + hangul-romanize helper).
   for f in xpair xpair-launch xpair-mount xpair-desktop xpair-editor xpair-askpass hangul-romanize; do
     [ -e "$CLI_SRC/$f" ] && cp "$CLI_SRC/$f" "$_cli/client/cli/$f"

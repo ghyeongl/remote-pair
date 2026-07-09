@@ -243,6 +243,24 @@ function upsertEnv(key, val) {
   }
 }
 
+// Seed build-baked, publishable telemetry keys (PostHog project key / Sentry DSN) into
+// telemetry.env from a world-readable file shipped inside the extension bundle. Called at
+// activation so it covers fresh installs AND app upgrades that skip the CLI installer. Seeds
+// only when a key is absent (never clobbers a user/older value); never throws; leaves the
+// consent gate untouched (keys stay dormant until opt-in). No bundled file (local dev) => no-op.
+function seedBakedKeys(src = path.join(__dirname, "telemetry.build.env")) {
+  try {
+    const baked = readEnvFile(src);
+    const cur = readEnv();
+    for (const key of [K_POSTHOG_KEY, K_SENTRY_DSN]) {
+      const v = (baked[key] || "").trim();
+      if (v && !(cur[key] || "").trim()) upsertEnv(key, v);
+    }
+  } catch (_e) {
+    /* best effort — telemetry must never break the app */
+  }
+}
+
 // --- redaction -------------------------------------------------------------
 
 // Default redactor: $HOME→'~', REMOTE_HOST→'<host>'. extension.js passes its own redact()
@@ -702,6 +720,7 @@ module.exports = {
   strictScrubDeep, // recursive strictScrub for a whole event tree (Electron beforeSend).
   installId,
   installTs,
+  seedBakedKeys, // materialize build-baked PostHog/Sentry keys into telemetry.env at activation (idempotent, consent-independent).
   firstRunStamp, // stamp install creation time at first run, INDEPENDENT of consent (time_to_wow base).
   claimHostConnectedOnce, // once-per-install host_connected gate (activation-funnel cardinality).
   claimFirstLaunchOnce, // once-per-install app_first_launch gate (consent-aware; survives abandoned onboarding).
