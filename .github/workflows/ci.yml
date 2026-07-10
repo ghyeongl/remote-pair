@@ -53,5 +53,7 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           # Compile via SwiftPM (mirrors build-host.sh: `swift build --package-path host -c release`)
           swift build --package-path host -c release
-          "$(swift build --package-path host -c release --show-bin-path)/XpairHost" --capture-control-self-test
+          BIN="$(swift build --package-path host -c release --show-bin-path)/XpairHost"
+          "$BIN" --capture-control-self-test
+          "$BIN" --pairing-self-test   # gate script + authorized_keys line invariants (D2 routing, RD port, forwarding)
           echo "RemotePairHost compiles ✓"
