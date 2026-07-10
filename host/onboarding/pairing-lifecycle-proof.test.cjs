@@ -92,7 +92,9 @@ test("US-004 SSH proof requires observed fingerprint and has no filesystem marke
 		  assert.match(manager, /permitopen="127\.0\.0\.1:\\#\(remoteDesktopSignalPort\)"/);
 		  assert.match(manager, /restrict,pty,port-forwarding/);
 		  assert.match(manager, /static let remoteDesktopSignalPort = 8890/);
-	  assert.match(manager, /assert\(!line\.contains\("no-port-forwarding"\)\)/);
+	  // precondition (not assert) so the self-test check survives `swift build -c release`, which
+	  // compiles assert() out. Still verifies the paired line omits the invalid no-port-forwarding token.
+	  assert.match(manager, /precondition\(!line\.contains\("no-port-forwarding"\)\)/);
 	  // R9-3: forwarding is deferred to the paired state. buildRestrictedLine gates the tokens behind
 	  // `paired`, install() writes the pending (no-forwarding) line, and the gate grants forwarding
 	  // (ledger-flip FIRST, then add_authorized_key_forwarding) only on promotion — idempotently.
