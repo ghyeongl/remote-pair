@@ -1,30 +1,16 @@
 # M-Mount — Host Folder Mount Option
 
-Mount-based file access is an **alternative** to Syncthing for the Xpair file-access layer.
+> **Superseded (0.6.0):** per [`roadmap-0.6.0.md`](roadmap-0.6.0.md) D4, the host filesystem is the
+> single source of truth and **Syncthing / two-way sync is banned** — the "Mount vs Syncthing" guidance
+> below is retained only for historical context. D5 moves file access to open-remote-ssh (not a mount,
+> not a sync). Do not adopt Syncthing.
+
+Mount-based file access keeps a single source of truth (the host) for the Xpair file-access layer.
 Instead of syncing a local copy, the client mounts the host folder directly so there is a single
 source of truth: no sync daemon, no conflict files, no `.sync-conflict-*` clutter.
 
 **Status:** `client/cli/xpair-mount` is SMB-only. It supports mount, unmount, status, and help.
 SMB uses macOS NetFS/Finder-style mounting and does not require any third-party kernel extension.
-
----
-
-## When to use Mount vs Syncthing
-
-| | Mount | Syncthing |
-|---|---|---|
-| **Source of truth** | Single (host) — no copies | Dual (host + client) — synced |
-| **Read latency** | Network round-trip per read (SMB: ~1-5 ms LAN) | Near-zero (local copy) |
-| **Write latency** | Network round-trip per write | Near-zero (local), synced async |
-| **Offline editing** | Not possible — host must be reachable | Possible, synced on reconnect |
-| **Conflict risk** | Zero — only one copy exists | Exists (concurrent edits on both machines) |
-| **Daemon required** | No client daemon; host File Sharing must be on | Yes (Syncthing running on both sides) |
-| **Best for** | Browsing, reading, occasional edits; zero-conflict CI/build output workflows | Heavy interactive editing with claude running locally |
-
-**Rule of thumb:** if you're using Xpair primarily to run claude on the host, Syncthing's local copy
-means claude reads files at disk speed and is the better default. Choose Mount when you want a single
-authoritative copy, or when you are viewing large generated artifacts and do not want them synced
-locally.
 
 ---
 
