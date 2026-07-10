@@ -703,6 +703,11 @@ enum XpairAuthorizedKeys {
           # `internal-sftp` is an sshd-internal sentinel a forked child cannot invoke.
           # `|| true`: a hardened/`-f`-started sshd may leave sshd_config unreadable; awk's non-zero exit
           # must NOT trip `set -e` and reject every session — just fall through to exec/tmux.
+          # Some sshd builds report the subsystem as the bare name (`sftp`/`internal-sftp`) rather than the
+          # expanded `Subsystem` command — match both, exactly (so `echo sftp-server` still isn't misrouted).
+          case "${SSH_ORIGINAL_COMMAND:-}" in
+            sftp|internal-sftp) exec /usr/libexec/sftp-server ;;
+          esac
           sftp_cmd=$(awk 'tolower($1)=="subsystem" && $2=="sftp" { $1=""; $2=""; sub(/^[ \t]+/,""); print; exit }' /etc/ssh/sshd_config 2>/dev/null || true)
           if [ -n "$sftp_cmd" ] && [ "${SSH_ORIGINAL_COMMAND:-}" = "$sftp_cmd" ]; then
             # shellcheck disable=SC2086 # intentional split of the configured subsystem args
@@ -1521,7 +1526,8 @@ enum PairingSecuritySelfTest {
         let gate = XpairAuthorizedKeys.gateHelperScript()
         precondition(gate.contains("d2-frontdoor.enabled"))                                   // flag-gated
         precondition(gate.contains(#"tolower($1)=="subsystem" && $2=="sftp""#))               // sftp: match the configured Subsystem value
-        precondition(gate.contains("internal-sftp|sftp-server) exec /usr/libexec/sftp-server")) // exec the real sftp-server
+        precondition(gate.contains("sftp|internal-sftp) exec /usr/libexec/sftp-server"))       // bare-token subsystem arm
+        precondition(gate.contains("internal-sftp|sftp-server) exec /usr/libexec/sftp-server")) // configured-value subsystem arm
         precondition(gate.contains(#"exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND""#))  // login-shell passthrough
         precondition(gate.contains("[ -t 0 ] &&"))                                            // tmux only with a real pty
         precondition(gate.contains("has-session -t _keeper"))                                 // never spawn a rogue tmux server
