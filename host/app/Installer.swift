@@ -139,6 +139,12 @@ enum Installer {
             }
         } else { log(.warn, "bundled tmux-aqua not found (\(tmuxSrc))") }
 
+        // 4b. Refresh the xpair-ssh-gate script on version-up so an upgraded host picks up the current
+        //     routing (D2) — ensureGateHelperReady otherwise only runs when a NEW pairing is accepted, so
+        //     existing paired clients would keep the stale gate until they re-paired.
+        do { try XpairAuthorizedKeys.ensureGateHelperReady(); log(.info, "xpair-ssh-gate refreshed") }
+        catch { log(.debug, "xpair-ssh-gate refresh skipped: \(error)") }
+
         // 4a. mosh-server symlink → bundled Helpers/mosh-server (resilient-attach host side). The client
         //     attaches with `mosh --server=~/.local/bin/mosh-server`, so it must live in LOCAL_BIN next to
         //     tmux-aqua. OPTIONAL: unlike tmux-aqua, a missing mosh-server is not fatal — the CLI falls back

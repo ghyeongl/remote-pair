@@ -715,11 +715,12 @@ enum XpairAuthorizedKeys {
           if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
             exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND"
           fi
-          # interactive fall-through → attach the app-owned tmux-aqua server, but ONLY if its keeper is
-          # alive. Never let an SSH login START the server: a server spawned under sshd is not a child of
-          # XpairHost and runs without its AX/SR grant (HostManager.spawn owns the keeper). If it is not
-          # up, fall back to a plain login shell rather than occupy the socket with a permissionless server.
-          if "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock has-session -t _keeper 2>/dev/null; then
+          # interactive fall-through → attach the app-owned tmux-aqua server, but ONLY with a real pty
+          # (`ssh -T host` / a non-terminal stdin has no tty — tmux attach would fail "not a terminal")
+          # AND ONLY if the keeper is alive. Never let an SSH login START the server: one spawned under
+          # sshd is not a child of XpairHost and runs without its AX/SR grant (HostManager.spawn owns the
+          # keeper). Otherwise fall back to a plain login shell.
+          if [ -t 0 ] && "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock has-session -t _keeper 2>/dev/null; then
             exec "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock new-session -A -s main
           fi
           exec "${SHELL:-/bin/zsh}" -l
@@ -732,7 +733,7 @@ enum XpairAuthorizedKeys {
         """#
     }
 
-    private static func ensureGateHelperReady() throws {
+    static func ensureGateHelperReady() throws {
         let script = gateHelperScript()
         let data = Data(script.utf8)
         let dir = (gatePath as NSString).deletingLastPathComponent
@@ -1520,6 +1521,7 @@ enum PairingSecuritySelfTest {
         precondition(gate.contains(#"tolower($1)=="subsystem" && $2=="sftp""#))               // sftp: match the configured Subsystem value
         precondition(gate.contains("internal-sftp|sftp-server) exec /usr/libexec/sftp-server")) // exec the real sftp-server
         precondition(gate.contains(#"exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND""#))  // login-shell passthrough
+        precondition(gate.contains("[ -t 0 ] &&"))                                            // tmux only with a real pty
         precondition(gate.contains("has-session -t _keeper"))                                 // never spawn a rogue tmux server
         precondition(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
         precondition(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
