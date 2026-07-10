@@ -132,9 +132,12 @@ change until D3. No pairing refactor rides D2.
    that can reach any loopback port, so this grants nothing beyond the shell). **`-R` cannot be denied in
    `authorized_keys`** — `port-forwarding` enables both directions and there is no per-key "deny-all `-R`"
    token (`permitlisten` is an allow-list, not a deny, matching the existing `PairingSecuritySelfTest`
-   comment). So deny remote forwarding at the daemon: an sshd_config `Match` for the paired principal with
-   **`AllowTcpForwarding local`** (permits `-L`, forbids `-R`). `permitopen` scopes `-L`; the `Match`
-   denies `-R`.
+   comment). And a `Match` **can't** target the paired key — pairing installs ordinary `authorized_keys`
+   lines all under the same host user, so `Match User`/`Group` is not key-scoped. So deny `-R` with a
+   **global** sshd_config `AllowTcpForwarding local` (permits `-L`, forbids `-R` host-wide). This is
+   acceptable precisely because the host is an **agent-dedicated Mac** (roadmap identity) — nothing
+   legitimately remote-forwards *into* it. `permitopen` scopes `-L` per key; the global directive denies
+   `-R`.
 3. **sftp/scp = allow, no path restriction.** A paired client already has an interactive shell (full FS
    read/write), so sftp/scp is the same trust level, not new exposure; path-restricting it while the shell
    is open is theater. Consistent with D4 (host = SSoT). Fix the sftp **subsystem** arm the current single
@@ -151,5 +154,7 @@ Implementation, incremental, each through the Codex gate:
   sftp-server; exec/scp/rsync/VS Code bootstrap/Orca → `"$SHELL" -c` passthrough; interactive
   fall-through → tmux-aqua attach.
 - **PR2 — `pf` tailnet anchor + fail-closed reconcile**, plus the forwarding-policy change: paired
-  `authorized_keys` line uses `permitopen="127.0.0.1:*"` for `-L`, and an sshd_config `Match` with
-  `AllowTcpForwarding local` denies `-R` (there is no valid per-key deny-all-`-R` token).
+  `authorized_keys` line uses `permitopen="127.0.0.1:*"` for `-L`, and a **global** sshd_config
+  `AllowTcpForwarding local` denies `-R` host-wide (no valid per-key deny-all-`-R` token exists, and a
+  `Match` can't target the key since all paired clients share the host user; a global directive is fine on
+  an agent-dedicated host).

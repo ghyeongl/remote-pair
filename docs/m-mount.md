@@ -14,25 +14,6 @@ SMB uses macOS NetFS/Finder-style mounting and does not require any third-party 
 
 ---
 
-## When to use Mount vs Syncthing
-
-| | Mount | Syncthing |
-|---|---|---|
-| **Source of truth** | Single (host) — no copies | Dual (host + client) — synced |
-| **Read latency** | Network round-trip per read (SMB: ~1-5 ms LAN) | Near-zero (local copy) |
-| **Write latency** | Network round-trip per write | Near-zero (local), synced async |
-| **Offline editing** | Not possible — host must be reachable | Possible, synced on reconnect |
-| **Conflict risk** | Zero — only one copy exists | Exists (concurrent edits on both machines) |
-| **Daemon required** | No client daemon; host File Sharing must be on | Yes (Syncthing running on both sides) |
-| **Best for** | Browsing, reading, occasional edits; zero-conflict CI/build output workflows | Heavy interactive editing with claude running locally |
-
-**Rule of thumb (superseded):** the historical advice here recommended Syncthing's local copy as the
-default for a host-Claude workflow. That is **no longer the policy** — per roadmap-0.6.0.md D4, Syncthing
-is banned and the host is the single source of truth. Mount (and, going forward, open-remote-ssh per D5)
-keep one authoritative copy; do not adopt Syncthing.
-
----
-
 ## SMB Setup
 
 SMB is the only mount backend. macOS File Sharing runs an SMB server automatically when enabled. No
