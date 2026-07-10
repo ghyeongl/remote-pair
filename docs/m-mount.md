@@ -5,7 +5,7 @@
 > below is retained only for historical context. D5 moves file access to open-remote-ssh (not a mount,
 > not a sync). Do not adopt Syncthing.
 
-Mount-based file access is an **alternative** to Syncthing for the Xpair file-access layer.
+Mount-based file access keeps a single source of truth (the host) for the Xpair file-access layer.
 Instead of syncing a local copy, the client mounts the host folder directly so there is a single
 source of truth: no sync daemon, no conflict files, no `.sync-conflict-*` clutter.
 

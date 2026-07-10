@@ -112,8 +112,10 @@ plus the reconcile step. Keep sshd itself stock.
 With terminal transport handled by standard sshd + the existing gate, pairing no longer owns a transport.
 It shrinks to: (1) identity / key-exchange (install the client's restricted `authorized_keys` line — the
 current bind-display→installed-key flow), (2) tailnet join, and (3) the GUI-broker channel (D3). The
-pairing internals stay **frozen/minimal** — the shipped CRLF correctness fix (#97) is the last pairing
-change until D3. No pairing refactor rides D2.
+the pairing **protocol/crypto** stays **frozen** — the shipped CRLF fix (#97) is the last change to the
+pairing wire behavior. (D2 does change the `xpair-ssh-gate` *routing* + the paired line's *forwarding
+tokens* in PR1/PR2 — that is D2 front-door work on the gate, not a change to the pairing handshake.) No
+pairing-protocol refactor rides D2; the JS→Rust *move* is the separate CLI-pairing Leaf, also behavior-frozen.
 
 ## Non-goals / stays frozen
 
@@ -159,7 +161,8 @@ Implementation, incremental, each through the Codex gate:
   sftp-server; exec/scp/rsync/VS Code bootstrap/Orca → `"$SHELL" -c` passthrough; interactive
   fall-through → tmux-aqua attach.
 - **PR2 — `pf` tailnet anchor + fail-closed reconcile**, plus the forwarding-policy change: paired
-  `authorized_keys` line uses `permitopen="127.0.0.1:*"` for `-L`, and a **global** sshd_config
+  `authorized_keys` line uses `permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*"` for
+  `-L` (all loopback forms — `permitopen` does no name resolution), and a **global** sshd_config
   `AllowTcpForwarding local` denies `-R` host-wide (no valid per-key deny-all-`-R` token exists, and a
   `Match` can't target the key since all paired clients share the host user; a global directive is fine on
   an agent-dedicated host).

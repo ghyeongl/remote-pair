@@ -90,7 +90,8 @@ difference is the product.
 - **Current mechanism = SMB mount** (`smbfs` → `/Volumes` via `xpair mount`). **Switch to
   open-remote-ssh** (the OSS extension, distributed via Open VSX).
 - There is a **partial open-remote-ssh footprint**, but it cuts both ways — verify before reusing:
-  `client/ide/remotepair/product.overlay.json` already wires the extension in (reusable), **but**
+  `product.overlay.json` only declares the extension in the product manifest — the actual install/enable
+  happens via the installer hook, which is where D5 wires open-remote-ssh (reusable), **but**
   `extension.js` and `ssh-connect-flow-requirement.test.js` currently enforce the *opposite* — Connect
   deliberately stays inside Xpair surfaces and the test asserts **no** `openremotessh.openEmptyWindow`.
   D5 must **change** those (and their test), not preserve them; treating them as reuse-as-is would keep a
