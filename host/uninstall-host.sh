@@ -427,7 +427,8 @@ remove_app "$HOME/Applications/$LEGACY_APP_NAME.app"
 # D2 privileged hardening (see host/app/D2Hardening.swift) — root-installed, so removal needs sudo.
 # Reverse it: unload+delete the pf LaunchDaemon, delete the anchor + its /etc/pf.conf hook, reload pf,
 # and drop the sshd -R-denial drop-in. Best-effort (only if present).
-if [ -e /Library/LaunchDaemons/com.x10lab.xpair.pf.plist ] || [ -e /etc/ssh/sshd_config.d/00-xpair-d2.conf ]; then
+if [ -e /Library/LaunchDaemons/com.x10lab.xpair.pf.plist ] || [ -e /etc/ssh/sshd_config.d/00-xpair-d2.conf ] \
+   || [ -e /etc/pf.anchors/com.x10lab.xpair ] || grep -q com.x10lab.xpair /etc/pf.conf 2>/dev/null; then
   say "Removing D2 host hardening (pf anchor + sshd drop-in)"
   run_quiet sudo launchctl bootout system/com.x10lab.xpair.pf
   run sudo rm -f /Library/LaunchDaemons/com.x10lab.xpair.pf.plist \

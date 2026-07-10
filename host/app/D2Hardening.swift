@@ -24,9 +24,6 @@ enum D2Hardening {
     static let pfLoader = "\(supportDir)/xpair-pf.sh"
     static let pfPlist = "/Library/LaunchDaemons/com.x10lab.xpair.pf.plist"
     static let pfAnchor = "/etc/pf.anchors/com.x10lab.xpair"
-    // The exact load line (not the bare `anchor "…"` substring, which also matches the load line or a
-    // comment and would pass on a partially-edited pf.conf).
-    static let pfConfMarker = "load anchor \"com.x10lab.xpair\" from \"\(pfAnchor)\""
 
     // ponytail: block :22 on every interface except lo*/utun* (utun = VPN/tailscale, default-allow so a
     // reconnect onto a new utun is never locked out). Refreshed at boot (RunAtLoad) + app-launch apply; a
@@ -36,7 +33,7 @@ enum D2Hardening {
     set -e
     anchor=\(pfAnchor)
     ifconfig -l | tr ' ' '\\n' | grep -vE '^(lo|utun)' | sed 's/.*/block in quick proto tcp on & to any port 22/' > "$anchor"
-    grep -q 'load anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || \
+    grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || \
       printf '\\nanchor "com.x10lab.xpair"\\nload anchor "com.x10lab.xpair" from "%s"\\n' "$anchor" >> /etc/pf.conf
     pfctl -f /etc/pf.conf              # must succeed — set -e aborts (loader non-zero → apply() false → D2 flag removed)
     pfctl -e 2>/dev/null || true       # enable if off; benign if already on. `-e` (not `-E`) so we don't leak PF enable-refs
@@ -60,6 +57,14 @@ enum D2Hardening {
         ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").contains(needle)
     }
 
+    // pf needs BOTH lines: the `anchor "…"` line that EVALUATES the anchor in the main ruleset, and the
+    // `load anchor … from …` line that fills it. A substring/partial match would pass with only one.
+    private static func pfConfEvaluatesAnchor() -> Bool {
+        let lines = ((try? String(contentsOfFile: "/etc/pf.conf", encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+        return lines.contains("anchor \"com.x10lab.xpair\"")
+            && lines.contains { $0.hasPrefix("load anchor \"com.x10lab.xpair\"") }
+    }
+
     // Verify CONTENT + every hook, not mere existence, so any drifted piece re-applies: the drop-in bytes
     // AND that sshd actually Includes the drop-in dir; the loader + plist bytes; the /etc/pf.conf load line
     // AND the anchor file (non-empty with a block rule — its interface list is dynamic so no byte compare).
@@ -68,7 +73,7 @@ enum D2Hardening {
             && fileContains("/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d/")
             && fileEquals(pfLoader, loaderScript)
             && fileEquals(pfPlist, plistContent)
-            && fileContains("/etc/pf.conf", pfConfMarker)
+            && pfConfEvaluatesAnchor()
             && fileContains(pfAnchor, "block in quick proto tcp")
     }
 
@@ -83,6 +88,10 @@ enum D2Hardening {
             "set -e",
             "umask 077",
             "install -d /etc/ssh/sshd_config.d",
+            // Ensure sshd actually reads drop-ins: prepend the Include if the host's sshd_config lacks it
+            // (stock macOS has it; a drifted config would leave our -R denial unread). Prepend keeps it
+            // early so first-value-per-keyword still favors our 00- drop-in.
+            "grep -q '/etc/ssh/sshd_config.d/' /etc/ssh/sshd_config 2>/dev/null || { t=$(mktemp); printf 'Include /etc/ssh/sshd_config.d/*.conf\\n' > \"$t\"; cat /etc/ssh/sshd_config >> \"$t\"; cat \"$t\" > /etc/ssh/sshd_config; rm -f \"$t\"; }",
             "install -d -o root -g wheel -m 755 '\(supportDir)'",
             "printf %s '\(b64(sshdContent))' | base64 -D > '\(sshdDropIn)'; chmod 644 '\(sshdDropIn)'",
             "printf %s '\(b64(loaderScript))' | base64 -D > '\(pfLoader)'; chown root:wheel '\(pfLoader)'; chmod 755 '\(pfLoader)'",
