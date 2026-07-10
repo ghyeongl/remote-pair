@@ -1034,6 +1034,13 @@ function signPairingTranscript(transcript) {
   return crypto.sign(null, transcript, privateKey.keyObject);
 }
 
+/** Assemble the UDP pairing request payload. The field set and names are a wire contract the host
+ *  decodes via PairingRequestWire (host/app/PairingManager.swift); drift is caught build-free by
+ *  pairing-host-contract.test.js. Callers own default resolution (hostname/username). */
+function pairingRequestPayload({ clientPubKey, name, user, timestamp, sig }) {
+  return { clientPubKey, name, user, timestamp, sig };
+}
+
 function sshTargetHost(target) {
   const s = String(target || "").trim();
   const at = s.indexOf("@");
@@ -1871,13 +1878,13 @@ const bridge = {
     } catch (e) {
       return { ok: false, err: `could not sign pairing request: ${e.message || e}`, fingerprint: pub.fingerprint };
     }
-    const sent = await sendUdpJSON(h, p, {
+    const sent = await sendUdpJSON(h, p, pairingRequestPayload({
       clientPubKey: pub.clean,
       name: String(name || os.hostname()),
       user: String(user || os.userInfo().username),
       timestamp,
       sig,
-    });
+    }));
     return { ok: sent.ok, err: sent.err, fingerprint: pub.fingerprint };
   },
 
@@ -2368,6 +2375,13 @@ const bridge = {
 	    parseEd25519PublicKey,
 	    clientIDForKeyBlob,
 	    parseOpenSSHEd25519PrivateKey,
+	    signPairingTranscript,
+	    normalizePairingMetadata,
+	    pairingRequestPayload,
+	    pairingMetadataURL,
+	    sshTargetHost,
+	    sshString,
+	    readSSHString,
 	    gatewayMacStatus,
 	    sshControlMasterArgs,
 	    sshPairingProofOpts,
