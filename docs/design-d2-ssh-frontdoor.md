@@ -53,9 +53,9 @@ request **in this precedence order** — command/subsystem **first**, tmux only 
 
 | # | Case | Signal (checked in order) | Route |
 |---|------|---------------------------|-------|
-| 1 | sftp subsystem | subsystem request — `SSH_ORIGINAL_COMMAND` is the subsystem token (`internal-sftp`/`sftp-server`) | `exec` the platform sftp-server, **not** a shell |
-| 2 | Remote exec / scp / rsync (incl. VS Code Remote bootstrap, git, Orca, **and `ssh -tt host cmd`**) | `SSH_ORIGINAL_COMMAND` is **non-empty** | `exec "$SHELL" -c "$SSH_ORIGINAL_COMMAND"` — the account's login shell, matching stock sshd |
-| 3 | Interactive shell | `SSH_ORIGINAL_COMMAND` **empty** (fall-through) | `exec tmux-aqua attach` (attach-or-create the user's session) |
+| 1 | sftp subsystem | `SSH_ORIGINAL_COMMAND` equals the configured `Subsystem sftp <cmd>` value (read from sshd_config; incl. args) | `exec /usr/libexec/sftp-server` (real binary + configured args), **not** a shell — `internal-sftp` is an sshd sentinel |
+| 2 | Remote exec / scp / rsync (incl. VS Code Remote bootstrap, git, Orca, **and `ssh -tt host cmd`**) | `SSH_ORIGINAL_COMMAND` non-empty and ≠ the sftp value | `exec "$SHELL" -c "$SSH_ORIGINAL_COMMAND"` — the account's login shell, matching stock sshd |
+| 3 | Interactive shell | `SSH_ORIGINAL_COMMAND` **empty** (fall-through) | attach the tmux-aqua session **iff `has-session -t _keeper`** (server alive); else `exec "$SHELL" -l` — never START a server from the gate |
 | — | Pure port-forward (`ssh -N -L …`) | no session-exec channel opened → **the forced command never runs**; only the direct-tcpip channel opens | governed by the `authorized_keys` forwarding policy, not the gate |
 
 Key correctness points:
@@ -126,10 +126,12 @@ change until D3. No pairing refactor rides D2.
 1. **Bind = `pf` anchor.** Admit inbound `:22` only on the tailscale `utun`, fail closed, keyed off the
    interface (so 100.x IP churn is irrelevant). Not `sshd_config ListenAddress` (ignored under launchd
    socket activation), not tsnet (own server). sshd stays stock.
-2. **Forwarding = loosen `-L` to loopback, deny `-R`.** Set `permitopen="127.0.0.1:*"` on the paired
-   line — **valid syntax** (a bare `127.0.0.1` is rejected; `:*` = any loopback port). This allows `-L`
-   to any loopback port (open-remote-ssh negotiates a dynamic one; and a paired client already has a shell
-   that can reach any loopback port, so this grants nothing beyond the shell). **`-R` cannot be denied in
+2. **Forwarding = loosen `-L` to loopback, deny `-R`.** Set **all loopback forms** on the paired line —
+   `permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*"` — because `permitopen` does
+   **no** name/address resolution, so a client requesting `localhost:<port>` or the IPv6 `[::1]:<port>`
+   would be denied by a `127.0.0.1`-only rule. `:*` = any port (a bare `127.0.0.1` is rejected). This
+   allows `-L` to any loopback port (open-remote-ssh negotiates a dynamic one; and a paired client already
+   has a shell that can reach any loopback port, so this grants nothing beyond the shell). **`-R` cannot be denied in
    `authorized_keys`** — `port-forwarding` enables both directions and there is no per-key "deny-all `-R`"
    token (`permitlisten` is an allow-list, not a deny, matching the existing `PairingSecuritySelfTest`
    comment). And a `Match` **can't** target the paired key — pairing installs ordinary `authorized_keys`
@@ -142,8 +144,11 @@ change until D3. No pairing refactor rides D2.
    read/write), so sftp/scp is the same trust level, not new exposure; path-restricting it while the shell
    is open is theater. Consistent with D4 (host = SSoT). Fix the sftp **subsystem** arm the current single
    `SSH_ORIGINAL_COMMAND` test breaks.
-4. **tmux-aqua attach (MVP) = attach-or-create the default session, shared read/write.** Standard tmux
-   multi-attach; every SSH client lands in the one persistent shared session. Per-session routing by
+4. **tmux-aqua attach (MVP) = attach-or-create the default session, shared read/write — but only if the
+   app's keeper server is alive.** Guard on `has-session -t _keeper`; if the host app is down (cold start
+   / post-reboot), fall back to a plain login shell rather than let the SSH gate START a tmux server,
+   which would run outside XpairHost's subtree and without its AX/SR grant (HostManager.spawn owns the
+   keeper). Standard tmux multi-attach; every SSH client lands in the one persistent shared session. Per-session routing by
    cwd/agent and the **view-only / intervention-lock when a GUI operator is active** are **D3 + Leaf #3
    follow-ups — explicitly NOT in the D2 front-door PRs.**
 5. **Rollout = behind a flag.** The gate is access-critical (a bad change locks out every client), so ship

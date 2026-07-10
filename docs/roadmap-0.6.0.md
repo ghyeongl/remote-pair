@@ -36,13 +36,15 @@ highest-leverage decision of 0.6.0.
   tailscale `utun`, fail-closed). tsnet is rejected (it would be its own SSH server). See the design doc.
 - **ForceCommand → tmux-aqua auto-attach, with a conditional branch** on SSH entry, keyed on the
   **original command / subsystem FIRST** (not the pty):
-  - **Remote exec / scp / rsync / sftp / VS Code Remote bootstrap** (`SSH_ORIGINAL_COMMAND` non-empty or
-    a subsystem request — this includes `ssh -tt host cmd`, which has a pty *and* a command) → **pass
-    through untouched** under the account's login shell, never wrapped in tmux. (Current gap: the paired
-    gate serves **no** sftp subsystem today — `client/cli/xpair` forces legacy `scp -O` to work around it
-    — so D2/PR1 must add the sftp-subsystem arm for Remote-SSH/scp to work by default.)
+  - **sftp subsystem** → exec the real **sftp-server** (its own arm, NOT the shell — `internal-sftp` is
+    an sshd sentinel a child can't run). Detect it by matching `SSH_ORIGINAL_COMMAND` against the
+    configured `Subsystem sftp <cmd>` value. (Current gap: the paired gate serves **no** sftp today —
+    `client/cli/xpair` forces legacy `scp -O` — so D2/PR1 adds this arm for Remote-SSH/scp by default.)
+  - **Remote exec / scp / rsync / VS Code Remote bootstrap** (`SSH_ORIGINAL_COMMAND` non-empty, incl.
+    `ssh -tt host cmd` which has a pty *and* a command) → **pass through** under the account's login shell
+    (`$SHELL -c`), never wrapped in tmux.
   - **Interactive shell** (no command and no subsystem — the fall-through) → auto-attach the tmux-aqua
-    session.
+    session **only if its keeper server is alive** (never spawn one from the SSH gate — see D2 design).
   - **Pure port-forwarding** (`ssh -N -L …` / `-R …`) runs **no** remote command, so the forced command
     never executes; forwarding is governed by the `authorized_keys` forwarding policy, not the branch.
 - **Payoff:** any standards-compliant SSH client — Orca, VS Code Remote, iTerm, phone clients
@@ -93,6 +95,10 @@ difference is the product.
   deliberately stays inside Xpair surfaces and the test asserts **no** `openremotessh.openEmptyWindow`.
   D5 must **change** those (and their test), not preserve them; treating them as reuse-as-is would keep a
   regression guard that rejects the desired remote-SSH path.
+- **Drop the File Sharing gate.** The host permission model currently hard-gates serving/onboarding on
+  macOS **File Sharing** (`Permissions.allGranted()` and React `REQUIRED_PERMS` include `sharing`) — that
+  exists only for the SMB mount. When D5 removes SMB, this gate must be removed/relaxed (SSH's Remote
+  Login gate stays), or every host will still be blocked on a permission it no longer needs.
 
 ## D6 — Orca/cmux compatibility via standards, not code
 
