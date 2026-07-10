@@ -126,11 +126,15 @@ change until D3. No pairing refactor rides D2.
 1. **Bind = `pf` anchor.** Admit inbound `:22` only on the tailscale `utun`, fail closed, keyed off the
    interface (so 100.x IP churn is irrelevant). Not `sshd_config ListenAddress` (ignored under launchd
    socket activation), not tsnet (own server). sshd stays stock.
-2. **Forwarding = loosen `-L` to loopback, lock `-R`.** Widen `permitopen` to **all of `127.0.0.1`** (any
-   loopback port — open-remote-ssh negotiates a dynamic loopback port, so a fixed range is fragile; and a
-   paired client already has a shell that can reach any loopback port, so this grants nothing beyond the
-   shell). Deny remote forwarding by default via `permitlisten` — `permitopen` only limits `-L`, and the
-   current paired line leaves `-R` un-narrowed; that gets fixed.
+2. **Forwarding = loosen `-L` to loopback, deny `-R`.** Set `permitopen="127.0.0.1:*"` on the paired
+   line — **valid syntax** (a bare `127.0.0.1` is rejected; `:*` = any loopback port). This allows `-L`
+   to any loopback port (open-remote-ssh negotiates a dynamic one; and a paired client already has a shell
+   that can reach any loopback port, so this grants nothing beyond the shell). **`-R` cannot be denied in
+   `authorized_keys`** — `port-forwarding` enables both directions and there is no per-key "deny-all `-R`"
+   token (`permitlisten` is an allow-list, not a deny, matching the existing `PairingSecuritySelfTest`
+   comment). So deny remote forwarding at the daemon: an sshd_config `Match` for the paired principal with
+   **`AllowTcpForwarding local`** (permits `-L`, forbids `-R`). `permitopen` scopes `-L`; the `Match`
+   denies `-R`.
 3. **sftp/scp = allow, no path restriction.** A paired client already has an interactive shell (full FS
    read/write), so sftp/scp is the same trust level, not new exposure; path-restricting it while the shell
    is open is theater. Consistent with D4 (host = SSoT). Fix the sftp **subsystem** arm the current single
@@ -146,5 +150,6 @@ Implementation, incremental, each through the Codex gate:
 - **PR1 — gate routing table** (behind the flag): command/subsystem-first routing — sftp subsystem →
   sftp-server; exec/scp/rsync/VS Code bootstrap/Orca → `"$SHELL" -c` passthrough; interactive
   fall-through → tmux-aqua attach.
-- **PR2 — `pf` tailnet anchor + fail-closed reconcile**, plus the forwarding-policy change to the paired
-  `authorized_keys` line (`permitopen=127.0.0.1` for `-L`, `permitlisten` deny for `-R`).
+- **PR2 — `pf` tailnet anchor + fail-closed reconcile**, plus the forwarding-policy change: paired
+  `authorized_keys` line uses `permitopen="127.0.0.1:*"` for `-L`, and an sshd_config `Match` with
+  `AllowTcpForwarding local` denies `-R` (there is no valid per-key deny-all-`-R` token).

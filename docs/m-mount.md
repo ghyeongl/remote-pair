@@ -26,10 +26,10 @@ SMB uses macOS NetFS/Finder-style mounting and does not require any third-party 
 | **Daemon required** | No client daemon; host File Sharing must be on | Yes (Syncthing running on both sides) |
 | **Best for** | Browsing, reading, occasional edits; zero-conflict CI/build output workflows | Heavy interactive editing with claude running locally |
 
-**Rule of thumb:** if you're using Xpair primarily to run claude on the host, Syncthing's local copy
-means claude reads files at disk speed and is the better default. Choose Mount when you want a single
-authoritative copy, or when you are viewing large generated artifacts and do not want them synced
-locally.
+**Rule of thumb (superseded):** the historical advice here recommended Syncthing's local copy as the
+default for a host-Claude workflow. That is **no longer the policy** — per roadmap-0.6.0.md D4, Syncthing
+is banned and the host is the single source of truth. Mount (and, going forward, open-remote-ssh per D5)
+keep one authoritative copy; do not adopt Syncthing.
 
 ---
 
