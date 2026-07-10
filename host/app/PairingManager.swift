@@ -833,16 +833,19 @@ final class PairingMetadataHTTPServer {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { _, _, _, _ in
                 let body = (try? JSONSerialization.data(withJSONObject: self.response(), options: [.sortedKeys]))
                     ?? Data("{}".utf8)
-                var payload = Data(
-                    """
-                    HTTP/1.1 200 OK\r
-                    Content-Type: application/json\r
-                    Cache-Control: no-store\r
-                    Content-Length: \(body.count)\r
-                    Connection: close\r
-                    \r
-                    """.utf8
-                )
+                // Explicit CRLF framing terminating in "\r\n\r\n". A Swift multiline literal does
+                // NOT append a newline after its last line, so building the header block that way
+                // yields "...Connection: close\r\n\r" (a bare CR, missing the final LF) — strict
+                // HTTP parsers (Node's llhttp in the client) reject it with "Expected LF after
+                // headers". See client/ide/remotepair/ext/pairing-metadata-response.test.js.
+                let header =
+                    "HTTP/1.1 200 OK\r\n"
+                    + "Content-Type: application/json\r\n"
+                    + "Cache-Control: no-store\r\n"
+                    + "Content-Length: \(body.count)\r\n"
+                    + "Connection: close\r\n"
+                    + "\r\n"
+                var payload = Data(header.utf8)
                 payload.append(body)
                 connection.send(content: payload, completion: .contentProcessed { _ in
                     connection.cancel()
