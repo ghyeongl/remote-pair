@@ -1,5 +1,10 @@
 # M-Mount — Host Folder Mount Option
 
+> **Superseded (0.6.0):** per [`roadmap-0.6.0.md`](roadmap-0.6.0.md) D4, the host filesystem is the
+> single source of truth and **Syncthing / two-way sync is banned** — the "Mount vs Syncthing" guidance
+> below is retained only for historical context. D5 moves file access to open-remote-ssh (not a mount,
+> not a sync). Do not adopt Syncthing.
+
 Mount-based file access is an **alternative** to Syncthing for the Xpair file-access layer.
 Instead of syncing a local copy, the client mounts the host folder directly so there is a single
 source of truth: no sync daemon, no conflict files, no `.sync-conflict-*` clutter.

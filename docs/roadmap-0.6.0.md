@@ -38,7 +38,9 @@ highest-leverage decision of 0.6.0.
   **original command / subsystem FIRST** (not the pty):
   - **Remote exec / scp / rsync / sftp / VS Code Remote bootstrap** (`SSH_ORIGINAL_COMMAND` non-empty or
     a subsystem request — this includes `ssh -tt host cmd`, which has a pty *and* a command) → **pass
-    through untouched** under the account's login shell, never wrapped in tmux.
+    through untouched** under the account's login shell, never wrapped in tmux. (Current gap: the paired
+    gate serves **no** sftp subsystem today — `client/cli/xpair` forces legacy `scp -O` to work around it
+    — so D2/PR1 must add the sftp-subsystem arm for Remote-SSH/scp to work by default.)
   - **Interactive shell** (no command and no subsystem — the fall-through) → auto-attach the tmux-aqua
     session.
   - **Pure port-forwarding** (`ssh -N -L …` / `-R …`) runs **no** remote command, so the forced command
@@ -46,9 +48,8 @@ highest-leverage decision of 0.6.0.
 - **Payoff:** any standards-compliant SSH client — Orca, VS Code Remote, iTerm, phone clients
   (Blink/Termius) — becomes an Xpair client with **zero per-tool integration**.
 
-D2's companion design doc — `design-d2-ssh-frontdoor.md` (the ForceCommand routing table + tailnet bind),
-delivered in the companion PR #99 and co-merged with this roadmap — details the mechanism and is confirmed
-with the planner before any implementation. (The relative link resolves once both docs land on `develop`.)
+D2's companion design doc — [`design-d2-ssh-frontdoor.md`](design-d2-ssh-frontdoor.md) (the ForceCommand
+routing table + tailnet bind) — lands in this same PR and holds the confirmed mechanism and decisions.
 
 **D2 subsumes most of pairing.** With terminal transport handled by standard sshd, the pairing surface
 shrinks to identity / key-exchange + tailnet-join + the GUI-broker channel (D3). Pairing internals are
@@ -86,10 +87,12 @@ difference is the product.
 - "Folder access" means **open the REMOTE file over a remote protocol, not mount it locally.**
 - **Current mechanism = SMB mount** (`smbfs` → `/Volumes` via `xpair mount`). **Switch to
   open-remote-ssh** (the OSS extension, distributed via Open VSX).
-- There is already a **partial open-remote-ssh footprint** to verify and reuse rather than rebuild:
-  `client/ide/remotepair/product.overlay.json`, `client/ide/remotepair/ext/extension.js`,
-  `client/ide/remotepair/ext/ssh-connect-flow-requirement.test.js`, the onboarding walkthroughs, and a
-  Windows patch. The migration verifies this footprint and extends it; it does not start from scratch.
+- There is a **partial open-remote-ssh footprint**, but it cuts both ways — verify before reusing:
+  `client/ide/remotepair/product.overlay.json` already wires the extension in (reusable), **but**
+  `extension.js` and `ssh-connect-flow-requirement.test.js` currently enforce the *opposite* — Connect
+  deliberately stays inside Xpair surfaces and the test asserts **no** `openremotessh.openEmptyWindow`.
+  D5 must **change** those (and their test), not preserve them; treating them as reuse-as-is would keep a
+  regression guard that rejects the desired remote-SSH path.
 
 ## D6 — Orca/cmux compatibility via standards, not code
 
