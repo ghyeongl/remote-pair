@@ -696,24 +696,33 @@ enum XpairAuthorizedKeys {
         # clients. When enabled, route command/subsystem FIRST, tmux-attach only as the fall-through
         # (a pty is not "interactive": `ssh -tt host cmd` has both a pty and a command).
         if [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ]; then
-          # sftp subsystem → the sftp-server binary. Under a `command=` forced command the subsystem
-          # request surfaces in SSH_ORIGINAL_COMMAND, but its exact value is server/version dependent;
-          # ponytail: match tolerantly and validate behind the flag before flipping it on.
-          # Exact whole-string match on the subsystem token (server/version dependent) — NOT a substring
-          # glob, so a normal exec like `ssh host 'echo sftp-server'` or an scp to a path containing
-          # "sftp-server" is not misrouted here.
-          case "${SSH_ORIGINAL_COMMAND:-}" in
-            sftp|internal-sftp|sftp-server|/usr/libexec/sftp-server)
-              exec /usr/libexec/sftp-server ;;
-          esac
+          # sftp subsystem → the real sftp-server. Under a `command=` forced command, sshd sets
+          # SSH_ORIGINAL_COMMAND to the exact `Subsystem sftp <cmd>` value (incl. any args), NOT "sftp".
+          # Read that configured value and match it exactly — handles internal-sftp, a custom path, and
+          # arguments (e.g. `internal-sftp -f AUTH -l INFO`). Exec the real sftp-server binary;
+          # `internal-sftp` is an sshd-internal sentinel a forked child cannot invoke.
+          sftp_cmd=$(awk 'tolower($1)=="subsystem" && $2=="sftp" { $1=""; $2=""; sub(/^[ \t]+/,""); print; exit }' /etc/ssh/sshd_config 2>/dev/null)
+          if [ -n "$sftp_cmd" ] && [ "${SSH_ORIGINAL_COMMAND:-}" = "$sftp_cmd" ]; then
+            # shellcheck disable=SC2086 # intentional split of the configured subsystem args
+            set -- $sftp_cmd; first=$1; shift
+            case "$first" in
+              internal-sftp|sftp-server) exec /usr/libexec/sftp-server "$@" ;;
+              *) exec "$first" "$@" ;;
+            esac
+          fi
           # exec / scp / rsync / VS Code Remote bootstrap → the account login shell (matches stock sshd
           # env/PATH; not a hardcoded bash).
           if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
             exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND"
           fi
-          # interactive fall-through → attach-or-create the shared default session on the app's tmux-aqua
-          # server (SOCKET must match Config.swift's SOCKET; the self-test cross-checks this literal).
-          exec "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock new-session -A -s main
+          # interactive fall-through → attach the app-owned tmux-aqua server, but ONLY if its keeper is
+          # alive. Never let an SSH login START the server: a server spawned under sshd is not a child of
+          # XpairHost and runs without its AX/SR grant (HostManager.spawn owns the keeper). If it is not
+          # up, fall back to a plain login shell rather than occupy the socket with a permissionless server.
+          if "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock has-session -t _keeper 2>/dev/null; then
+            exec "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock new-session -A -s main
+          fi
+          exec "${SHELL:-/bin/zsh}" -l
         fi
 
         if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
@@ -1508,9 +1517,10 @@ enum PairingSecuritySelfTest {
         // like the 8890 cross-check above — the gate is a raw string with no Swift interpolation).
         let gate = XpairAuthorizedKeys.gateHelperScript()
         precondition(gate.contains("d2-frontdoor.enabled"))                                   // flag-gated
-        precondition(gate.contains("sftp|internal-sftp|sftp-server|/usr/libexec/sftp-server)")) // sftp subsystem arm (exact match)
-        precondition(gate.contains("/usr/libexec/sftp-server"))
+        precondition(gate.contains(#"tolower($1)=="subsystem" && $2=="sftp""#))               // sftp: match the configured Subsystem value
+        precondition(gate.contains("internal-sftp|sftp-server) exec /usr/libexec/sftp-server")) // exec the real sftp-server
         precondition(gate.contains(#"exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND""#))  // login-shell passthrough
+        precondition(gate.contains("has-session -t _keeper"))                                 // never spawn a rogue tmux server
         precondition(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
         precondition(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
         precondition(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
@@ -1884,8 +1894,7 @@ enum PairingSecuritySelfTest {
     private static func assertLedgerStatus(clientID: String, status: String, paired: Bool) {
         guard let ledger = try? readSelfTestLedger(),
               let rec = ledger.clients.first(where: { $0.clientID == clientID }) else {
-            assertionFailure("missing self-test ledger record \(clientID)")
-            return
+            preconditionFailure("missing self-test ledger record \(clientID)")
         }
         precondition(rec.status == status)
         precondition((rec.pairedAt != nil) == paired)
@@ -1907,7 +1916,7 @@ enum PairingSecuritySelfTest {
     private static func assertThrows(_ body: () throws -> Void) {
         do {
             try body()
-            assertionFailure("expected throw")
+            preconditionFailure("expected throw")
         } catch {
             return
         }
