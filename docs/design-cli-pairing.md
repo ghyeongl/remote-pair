@@ -22,7 +22,9 @@ stays frozen.
 
 - **Client** (`onboarding-bridge.js`, seams exported in #97): `fetchPairingMetadata` (HTTP :8891),
   `normalizePairingMetadata`, `canonicalPairingTranscript`, `signPairingTranscript`,
-  `pairingRequestPayload`, `sendUdpJSON`, then SSH-proof polling. `xpair onboard` = stub.
+  `pairingRequestPayload`, `sendUdpJSON`, then SSH-proof polling. Note: only the **native Rust** `xpair
+  onboard` is the deferred stub; the installed **bash** `xpair` CLI + `shared/install*` already implement
+  real onboarding — so the port replaces the JS/Rust-stub pairing path, not the bash onboarding.
 - **Host** (`PairingManager.swift`): metadata HTTP server, UDP server, `verify`, the accept window,
   `authorized_keys` install, the `xpair-ssh-gate`.
 
@@ -30,14 +32,22 @@ stays frozen.
 
 - **Client → cli-rs.** Real `xpair pair` (and `xpair onboard`) does the full flow in Rust:
   metadata pull → normalize → build canonical transcript → sign with the dedicated pairing key → UDP send
-  to `pairPort` → SSH proof. The #97 JS seams are a stepping stone; the real home is Rust, and the #97
+  to `pairPort` → SSH proof. The **proof step must replicate the JS exactly**: a fresh, non-multiplexed
+  connection with `IdentitiesOnly=yes -i pairing_ed25519` (and no `ControlMaster`), so an existing
+  ControlMaster/agent identity can't satisfy the proof in place of the pairing key. The #97 JS seams are a
+  stepping stone; the real home is Rust, and the #97
   **contract tests** (request fields + transcript framing vs `PairingManager.swift`) become the
   cross-language parity check. `onboarding-bridge.js` shrinks to **IPC + rendering** — it spawns
   `xpair pair` and streams its status JSON to the webview; it no longer builds transcripts or signs.
-- **Host → a CLI/daemon seam.** Expose the accept decision as a seam: **request-id + fingerprint in →
-  install-or-reject** (bound to the exact frozen in-memory pending request, per `acceptIncoming`).
-  `PairingManager.swift` stays the implementation (verify + hardened `authorized_keys` install); add a
-  thin entry point the GUI accept window calls instead of embedding the decision. The GUI becomes a thin
+  (The existing `cli()`→`run()` helper **buffers** stdout/stderr and resolves only on `close`, so live
+  status needs a small **streaming** spawn variant — line-delimited JSON on stdout — not the buffered one.)
+- **Host → a seam exposed BY the running host app.** The accept decision must execute **in the host app
+  process** — the verified pending request lives only in `PairingManager.shared.incoming` (in-memory), so
+  a standalone `xpair pair-accept` process can't re-derive it. The running app exposes a local IPC endpoint
+  (**request-id + fingerprint in → install-or-reject**, bound to the frozen in-memory request per
+  `acceptIncoming`); the GUI accept window (or a thin `xpair pair-accept` that just forwards to the app)
+  calls it. `PairingManager.swift` stays the implementation; the seam is the app-owned entry point. The
+  GUI becomes a thin
   renderer over that seam.
 
 ## How it composes with D2
@@ -62,14 +72,15 @@ difference is only the *entry UX*. Pairing just moves JS→Rust; the wire contra
 
 ## Confirmed decisions
 
-1. **Client status transport = reuse the bridge→CLI spawn** (stdout JSON stream — the established pattern
-   for the other `xpair` commands). No new daemon socket.
-2. **Host accept seam = a CLI subcommand `xpair pair-accept` now** (the §0.1 brain seam; the GUI accept
-   window shells out to it). Not sequenced after D3 — when the D3 resident daemon lands it can absorb/call
-   the same subcommand. **The seam must carry the frozen pending request's identity, not a bare
-   fingerprint**: the host verifies the incoming request in memory and `acceptIncoming(requestID:fingerprint:)`
-   binds the decision to the exact displayed request/key (bind display→installed, per the pairing security
-   model). So the subcommand takes the **request-id + fingerprint** the accept window is showing.
+1. **Client status transport = reuse the bridge→CLI spawn** pattern, but with a **streaming** variant —
+   the existing `cli()`→`run()` helper buffers and resolves only on `close`, so `xpair pair` emits
+   line-delimited JSON status and a small streaming spawn reads it. No new daemon socket.
+2. **Host accept seam = exposed by the running host app; `xpair pair-accept` forwards to it.** The accept
+   must run **in the app process** — the verified pending request lives in `PairingManager.shared.incoming`
+   (in-memory), so a standalone CLI can't re-derive it. The app owns the seam (a local IPC endpoint); the
+   GUI accept window (or a thin `xpair pair-accept` that forwards) calls it, passing the **request-id +
+   fingerprint** shown (bind display→installed via `acceptIncoming(requestID:fingerprint:)`). Not sequenced
+   after D3 — when the D3 resident daemon lands it absorbs this same app-owned seam.
 3. **Pairing key = keep the exact current path/format**: `RP_HOST_DIR/pairing_ed25519` (`PAIRING_KEY` in
    `onboarding-bridge.js` — `~/.xpair/host/pairing_ed25519`, ed25519, unencrypted, `0600`). cli-rs must
    produce the byte-identical key at that path and **reuse an existing key, never regenerate**
