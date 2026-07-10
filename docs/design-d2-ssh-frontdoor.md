@@ -54,7 +54,7 @@ request and route it. The four cases and the signals that distinguish them:
 | Case | Signal | Route |
 |------|--------|-------|
 | Interactive shell | TTY allocated (`[ -t 0 ]` / `SSH_TTY` set), `SSH_ORIGINAL_COMMAND` empty | `exec tmux-aqua attach` (attach-or-create the user's session) |
-| Remote exec (incl. VS Code Remote bootstrap, git, Orca agent) | `SSH_ORIGINAL_COMMAND` set, not a subsystem | `exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND"` (unchanged) |
+| Remote exec (incl. VS Code Remote bootstrap, git, Orca agent) | `SSH_ORIGINAL_COMMAND` set, not a subsystem | `exec "$SHELL" -c "$SSH_ORIGINAL_COMMAND"` — the **account's login shell**, matching stock sshd |
 | scp / rsync | `SSH_ORIGINAL_COMMAND` starts with `scp `/`rsync ` (a command) | same exec path (unchanged) |
 | sftp subsystem | subsystem request — sshd runs the forced command with `SSH_ORIGINAL_COMMAND=internal-sftp` (or `sftp-server`) | `exec` the sftp server, **not** `bash -lc` |
 | Pure port-forward (`ssh -N -L …`) | no session-exec channel opened → **the forced command never runs**; only the direct-tcpip channel opens, gated by `permitopen` | governed by the `authorized_keys` forwarding tokens, not the gate |
@@ -67,38 +67,45 @@ Key correctness points:
   still runs the gate, but `$SSH_ORIGINAL_COMMAND` is the subsystem token, not a shell command — piping
   it to `bash -lc` breaks sftp. The gate detects the subsystem token and `exec`s the platform
   sftp-server (`/usr/libexec/sftp-server`). Without this, "open remote file" over sftp/scp breaks.
-- **VS Code Remote / open-remote-ssh stays unbroken.** Its bootstrap runs as a remote **exec** (a shell
-  command over the exec channel), so it takes the unchanged exec arm — never wrapped in tmux. This is
-  what keeps D5 (open-remote-ssh migration) working on top of D2.
+- **Passthrough must use the account's login shell, not a hardcoded bash.** Stock sshd runs a remote
+  command under the user's login shell (`$SHELL -c`). The current gate forces `/bin/bash -lc`, which on a
+  zsh/fish account gives a different PATH/environment than stock sshd — breaking env-sensitive bootstraps.
+  The exec arm must delegate to `"$SHELL" -c "$SSH_ORIGINAL_COMMAND"` (falling back to a login shell only
+  if `$SHELL` is unset).
+- **VS Code Remote / open-remote-ssh needs BOTH exec and forwarding.** Its bootstrap runs as a remote
+  **exec** (takes the exec arm, never tmux), but the extension also requires `AllowTcpForwarding yes` and
+  forwards to its remote server port — so the forwarding policy below **cannot** stay locked to the RD
+  port if D5 (open-remote-ssh) is to work. This is the load-bearing constraint on the forwarding design.
 - **tmux-aqua attach mechanics** must not fight the existing session lifecycle (`_keeper`,
   `liveSessionCount`, the Updater's restart logic). The attach command reuses the bundled `tmux-aqua`
   wrapper and its socket path — it does not spawn a competing tmux server.
 
 ## Design — tailnet-only bind
 
-Two candidate mechanisms; the tradeoff is the core open decision.
+**Critical constraint: macOS Remote Login is launchd socket-activated, so `sshd_config ListenAddress`
+does not control the bind.** `com.openssh.sshd` runs from `ssh.plist`, where **launchd** owns the `ssh`
+socket and starts sshd in inetd/socket mode (`sshd -i`) per accepted connection. `ListenAddress` in
+`sshd_config` is therefore effectively ignored — launchd's listener still accepts on all interfaces even
+after a config rewrite. A `ListenAddress`-only plan is **not fail-closed**: port 22 stays open on
+non-tailnet interfaces while a reconciler believes it is tailnet-only. So the bind must be enforced at
+the socket/packet layer, not in `sshd_config`.
 
-**Option A — `ListenAddress` on the tailscale IP (lean).**
-Add `ListenAddress 100.x.y.z` (the host's tailscale CGNAT address) to sshd's config, dropping the
-`0.0.0.0` listener. Pros: uses stock sshd, no new process, minimal code. Cons: the tailscale address is
-assigned asynchronously at boot and can change (logout/relogin, node re-key); sshd must be (re)configured
-when the address appears/changes, and sshd started only after the tailscale interface is up. Needs a
-small reconcile step (watch the tailscale IP, rewrite the drop-in `ListenAddress`, reload sshd) and must
-fail closed (never fall back to `0.0.0.0`).
+**Primary mechanism — a `pf` rule that admits `:22` only on the tailscale interface.** A packet-filter
+anchor blocks inbound TCP/22 on every interface except the tailscale `utun`, and defaults to block (fail
+closed) when the tailscale interface is absent. This is enforcement-layer, immune to the launchd socket
+mode, and does not require editing Apple's `ssh.plist`. It keys off the interface, not the churny 100.x
+IP, so it survives address changes. A small reconcile step keeps the anchor loaded across reboots /
+tailscale up-down; if the anchor can't be loaded, sshd's socket should be disabled rather than left open.
 
-**Option B — tsnet userspace listener (heavier).**
-Embed a tsnet (Go) listener that terminates SSH on the tailnet in userspace, independent of the OS
-network stack. Pros: bound to the tailnet by construction, immune to interface timing/IP churn. Cons:
-a new embedded Go component + its own sshd, a large surface, and duplicates what the system daemon
-already provides. Runs against the roadmap's "no custom SSH server" and ponytail.
+**Alternative — restrict launchd's socket.** Editing `ssh.plist`'s `Sockets` to bind the tailnet
+address is possible but fragile (mutating an Apple-managed LaunchDaemon, re-applied on updates, and the
+100.x IP churns), so `pf` is preferred as primary.
 
-**Recommendation: Option A** — reuse system sshd, add a tailscale-IP `ListenAddress` drop-in plus a
-reconcile-on-change step that fails closed. It is the smaller, standards-aligned change and keeps the
-"system sshd, no custom server" invariant. Option B only if we later need SSH before/without the OS
-tailscale daemon.
+**Rejected — tsnet userspace listener.** tsnet is a Go library that would be its **own** SSH server, not
+a way to bind system sshd; it contradicts the roadmap's "no custom SSH server" and is out of scope.
 
-Independent of A/B, defense in depth: the macOS application firewall / packet filter should also deny
-`:22` on non-tailscale interfaces, so a misconfigured `ListenAddress` cannot silently expose the host.
+**Recommendation:** `pf` anchor as the primary, fail-closed bind (block `:22` off the tailscale `utun`),
+plus the reconcile step. Keep sshd itself stock.
 
 ## How D2 shrinks the pairing surface
 
@@ -113,17 +120,19 @@ change until D3. No pairing refactor rides D2.
 - No custom SSH server, no replacing sshd.
 - No change to the pairing protocol beyond what identity/key-exchange already does.
 - No new IDE/workbench features (D1 freeze).
-- The RD signaling forwarding stays locked to `permitopen=127.0.0.1:8890` unless a decision below loosens
-  it.
 
 ## Open decisions for the planner (confirm before implementation)
 
-1. **Bind mechanism: Option A (ListenAddress on tailscale IP + fail-closed reconcile) vs Option B
-   (tsnet).** Recommendation A. Confirm.
-2. **Forwarding policy.** Keep `permitopen` locked to the RD port (127.0.0.1:8890), or loosen it for
-   general client use? VS Code Remote does **not** need `-L` (it multiplexes over exec), so locked is
-   likely fine — but Orca or phone workflows that rely on `-L`/`-R` tunnels would need an explicit,
-   auditable allowance. Decision: keep locked (recommended) vs define an allowlist.
+1. **Bind mechanism.** `pf` anchor admitting `:22` only on the tailscale `utun`, fail-closed (recommended
+   — the launchd socket activation makes `sshd_config ListenAddress` ineffective, so this is not really
+   optional), vs editing the launchd `ssh.plist` socket. Confirm `pf`.
+2. **Forwarding policy — must loosen for D5.** Codex review corrected the earlier "keep locked" idea:
+   `open-remote-ssh` requires `AllowTcpForwarding yes` and forwards to its remote server port, so
+   `permitopen=127.0.0.1:8890` alone breaks the VS Code path. Recommended policy: **allow local (`-L`)
+   forwarding to loopback** (widen `permitopen` to `127.0.0.1` / the VS Code server port range so
+   open-remote-ssh works), and **disable remote (`-R`) forwarding** — note `permitopen` only limits `-L`;
+   `-R` needs `permitlisten` or must be denied, and the current paired line leaves `-R` un-narrowed. So:
+   widen `-L` to loopback + explicitly deny/narrow `-R` via `permitlisten`. Confirm the exact `-L` scope.
 3. **sftp/scp exposure.** Enabling the sftp arm makes the whole host filesystem reachable over sftp for
    any paired client. Acceptable given D4 (host is SSoT), or restrict to specific paths? Recommendation:
    allow (it is the same trust level as an interactive shell), but confirm.
