@@ -1534,9 +1534,13 @@ enum PairingSecuritySelfTest {
         precondition(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
         precondition(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
         precondition(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
-        // D2 hardening: -R-denial drop-in content + the osascript admin-escaping (backslash then quote).
+        // D2 hardening: -R-denial drop-in + osascript admin-escaping + pf loader (block en* only, utun
+        // default-allow) + the boot RunAtLoad one-shot.
         precondition(D2Hardening.sshdContent == "AllowTcpForwarding local\n")
         precondition(D2Hardening.osaCommand(#"printf 'x\n'"#) == #"do shell script "printf 'x\\n'" with administrator privileges"#)
+        precondition(D2Hardening.loaderScript.contains("grep '^en'"))                              // block physical en* only
+        precondition(D2Hardening.loaderScript.contains("block in quick proto tcp on & to any port 22"))
+        precondition(D2Hardening.plistContent.contains("com.x10lab.xpair.pf") && D2Hardening.plistContent.contains("RunAtLoad"))
         print("pairing security self-test passed")
     }
 
