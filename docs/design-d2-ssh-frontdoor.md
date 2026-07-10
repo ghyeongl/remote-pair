@@ -48,21 +48,21 @@ So D2 is a **targeted change to an existing gate + a bind**, not a new subsystem
 
 ## Design — the ForceCommand routing table
 
-The gate runs once per SSH session channel, after ledger authorization succeeds. It must classify the
-request and route it. The four cases and the signals that distinguish them:
+The gate runs once per SSH session channel, after ledger authorization succeeds. It classifies the
+request **in this precedence order** — command/subsystem **first**, tmux only as the fall-through:
 
-| Case | Signal | Route |
-|------|--------|-------|
-| Interactive shell | TTY allocated (`[ -t 0 ]` / `SSH_TTY` set), `SSH_ORIGINAL_COMMAND` empty | `exec tmux-aqua attach` (attach-or-create the user's session) |
-| Remote exec (incl. VS Code Remote bootstrap, git, Orca agent) | `SSH_ORIGINAL_COMMAND` set, not a subsystem | `exec "$SHELL" -c "$SSH_ORIGINAL_COMMAND"` — the **account's login shell**, matching stock sshd |
-| scp / rsync | `SSH_ORIGINAL_COMMAND` starts with `scp `/`rsync ` (a command) | same exec path (unchanged) |
-| sftp subsystem | subsystem request — sshd runs the forced command with `SSH_ORIGINAL_COMMAND=internal-sftp` (or `sftp-server`) | `exec` the sftp server, **not** `bash -lc` |
-| Pure port-forward (`ssh -N -L …`) | no session-exec channel opened → **the forced command never runs**; only the direct-tcpip channel opens, gated by `permitopen` | governed by the `authorized_keys` forwarding tokens, not the gate |
+| # | Case | Signal (checked in order) | Route |
+|---|------|---------------------------|-------|
+| 1 | sftp subsystem | subsystem request — `SSH_ORIGINAL_COMMAND` is the subsystem token (`internal-sftp`/`sftp-server`) | `exec` the platform sftp-server, **not** a shell |
+| 2 | Remote exec / scp / rsync (incl. VS Code Remote bootstrap, git, Orca, **and `ssh -tt host cmd`**) | `SSH_ORIGINAL_COMMAND` is **non-empty** | `exec "$SHELL" -c "$SSH_ORIGINAL_COMMAND"` — the account's login shell, matching stock sshd |
+| 3 | Interactive shell | `SSH_ORIGINAL_COMMAND` **empty** (fall-through) | `exec tmux-aqua attach` (attach-or-create the user's session) |
+| — | Pure port-forward (`ssh -N -L …`) | no session-exec channel opened → **the forced command never runs**; only the direct-tcpip channel opens | governed by the `authorized_keys` forwarding policy, not the gate |
 
 Key correctness points:
-- **Interactive detection uses the TTY, not the absence of `SSH_ORIGINAL_COMMAND` alone.** A pty is
-  requested iff the client asked for an interactive/`-t` session. This cleanly separates "attach tmux"
-  from "run a command."
+- **Route on `SSH_ORIGINAL_COMMAND` / subsystem FIRST, not on the pty.** A pty is not a reliable
+  "interactive" signal: `ssh -tt host cmd` allocates a pty **and** sends a command, so pty-based
+  detection would wrongly attach a remote exec to tmux. tmux-attach is the fall-through only when there
+  is no command and no subsystem.
 - **sftp must be special-cased.** With a forced command in `authorized_keys`, an sftp subsystem request
   still runs the gate, but `$SSH_ORIGINAL_COMMAND` is the subsystem token, not a shell command — piping
   it to `bash -lc` breaks sftp. The gate detects the subsystem token and `exec`s the platform
