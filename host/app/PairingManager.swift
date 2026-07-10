@@ -691,6 +691,28 @@ enum XpairAuthorizedKeys {
             ;;
         esac
 
+        # D2 front-door routing, behind a flag ($HOME/.xpair/host/d2-frontdoor.enabled). When the flag is
+        # absent (default) the legacy path below runs unchanged, so an unvalidated change cannot lock out
+        # clients. When enabled, route command/subsystem FIRST, tmux-attach only as the fall-through
+        # (a pty is not "interactive": `ssh -tt host cmd` has both a pty and a command).
+        if [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ]; then
+          # sftp subsystem → the sftp-server binary. Under a `command=` forced command the subsystem
+          # request surfaces in SSH_ORIGINAL_COMMAND, but its exact value is server/version dependent;
+          # ponytail: match tolerantly and validate behind the flag before flipping it on.
+          case "${SSH_ORIGINAL_COMMAND:-}" in
+            *sftp-server*|*internal-sftp*|sftp)
+              exec /usr/libexec/sftp-server ;;
+          esac
+          # exec / scp / rsync / VS Code Remote bootstrap → the account login shell (matches stock sshd
+          # env/PATH; not a hardcoded bash).
+          if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+            exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND"
+          fi
+          # interactive fall-through → attach-or-create the shared default session on the app's tmux-aqua
+          # server (SOCKET must match Config.swift's SOCKET; the self-test cross-checks this literal).
+          exec "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock new-session -A -s main
+        fi
+
         if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
           exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND"
         fi
@@ -1478,6 +1500,17 @@ enum PairingSecuritySelfTest {
         try installPreservesUnmarkedSameBlobAuthorizedKey(pubLine: pubLine)
         try installRemovesMarkedDuplicateAuthorizedKey(pubLine: pubLine)
         try installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: pubLine)
+        // D2 gate routing (behind the d2-frontdoor flag): command/subsystem-first, tmux fall-through,
+        // legacy path preserved. The SOCKET literal in the gate must match Config's SOCKET (drift guard,
+        // like the 8890 cross-check above — the gate is a raw string with no Swift interpolation).
+        let gate = XpairAuthorizedKeys.gateHelperScript()
+        assert(gate.contains("d2-frontdoor.enabled"))                                   // flag-gated
+        assert(gate.contains("*sftp-server*|*internal-sftp*|sftp)"))                     // sftp subsystem arm
+        assert(gate.contains("/usr/libexec/sftp-server"))
+        assert(gate.contains(#"exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND""#))  // login-shell passthrough
+        assert(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
+        assert(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
+        assert(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
         print("pairing security self-test passed")
     }
 
