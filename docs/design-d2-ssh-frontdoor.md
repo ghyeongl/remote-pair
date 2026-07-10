@@ -1,6 +1,6 @@
 # D2 — System sshd as the standard front door (design)
 
-**Status: design only. No implementation until the planner confirms the open decisions below.**
+**Status: design confirmed. Decisions below are settled; implementation follows in PR1 (gate routing) then PR2 (pf bind + forwarding).**
 
 D2 (see [`roadmap-0.6.0.md`](roadmap-0.6.0.md)) makes the OS's own sshd the single SSH front door, bound
 to the tailnet only, with a ForceCommand that auto-attaches tmux-aqua for interactive sessions and passes
@@ -121,28 +121,30 @@ change until D3. No pairing refactor rides D2.
 - No change to the pairing protocol beyond what identity/key-exchange already does.
 - No new IDE/workbench features (D1 freeze).
 
-## Open decisions for the planner (confirm before implementation)
+## Confirmed decisions
 
-1. **Bind mechanism.** `pf` anchor admitting `:22` only on the tailscale `utun`, fail-closed (recommended
-   — the launchd socket activation makes `sshd_config ListenAddress` ineffective, so this is not really
-   optional), vs editing the launchd `ssh.plist` socket. Confirm `pf`.
-2. **Forwarding policy — must loosen for D5.** Codex review corrected the earlier "keep locked" idea:
-   `open-remote-ssh` requires `AllowTcpForwarding yes` and forwards to its remote server port, so
-   `permitopen=127.0.0.1:8890` alone breaks the VS Code path. Recommended policy: **allow local (`-L`)
-   forwarding to loopback** (widen `permitopen` to `127.0.0.1` / the VS Code server port range so
-   open-remote-ssh works), and **disable remote (`-R`) forwarding** — note `permitopen` only limits `-L`;
-   `-R` needs `permitlisten` or must be denied, and the current paired line leaves `-R` un-narrowed. So:
-   widen `-L` to loopback + explicitly deny/narrow `-R` via `permitlisten`. Confirm the exact `-L` scope.
-3. **sftp/scp exposure.** Enabling the sftp arm makes the whole host filesystem reachable over sftp for
-   any paired client. Acceptable given D4 (host is SSoT), or restrict to specific paths? Recommendation:
-   allow (it is the same trust level as an interactive shell), but confirm.
-4. **tmux-aqua attach semantics.** One shared session per client, or attach-or-create per connection?
-   And behavior when the host has an active GUI operator — attach read/write, or view-only? This touches
-   the intervention-window model; needs a product call.
-5. **Rollout / migration.** Ship behind a flag and keep the current `exec $SHELL -l` interactive arm as
-   fallback during rollout, or switch directly? Recommendation: flag it, since it changes what every
-   interactive SSH lands in.
+1. **Bind = `pf` anchor.** Admit inbound `:22` only on the tailscale `utun`, fail closed, keyed off the
+   interface (so 100.x IP churn is irrelevant). Not `sshd_config ListenAddress` (ignored under launchd
+   socket activation), not tsnet (own server). sshd stays stock.
+2. **Forwarding = loosen `-L` to loopback, lock `-R`.** Widen `permitopen` to **all of `127.0.0.1`** (any
+   loopback port — open-remote-ssh negotiates a dynamic loopback port, so a fixed range is fragile; and a
+   paired client already has a shell that can reach any loopback port, so this grants nothing beyond the
+   shell). Deny remote forwarding by default via `permitlisten` — `permitopen` only limits `-L`, and the
+   current paired line leaves `-R` un-narrowed; that gets fixed.
+3. **sftp/scp = allow, no path restriction.** A paired client already has an interactive shell (full FS
+   read/write), so sftp/scp is the same trust level, not new exposure; path-restricting it while the shell
+   is open is theater. Consistent with D4 (host = SSoT). Fix the sftp **subsystem** arm the current single
+   `SSH_ORIGINAL_COMMAND` test breaks.
+4. **tmux-aqua attach (MVP) = attach-or-create the default session, shared read/write.** Standard tmux
+   multi-attach; every SSH client lands in the one persistent shared session. Per-session routing by
+   cwd/agent and the **view-only / intervention-lock when a GUI operator is active** are **D3 + Leaf #3
+   follow-ups — explicitly NOT in the D2 front-door PRs.**
+5. **Rollout = behind a flag.** The gate is access-critical (a bad change locks out every client), so ship
+   behind a flag with the current `exec $SHELL -l` + passthrough as the fallback; flip after validation.
 
-I'll implement incrementally in follow-up PRs once these are confirmed: (1) gate routing table
-(interactive→tmux, sftp arm), (2) tailnet bind + fail-closed reconcile, each its own PR through the Codex
-gate.
+Implementation, incremental, each through the Codex gate:
+- **PR1 — gate routing table** (behind the flag): command/subsystem-first routing — sftp subsystem →
+  sftp-server; exec/scp/rsync/VS Code bootstrap/Orca → `"$SHELL" -c` passthrough; interactive
+  fall-through → tmux-aqua attach.
+- **PR2 — `pf` tailnet anchor + fail-closed reconcile**, plus the forwarding-policy change to the paired
+  `authorized_keys` line (`permitopen=127.0.0.1` for `-L`, `permitlisten` deny for `-R`).
