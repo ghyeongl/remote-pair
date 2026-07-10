@@ -701,7 +701,9 @@ enum XpairAuthorizedKeys {
           # Read that configured value and match it exactly — handles internal-sftp, a custom path, and
           # arguments (e.g. `internal-sftp -f AUTH -l INFO`). Exec the real sftp-server binary;
           # `internal-sftp` is an sshd-internal sentinel a forked child cannot invoke.
-          sftp_cmd=$(awk 'tolower($1)=="subsystem" && $2=="sftp" { $1=""; $2=""; sub(/^[ \t]+/,""); print; exit }' /etc/ssh/sshd_config 2>/dev/null)
+          # `|| true`: a hardened/`-f`-started sshd may leave sshd_config unreadable; awk's non-zero exit
+          # must NOT trip `set -e` and reject every session — just fall through to exec/tmux.
+          sftp_cmd=$(awk 'tolower($1)=="subsystem" && $2=="sftp" { $1=""; $2=""; sub(/^[ \t]+/,""); print; exit }' /etc/ssh/sshd_config 2>/dev/null || true)
           if [ -n "$sftp_cmd" ] && [ "${SSH_ORIGINAL_COMMAND:-}" = "$sftp_cmd" ]; then
             # shellcheck disable=SC2086 # intentional split of the configured subsystem args
             set -- $sftp_cmd; first=$1; shift
