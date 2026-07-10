@@ -29,22 +29,26 @@ Replace any custom SSH transport with the OS's own sshd (macOS Remote Login). Th
 highest-leverage decision of 0.6.0.
 
 - **No custom SSH server.** Use system sshd.
-- **Tailnet-only bind.** System sshd binds to the host's **tailscale interface address only**
-  (`ListenAddress` on the 100.x tailnet IP), never `0.0.0.0` — zero public exposure. (tsnet is a Go
-  library that would be its *own* userspace SSH server, not a way to bind system sshd, so it is not the
-  bind mechanism here; see the design doc for that tradeoff.)
-- **ForceCommand → tmux-aqua auto-attach, with a conditional branch** on SSH entry:
-  - **Interactive shell** (a pty is allocated) → auto-attach the tmux-aqua session.
-  - **Remote exec / scp / rsync / sftp / VS Code Remote bootstrap** (`SSH_ORIGINAL_COMMAND` or a
-    subsystem request) → **pass through untouched**, never wrapped in tmux.
+- **Tailnet-only reachability.** SSH must be reachable on the tailscale interface only — zero public
+  exposure. Note macOS Remote Login is **launchd socket-activated** (launchd owns the listening socket,
+  sshd runs `-i`), so `sshd_config`'s `ListenAddress` does **not** control the bind and is not
+  fail-closed; the bind is enforced at the packet/socket layer (a `pf` rule admitting `:22` only on the
+  tailscale `utun`, fail-closed). tsnet is rejected (it would be its own SSH server). See the design doc.
+- **ForceCommand → tmux-aqua auto-attach, with a conditional branch** on SSH entry, keyed on the
+  **original command / subsystem FIRST** (not the pty):
+  - **Remote exec / scp / rsync / sftp / VS Code Remote bootstrap** (`SSH_ORIGINAL_COMMAND` non-empty or
+    a subsystem request — this includes `ssh -tt host cmd`, which has a pty *and* a command) → **pass
+    through untouched** under the account's login shell, never wrapped in tmux.
+  - **Interactive shell** (no command and no subsystem — the fall-through) → auto-attach the tmux-aqua
+    session.
   - **Pure port-forwarding** (`ssh -N -L …` / `-R …`) runs **no** remote command, so the forced command
     never executes; forwarding is governed by the `authorized_keys` forwarding policy, not the branch.
 - **Payoff:** any standards-compliant SSH client — Orca, VS Code Remote, iTerm, phone clients
   (Blink/Termius) — becomes an Xpair client with **zero per-tool integration**.
 
-D2's companion design doc — [`design-d2-ssh-frontdoor.md`](design-d2-ssh-frontdoor.md) (the ForceCommand
-routing table + tailnet bind) — is delivered alongside this roadmap and confirmed with the planner before
-any implementation.
+D2's companion design doc — `design-d2-ssh-frontdoor.md` (the ForceCommand routing table + tailnet bind),
+delivered in the companion PR #99 and co-merged with this roadmap — details the mechanism and is confirmed
+with the planner before any implementation. (The relative link resolves once both docs land on `develop`.)
 
 **D2 subsumes most of pairing.** With terminal transport handled by standard sshd, the pairing surface
 shrinks to identity / key-exchange + tailnet-join + the GUI-broker channel (D3). Pairing internals are
