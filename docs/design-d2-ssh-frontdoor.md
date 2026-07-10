@@ -155,6 +155,12 @@ pairing-protocol refactor rides D2; the JS→Rust *move* is the separate CLI-pai
    follow-ups — explicitly NOT in the D2 front-door PRs.**
 5. **Rollout = behind a flag.** The gate is access-critical (a bad change locks out every client), so ship
    behind a flag with the current `exec $SHELL -l` + passthrough as the fallback; flip after validation.
+   **Flag scope:** `d2-frontdoor.enabled` controls the gate **routing only**. The privileged host
+   hardening (the tailnet `pf` bind + the `-R`-denial sshd drop-in) is the strategy's "zero public
+   exposure" posture, orthogonal to routing — it **persists regardless of the flag** and is removed only
+   via `uninstall-host.sh` (never silently on flag-off, which would be a security downgrade + an admin
+   re-prompt for a downgrade). If the admin prompt is declined, the flag is *removed* so the front door
+   never runs unhardened.
 
 Implementation, incremental, each through the Codex gate:
 - **PR1 — gate routing table** (behind the flag): command/subsystem-first routing — sftp subsystem →
