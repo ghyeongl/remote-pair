@@ -45,7 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // D2: when the SSH front door is enabled, ensure the privileged hardening (-R denial + pf tailnet
         // bind) is applied. Verify at launch; the one-time GUI admin prompt only appears if missing/drifted.
         if FileManager.default.fileExists(atPath: "\(RP_DIR)/d2-frontdoor.enabled"), !D2Hardening.applied() {
-            D2Hardening.apply()
+            if !D2Hardening.apply() {
+                log(.error, "D2 hardening not applied (admin prompt cancelled or failed) — SSH is NOT tailnet-restricted and -R is not denied; re-prompting on next launch")
+            }
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // Menu-bar icon: monochrome template (auto-adapts to light/dark menu bar).
