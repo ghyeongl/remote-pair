@@ -29,17 +29,22 @@ Replace any custom SSH transport with the OS's own sshd (macOS Remote Login). Th
 highest-leverage decision of 0.6.0.
 
 - **No custom SSH server.** Use system sshd.
-- **Tailnet-only bind.** sshd is bound to the **tailscale/tsnet interface only** — zero public exposure.
-  No port is reachable off the tailnet.
+- **Tailnet-only bind.** System sshd binds to the host's **tailscale interface address only**
+  (`ListenAddress` on the 100.x tailnet IP), never `0.0.0.0` — zero public exposure. (tsnet is a Go
+  library that would be its *own* userspace SSH server, not a way to bind system sshd, so it is not the
+  bind mechanism here; see the design doc for that tradeoff.)
 - **ForceCommand → tmux-aqua auto-attach, with a conditional branch** on SSH entry:
-  - **Interactive TTY** (no `SSH_ORIGINAL_COMMAND`) → auto-attach the tmux-aqua session.
-  - **Non-interactive** (`SSH_ORIGINAL_COMMAND` present — remote exec, scp/sftp, `-L`/`-R` port tunnels,
-    VS Code Remote bootstrap) → **pass through untouched**, never wrapped in tmux.
+  - **Interactive shell** (a pty is allocated) → auto-attach the tmux-aqua session.
+  - **Remote exec / scp / rsync / sftp / VS Code Remote bootstrap** (`SSH_ORIGINAL_COMMAND` or a
+    subsystem request) → **pass through untouched**, never wrapped in tmux.
+  - **Pure port-forwarding** (`ssh -N -L …` / `-R …`) runs **no** remote command, so the forced command
+    never executes; forwarding is governed by the `authorized_keys` forwarding policy, not the branch.
 - **Payoff:** any standards-compliant SSH client — Orca, VS Code Remote, iTerm, phone clients
   (Blink/Termius) — becomes an Xpair client with **zero per-tool integration**.
 
-D2 has its own design doc: [`design-d2-ssh-frontdoor.md`](design-d2-ssh-frontdoor.md) (the ForceCommand
-branch + tailnet bind), which is confirmed with the planner before any implementation.
+D2's companion design doc — [`design-d2-ssh-frontdoor.md`](design-d2-ssh-frontdoor.md) (the ForceCommand
+routing table + tailnet bind) — is delivered alongside this roadmap and confirmed with the planner before
+any implementation.
 
 **D2 subsumes most of pairing.** With terminal transport handled by standard sshd, the pairing surface
 shrinks to identity / key-exchange + tailnet-join + the GUI-broker channel (D3). Pairing internals are
@@ -51,7 +56,12 @@ therefore **frozen/minimal** — no deep refactor beyond the shipped correctness
 A daemon **resident in the GUI login session** — this is what raw sshd cannot do and is Xpair's real moat.
 It brokers GUI-context capabilities:
 
-- **TCC auto-approve** against an explicit whitelist, with an **audit log** of every grant.
+- **TCC consent handled in the GUI session** — because the broker lives in the logged-in GUI session
+  (with Accessibility), it can **answer/approve TCC consent prompts** against an explicit whitelist and
+  record an **audit log** of every approval. Note: this is *responding to prompts in the live session*,
+  not a silent API grant — macOS does **not** allow programmatic TCC grants on the standard SIP-enabled,
+  non-MDM host, so the initial Accessibility + Screen Recording grant remains the documented one-time
+  manual step (see README). The broker's value is handling the *ongoing* prompts a headless shell can't.
 - Computer use (host-side automation in the logged-in GUI).
 - Claude in Chrome (browser control in the GUI session).
 
