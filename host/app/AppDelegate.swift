@@ -42,6 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.terminate(nil); return
         }
         Installer.ensureInstalled()     // self-install on first run of a downloaded .app (no-op if already installed)
+        // D2: when the SSH front door is enabled, ensure the -R-denial sshd drop-in is applied. Verify at
+        // launch; the one-time GUI admin prompt only appears if it is missing/drifted.
+        if FileManager.default.fileExists(atPath: "\(RP_DIR)/d2-frontdoor.enabled"), !D2Hardening.sshdApplied() {
+            D2Hardening.applySshd()
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // Menu-bar icon: monochrome template (auto-adapts to light/dark menu bar).
         // Loaded by name from Resources (menubar.png + menubar@2x.png). Falls back to text glyph.

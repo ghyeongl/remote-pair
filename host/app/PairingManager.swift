@@ -1534,6 +1534,9 @@ enum PairingSecuritySelfTest {
         precondition(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
         precondition(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
         precondition(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
+        // D2 hardening: -R-denial drop-in content + the osascript admin-escaping (backslash then quote).
+        precondition(D2Hardening.sshdContent == "AllowTcpForwarding local\n")
+        precondition(D2Hardening.osaCommand(#"printf 'x\n'"#) == #"do shell script "printf 'x\\n'" with administrator privileges"#)
         print("pairing security self-test passed")
     }
 
