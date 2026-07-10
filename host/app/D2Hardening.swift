@@ -6,31 +6,33 @@
 // missing/drifted. Two pieces:
 //   • -R denial  → /etc/ssh/sshd_config.d/00-xpair-d2.conf = "AllowTcpForwarding local" (the `00-` prefix
 //     wins sshd's first-value-per-keyword among drop-ins, which macOS Includes before the main file body).
-//   • tailnet bind → a pf anchor that blocks :22 on physical en* (LAN/public), leaving utun (VPN/tailscale)
-//     + lo default-allow, loaded at boot by a RunAtLoad one-shot. Blocking physical (not "all except the
-//     tailscale utun") means a headless agent Mac can't be locked out of SSH by a boot-before-tailscale
-//     race or utun churn — the real threat (public/LAN exposure) is still closed.
+//   • tailnet bind → a pf anchor that blocks :22 on every interface EXCEPT loopback + utun (VPN/tailscale),
+//     loaded at boot by a RunAtLoad one-shot. Allowing utun (never blocking it) means a headless agent Mac
+//     can't be locked out by a boot-before-tailscale race or utun churn, while en*/bridge/VLAN/etc. — the
+//     LAN/public surface — stay closed.
+//
+// The privileged command carries the file bytes as base64 embedded in the (admin-authorized) osascript
+// string and writes them as root itself — there is NO user-writable stage a same-UID process could swap
+// between write and a root copy.
 
 import Foundation
 
 enum D2Hardening {
     static let sshdDropIn = "/etc/ssh/sshd_config.d/00-xpair-d2.conf"
     static let sshdContent = "AllowTcpForwarding local\n"
-    // Root-owned dir (installed root:wheel 0755) — NOT /usr/local, which is group/user-writable on
-    // Homebrew Macs and would let a local user replace a script the root LaunchDaemon runs.
     static let supportDir = "/Library/Application Support/Xpair"
     static let pfLoader = "\(supportDir)/xpair-pf.sh"
     static let pfPlist = "/Library/LaunchDaemons/com.x10lab.xpair.pf.plist"
     static let pfAnchor = "/etc/pf.anchors/com.x10lab.xpair"
+    static let pfConfMarker = "anchor \"com.x10lab.xpair\""
 
-    // ponytail: block :22 on en* only (Wi-Fi/Ethernet = the LAN/public surface); utun + lo default-allow,
-    // so a tailscale utun appearing/reconnecting is never locked out. Refreshed at boot (RunAtLoad) + app
-    // launch; a NIC hot-added without a reboot isn't blocked until the next boot — accepted on a dedicated
-    // host that rarely hot-adds physical interfaces.
+    // ponytail: block :22 on every interface except lo*/utun* (utun = VPN/tailscale, default-allow so a
+    // reconnect onto a new utun is never locked out). Refreshed at boot (RunAtLoad) + app-launch apply; a
+    // NIC hot-added without a reboot isn't blocked until the next boot — accepted on a dedicated host.
     static let loaderScript = """
     #!/bin/sh
     anchor=\(pfAnchor)
-    ifconfig -l | tr ' ' '\\n' | grep '^en' | sed 's/.*/block in quick proto tcp on & to any port 22/' > "$anchor"
+    ifconfig -l | tr ' ' '\\n' | grep -vE '^(lo|utun)' | sed 's/.*/block in quick proto tcp on & to any port 22/' > "$anchor"
     grep -q 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || \
       printf '\\nanchor "com.x10lab.xpair"\\nload anchor "com.x10lab.xpair" from "%s"\\n' "$anchor" >> /etc/pf.conf
     pfctl -f /etc/pf.conf 2>/dev/null || true
@@ -51,41 +53,35 @@ enum D2Hardening {
         (try? String(contentsOfFile: path, encoding: .utf8)) == expected
     }
 
-    // Verify CONTENT (not mere existence), so a stale/truncated file re-applies.
+    private static func pfConfHasAnchor() -> Bool {
+        ((try? String(contentsOfFile: "/etc/pf.conf", encoding: .utf8)) ?? "").contains(pfConfMarker)
+    }
+
+    // Verify CONTENT + the /etc/pf.conf hook, not mere existence — so a stale/truncated file OR a pf.conf
+    // that lost the anchor line re-applies.
     static func applied() -> Bool {
-        fileEquals(sshdDropIn, sshdContent) && fileEquals(pfLoader, loaderScript) && fileEquals(pfPlist, plistContent)
+        fileEquals(sshdDropIn, sshdContent) && fileEquals(pfLoader, loaderScript)
+            && fileEquals(pfPlist, plistContent) && pfConfHasAnchor()
     }
 
     /// One-time privileged apply (both pieces) via the GUI admin prompt. No-op if already applied.
     @discardableResult
     static func apply() -> Bool {
         if applied() { return true }
-        // Stage into a fresh 0700 dir with an unguessable name so no other process running as this user can
-        // swap a file between write and the root install (TOCTOU). Single-quote every path in the root
-        // command in case TMPDIR contains spaces/metacharacters.
-        let fm = FileManager.default
-        let stage = fm.temporaryDirectory.appendingPathComponent("xpair-d2-\(UUID().uuidString)")
-        let cSshd = stage.appendingPathComponent("00-xpair-d2.conf")
-        let cLoader = stage.appendingPathComponent("xpair-pf.sh")
-        let cPlist = stage.appendingPathComponent("com.x10lab.xpair.pf.plist")
-        do {
-            try fm.createDirectory(at: stage, withIntermediateDirectories: true,
-                                   attributes: [.posixPermissions: 0o700])
-            try sshdContent.write(to: cSshd, atomically: true, encoding: .utf8)
-            try loaderScript.write(to: cLoader, atomically: true, encoding: .utf8)
-            try plistContent.write(to: cPlist, atomically: true, encoding: .utf8)
-        } catch { return false }
-        defer { try? fm.removeItem(at: stage) }
-        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
+        // Root writes the files itself from base64 (safe single tokens — no user stage, no shell-metachar
+        // escaping). `set -e` aborts on any failure; the launchctl reload is the only non-fatal step.
         let shell = [
+            "set -e",
+            "umask 077",
             "install -d /etc/ssh/sshd_config.d",
-            "install -d -o root -g wheel -m 755 \(q(supportDir))",
-            "install -m 644 \(q(cSshd.path)) \(q(sshdDropIn))",
-            "install -o root -g wheel -m 755 \(q(cLoader.path)) \(q(pfLoader))",
-            "install -m 644 \(q(cPlist.path)) \(q(pfPlist))",
-            "launchctl load -w \(q(pfPlist)) 2>/dev/null || true",
-            "/bin/sh \(q(pfLoader))",
-        ].joined(separator: " && ")
+            "install -d -o root -g wheel -m 755 '\(supportDir)'",
+            "printf %s '\(b64(sshdContent))' | base64 -D > '\(sshdDropIn)'; chmod 644 '\(sshdDropIn)'",
+            "printf %s '\(b64(loaderScript))' | base64 -D > '\(pfLoader)'; chown root:wheel '\(pfLoader)'; chmod 755 '\(pfLoader)'",
+            "printf %s '\(b64(plistContent))' | base64 -D > '\(pfPlist)'; chmod 644 '\(pfPlist)'",
+            "{ launchctl load -w '\(pfPlist)' 2>/dev/null || true; }",
+            "/bin/sh '\(pfLoader)'",
+        ].joined(separator: "; ")
         return runAdmin(shell)
     }
 

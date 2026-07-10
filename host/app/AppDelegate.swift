@@ -44,9 +44,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Installer.ensureInstalled()     // self-install on first run of a downloaded .app (no-op if already installed)
         // D2: when the SSH front door is enabled, ensure the privileged hardening (-R denial + pf tailnet
         // bind) is applied. Verify at launch; the one-time GUI admin prompt only appears if missing/drifted.
-        if FileManager.default.fileExists(atPath: "\(RP_DIR)/d2-frontdoor.enabled"), !D2Hardening.applied() {
+        let d2Flag = "\(RP_DIR)/d2-frontdoor.enabled"
+        if FileManager.default.fileExists(atPath: d2Flag), !D2Hardening.applied() {
             if !D2Hardening.apply() {
-                log(.error, "D2 hardening not applied (admin prompt cancelled or failed) — SSH is NOT tailnet-restricted and -R is not denied; re-prompting on next launch")
+                // Fail SAFE: hardening didn't apply, so do NOT run the D2 front door unhardened (-R open,
+                // physical :22 open). Disable the flag → the gate falls back to the legacy path until the
+                // next launch re-prompts and it succeeds.
+                try? FileManager.default.removeItem(atPath: d2Flag)
+                log(.error, "D2 hardening not applied (admin prompt cancelled/failed) — disabled the D2 front door (removed \(d2Flag)); re-enable to retry")
             }
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
