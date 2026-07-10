@@ -24,19 +24,22 @@ enum D2Hardening {
     static let pfLoader = "\(supportDir)/xpair-pf.sh"
     static let pfPlist = "/Library/LaunchDaemons/com.x10lab.xpair.pf.plist"
     static let pfAnchor = "/etc/pf.anchors/com.x10lab.xpair"
-    static let pfConfMarker = "anchor \"com.x10lab.xpair\""
+    // The exact load line (not the bare `anchor "…"` substring, which also matches the load line or a
+    // comment and would pass on a partially-edited pf.conf).
+    static let pfConfMarker = "load anchor \"com.x10lab.xpair\" from \"\(pfAnchor)\""
 
     // ponytail: block :22 on every interface except lo*/utun* (utun = VPN/tailscale, default-allow so a
     // reconnect onto a new utun is never locked out). Refreshed at boot (RunAtLoad) + app-launch apply; a
     // NIC hot-added without a reboot isn't blocked until the next boot — accepted on a dedicated host.
     static let loaderScript = """
     #!/bin/sh
+    set -e
     anchor=\(pfAnchor)
     ifconfig -l | tr ' ' '\\n' | grep -vE '^(lo|utun)' | sed 's/.*/block in quick proto tcp on & to any port 22/' > "$anchor"
-    grep -q 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || \
+    grep -q 'load anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || \
       printf '\\nanchor "com.x10lab.xpair"\\nload anchor "com.x10lab.xpair" from "%s"\\n' "$anchor" >> /etc/pf.conf
-    pfctl -f /etc/pf.conf 2>/dev/null || true
-    pfctl -E 2>/dev/null || true
+    pfctl -f /etc/pf.conf              # must succeed — set -e aborts (loader non-zero → apply() false → D2 flag removed)
+    pfctl -e 2>/dev/null || true       # enable if off; benign if already on. `-e` (not `-E`) so we don't leak PF enable-refs
     """
 
     static let plistContent = """
@@ -53,15 +56,20 @@ enum D2Hardening {
         (try? String(contentsOfFile: path, encoding: .utf8)) == expected
     }
 
-    private static func pfConfHasAnchor() -> Bool {
-        ((try? String(contentsOfFile: "/etc/pf.conf", encoding: .utf8)) ?? "").contains(pfConfMarker)
+    private static func fileContains(_ path: String, _ needle: String) -> Bool {
+        ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").contains(needle)
     }
 
-    // Verify CONTENT + the /etc/pf.conf hook, not mere existence — so a stale/truncated file OR a pf.conf
-    // that lost the anchor line re-applies.
+    // Verify CONTENT + every hook, not mere existence, so any drifted piece re-applies: the drop-in bytes
+    // AND that sshd actually Includes the drop-in dir; the loader + plist bytes; the /etc/pf.conf load line
+    // AND the anchor file (non-empty with a block rule — its interface list is dynamic so no byte compare).
     static func applied() -> Bool {
-        fileEquals(sshdDropIn, sshdContent) && fileEquals(pfLoader, loaderScript)
-            && fileEquals(pfPlist, plistContent) && pfConfHasAnchor()
+        fileEquals(sshdDropIn, sshdContent)
+            && fileContains("/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d/")
+            && fileEquals(pfLoader, loaderScript)
+            && fileEquals(pfPlist, plistContent)
+            && fileContains("/etc/pf.conf", pfConfMarker)
+            && fileContains(pfAnchor, "block in quick proto tcp")
     }
 
     /// One-time privileged apply (both pieces) via the GUI admin prompt. No-op if already applied.

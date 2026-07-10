@@ -695,7 +695,10 @@ enum XpairAuthorizedKeys {
         # absent (default) the legacy path below runs unchanged, so an unvalidated change cannot lock out
         # clients. When enabled, route command/subsystem FIRST, tmux-attach only as the fall-through
         # (a pty is not "interactive": `ssh -tt host cmd` has both a pty and a command).
-        if [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ]; then
+        # Fail-safe: also require the -R-denial drop-in as the "hardening applied" sentinel, so the front
+        # door never runs unhardened — including when the flag is flipped on a already-running host before
+        # the app has applied the privileged hardening (D2Hardening). Missing → legacy path below.
+        if [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ] && [ -f /etc/ssh/sshd_config.d/00-xpair-d2.conf ]; then
           # sftp subsystem → the real sftp-server. Under a `command=` forced command, sshd sets
           # SSH_ORIGINAL_COMMAND to the exact `Subsystem sftp <cmd>` value (incl. any args), NOT "sftp".
           # Read that configured value and match it exactly — handles internal-sftp, a custom path, and
@@ -1540,6 +1543,8 @@ enum PairingSecuritySelfTest {
         precondition(D2Hardening.osaCommand(#"printf 'x\n'"#) == #"do shell script "printf 'x\\n'" with administrator privileges"#)
         precondition(D2Hardening.loaderScript.contains("grep -vE '^(lo|utun)'"))                   // block all except lo/utun
         precondition(D2Hardening.loaderScript.contains("block in quick proto tcp on & to any port 22"))
+        precondition(D2Hardening.loaderScript.contains("set -e") && D2Hardening.loaderScript.contains("pfctl -f /etc/pf.conf"))  // pf load must succeed
+        precondition(gate.contains("[ -f /etc/ssh/sshd_config.d/00-xpair-d2.conf ]"))              // gate requires hardening sentinel
         precondition(D2Hardening.plistContent.contains("com.x10lab.xpair.pf") && D2Hardening.plistContent.contains("RunAtLoad"))
         print("pairing security self-test passed")
     }
