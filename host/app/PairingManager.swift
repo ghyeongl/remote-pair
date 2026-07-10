@@ -699,8 +699,11 @@ enum XpairAuthorizedKeys {
           # sftp subsystem → the sftp-server binary. Under a `command=` forced command the subsystem
           # request surfaces in SSH_ORIGINAL_COMMAND, but its exact value is server/version dependent;
           # ponytail: match tolerantly and validate behind the flag before flipping it on.
+          # Exact whole-string match on the subsystem token (server/version dependent) — NOT a substring
+          # glob, so a normal exec like `ssh host 'echo sftp-server'` or an scp to a path containing
+          # "sftp-server" is not misrouted here.
           case "${SSH_ORIGINAL_COMMAND:-}" in
-            *sftp-server*|*internal-sftp*|sftp)
+            sftp|internal-sftp|sftp-server|/usr/libexec/sftp-server)
               exec /usr/libexec/sftp-server ;;
           esac
           # exec / scp / rsync / VS Code Remote bootstrap → the account login shell (matches stock sshd
@@ -1480,19 +1483,19 @@ enum PairingSecuritySelfTest {
         // cannot reach the RD port before proof completes.
         let pendingLine = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
                                                                       fingerprint: "SHA256:x", created: ts, name: "ok", paired: false)
-        assert(pendingLine.hasPrefix("restrict,pty,command="))
-        assert(!pendingLine.contains("port-forwarding"))
-        assert(!pendingLine.contains("permitopen"))
+        precondition(pendingLine.hasPrefix("restrict,pty,command="))
+        precondition(!pendingLine.contains("port-forwarding"))
+        precondition(!pendingLine.contains("permitopen"))
         // Paired: forwarding granted, constrained to the RD signaling port.
         let line = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
                                                                fingerprint: "SHA256:x", created: ts, name: "ok", paired: true)
-        assert(line.contains("restrict,pty,port-forwarding"))
-        assert(line.contains(#"permitopen="127.0.0.1:8890""#))
-        assert(!line.contains("permitlisten"))   // no valid "deny all -R" value exists; must NOT emit an invalid one
-        assert(line.contains("command=\"\(XpairAuthorizedKeys.gatePath) abc_DEF-123 SHA256:x\""))
-        assert(!line.contains("no-port-forwarding"))
-        assert(PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:A"))
-        assert(!PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:B"))
+        precondition(line.contains("restrict,pty,port-forwarding"))
+        precondition(line.contains(#"permitopen="127.0.0.1:8890""#))
+        precondition(!line.contains("permitlisten"))   // no valid "deny all -R" value exists; must NOT emit an invalid one
+        precondition(line.contains("command=\"\(XpairAuthorizedKeys.gatePath) abc_DEF-123 SHA256:x\""))
+        precondition(!line.contains("no-port-forwarding"))
+        precondition(PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:A"))
+        precondition(!PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:B"))
         try markPairedRequiresObservedSSHLoginFingerprint(pubLine: pubLine)
         try acceptIncomingRequiresExactNonEmptyFingerprint(pubLine: pubLine)
         try gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: pubLine)
@@ -1504,13 +1507,13 @@ enum PairingSecuritySelfTest {
         // legacy path preserved. The SOCKET literal in the gate must match Config's SOCKET (drift guard,
         // like the 8890 cross-check above — the gate is a raw string with no Swift interpolation).
         let gate = XpairAuthorizedKeys.gateHelperScript()
-        assert(gate.contains("d2-frontdoor.enabled"))                                   // flag-gated
-        assert(gate.contains("*sftp-server*|*internal-sftp*|sftp)"))                     // sftp subsystem arm
-        assert(gate.contains("/usr/libexec/sftp-server"))
-        assert(gate.contains(#"exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND""#))  // login-shell passthrough
-        assert(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
-        assert(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
-        assert(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
+        precondition(gate.contains("d2-frontdoor.enabled"))                                   // flag-gated
+        precondition(gate.contains("sftp|internal-sftp|sftp-server|/usr/libexec/sftp-server)")) // sftp subsystem arm (exact match)
+        precondition(gate.contains("/usr/libexec/sftp-server"))
+        precondition(gate.contains(#"exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND""#))  // login-shell passthrough
+        precondition(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
+        precondition(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
+        precondition(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
         print("pairing security self-test passed")
     }
 
@@ -1567,9 +1570,9 @@ enum PairingSecuritySelfTest {
 
             let accepted = try PairingManager.shared.acceptIncoming(requestID: req.id,
                                                                     fingerprint: req.fingerprint)
-            assert((accepted["phase"] as? String) == "accepted-pending-proof")
+            precondition((accepted["phase"] as? String) == "accepted-pending-proof")
             let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
-            assert(auth.contains(" fp=\(req.fingerprint) "))
+            precondition(auth.contains(" fp=\(req.fingerprint) "))
         }
     }
 
@@ -1615,21 +1618,21 @@ enum PairingSecuritySelfTest {
         }
         // Pre-proof: no forwarding on the line.
         let preAuth = try auth()
-        assert(!preAuth.contains("port-forwarding"))
+        precondition(!preAuth.contains("port-forwarding"))
 
         // Proof: flips to paired AND grants forwarding.
         let proof = runGate(gate: gate.path, home: root.path, id: "fwd_123", loginFingerprint: "SHA256:fwd", originalCommand: nil)
-        assert(proof.status == 0)
-        assert(proof.stdout.contains("paired"))
+        precondition(proof.status == 0)
+        precondition(proof.stdout.contains("paired"))
         let afterProof = try auth()
-        assert(afterProof.contains(#"restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",command="\#(gate.path) fwd_123"#))
-        assert(afterProof.components(separatedBy: "permitopen").count - 1 == 1)
+        precondition(afterProof.contains(#"restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",command="\#(gate.path) fwd_123"#))
+        precondition(afterProof.components(separatedBy: "permitopen").count - 1 == 1)
 
         // A later paired login re-runs the grant but must NOT double-insert (idempotent self-heal).
         let again = runGate(gate: gate.path, home: root.path, id: "fwd_123", loginFingerprint: "SHA256:fwd", originalCommand: nil)
-        assert(again.status == 0)
+        precondition(again.status == 0)
         let afterAgain = try auth()
-        assert(afterAgain.components(separatedBy: "permitopen").count - 1 == 1)
+        precondition(afterAgain.components(separatedBy: "permitopen").count - 1 == 1)
     }
 
     private static func gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: String) throws {
@@ -1691,40 +1694,40 @@ enum PairingSecuritySelfTest {
         let commandFile = root.appendingPathComponent("executed")
         let command = "printf executed > \(shellSingleQuote(commandFile.path))"
 
-        assert(runGate(gate: gate.path, home: root.path, id: "expired_123",
+        precondition(runGate(gate: gate.path, home: root.path, id: "expired_123",
                        loginFingerprint: "SHA256:expired", originalCommand: command).status != 0)
-        assert(runGate(gate: gate.path, home: root.path, id: "revoked_123",
+        precondition(runGate(gate: gate.path, home: root.path, id: "revoked_123",
                        loginFingerprint: "SHA256:revoked", originalCommand: command).status != 0)
-        assert(runGate(gate: gate.path, home: root.path, id: "missing_123",
+        precondition(runGate(gate: gate.path, home: root.path, id: "missing_123",
                        loginFingerprint: "SHA256:missing", originalCommand: command).status != 0)
         let mismatchedProof = runGate(gate: gate.path, home: root.path, id: "pending_123",
                                       loginFingerprint: "SHA256:different", originalCommand: command)
-        assert(mismatchedProof.status != 0)
-        assert(!FileManager.default.fileExists(atPath: commandFile.path))
+        precondition(mismatchedProof.status != 0)
+        precondition(!FileManager.default.fileExists(atPath: commandFile.path))
 
         let firstProof = runGate(gate: gate.path, home: root.path, id: "pending_123",
                                  loginFingerprint: "SHA256:pending", originalCommand: command)
-        assert(firstProof.status == 0)
-        assert(firstProof.stdout.contains("paired"))
-        assert(!FileManager.default.fileExists(atPath: commandFile.path))
+        precondition(firstProof.status == 0)
+        precondition(firstProof.stdout.contains("paired"))
+        precondition(!FileManager.default.fileExists(atPath: commandFile.path))
 
         let updated = try String(contentsOf: ledgerURL, encoding: .utf8)
-        assert(updated.contains(#""clientID" : "pending_123""#))
-        assert(updated.contains(#""status" : "paired""#))
-        assert(!updated.contains(#""clientID" : "expired_123""#))
+        precondition(updated.contains(#""clientID" : "pending_123""#))
+        precondition(updated.contains(#""status" : "paired""#))
+        precondition(!updated.contains(#""clientID" : "expired_123""#))
         let updatedAuth = try String(contentsOf: sshDir.appendingPathComponent("authorized_keys"), encoding: .utf8)
-        assert(!updatedAuth.contains("client_id=expired_123"))
+        precondition(!updatedAuth.contains("client_id=expired_123"))
 
         let pairedMismatch = runGate(gate: gate.path, home: root.path, id: "pending_123",
                                      loginFingerprint: "SHA256:different", originalCommand: command)
-        assert(pairedMismatch.status != 0)
-        assert(!FileManager.default.fileExists(atPath: commandFile.path))
+        precondition(pairedMismatch.status != 0)
+        precondition(!FileManager.default.fileExists(atPath: commandFile.path))
 
         let secondConnection = runGate(gate: gate.path, home: root.path, id: "pending_123",
                                        loginFingerprint: "SHA256:pending", originalCommand: command)
-        assert(secondConnection.status == 0)
+        precondition(secondConnection.status == 0)
         let marker = try String(contentsOf: commandFile, encoding: .utf8)
-        assert(marker == "executed")
+        precondition(marker == "executed")
     }
 
     private static func installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: String) throws {
@@ -1744,8 +1747,8 @@ enum PairingSecuritySelfTest {
                                              timestamp: Int64(Date().timeIntervalSince1970))
             assertThrows { _ = try XpairAuthorizedKeys.install(req) }
             let auth = (try? String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)) ?? ""
-            assert(!auth.contains(" xpair:v1 "))
-            assert(!auth.contains(pubLine))
+            precondition(!auth.contains(" xpair:v1 "))
+            precondition(!auth.contains(pubLine))
         }
     }
 
@@ -1766,10 +1769,10 @@ enum PairingSecuritySelfTest {
             _ = try XpairAuthorizedKeys.install(req)
             let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
             let occurrences = auth.components(separatedBy: parsed.keyBlob).count - 1
-            assert(occurrences == 2)
-            assert(auth.contains(" xpair:v1 "))
-            assert(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
-            assert(auth.contains("legacy-copy"))
+            precondition(occurrences == 2)
+            precondition(auth.contains(" xpair:v1 "))
+            precondition(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
+            precondition(auth.contains("legacy-copy"))
         }
     }
 
@@ -1794,10 +1797,10 @@ enum PairingSecuritySelfTest {
             _ = try XpairAuthorizedKeys.install(req)
             let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
             let occurrences = auth.components(separatedBy: parsed.keyBlob).count - 1
-            assert(occurrences == 1)
-            assert(auth.contains(" xpair:v1 "))
-            assert(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
-            assert(!auth.contains("SHA256:old"))
+            precondition(occurrences == 1)
+            precondition(auth.contains(" xpair:v1 "))
+            precondition(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
+            precondition(!auth.contains("SHA256:old"))
         }
     }
 
@@ -1884,8 +1887,8 @@ enum PairingSecuritySelfTest {
             assertionFailure("missing self-test ledger record \(clientID)")
             return
         }
-        assert(rec.status == status)
-        assert((rec.pairedAt != nil) == paired)
+        precondition(rec.status == status)
+        precondition((rec.pairedAt != nil) == paired)
     }
 
     private static func sshEd25519PublicKey(raw: Data) -> String {
