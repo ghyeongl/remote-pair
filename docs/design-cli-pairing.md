@@ -34,7 +34,8 @@ stays frozen.
   **contract tests** (request fields + transcript framing vs `PairingManager.swift`) become the
   cross-language parity check. `onboarding-bridge.js` shrinks to **IPC + rendering** — it spawns
   `xpair pair` and streams its status JSON to the webview; it no longer builds transcripts or signs.
-- **Host → a CLI/daemon seam.** Expose the accept decision as a seam: **fingerprint in → install-or-reject**.
+- **Host → a CLI/daemon seam.** Expose the accept decision as a seam: **request-id + fingerprint in →
+  install-or-reject** (bound to the exact frozen in-memory pending request, per `acceptIncoming`).
   `PairingManager.swift` stays the implementation (verify + hardened `authorized_keys` install); add a
   thin entry point the GUI accept window calls instead of embedding the decision. The GUI becomes a thin
   renderer over that seam.
@@ -59,20 +60,26 @@ difference is only the *entry UX*. Pairing just moves JS→Rust; the wire contra
 3. **Host accept seam** (CLI subcommand or daemon RPC); the GUI accept window calls it.
 4. **Delete** the JS pairing logic once the Rust path is proven.
 
-## Open decisions
+## Confirmed decisions
 
-1. **Client status transport.** Reuse the existing bridge→CLI spawn (stdout JSON stream, which the bridge
-   already does for other `xpair` commands), or a daemon socket? **Rec: reuse the CLI-spawn IPC** — smallest
-   change, no new protocol.
-2. **Host accept seam shape.** A CLI subcommand (`xpair pair-accept <fingerprint>`) the host app shells out
-   to, vs a daemon RPC. **Rec: CLI subcommand** (matches §0.1, no new daemon protocol) — unless the D3
-   resident daemon lands first, in which case the seam could live there. Sequence after D3, or ship the CLI
-   subcommand now and migrate later?
-3. **Pairing key ownership.** Key gen/storage currently lives in JS (`ensurePairingKey`). Move it to cli-rs.
-   **Confirm the key path/format is unchanged** (`id_ed25519` under `RP_HOST_DIR`) so already-paired hosts
-   are not invalidated.
-4. **Coordination with D2/PR2.** PR2 changes the paired `authorized_keys` line (forwarding tokens). The
-   Rust installer must write those same tokens. Confirm CLI-pairing lands **after** PR2 so the installer
-   targets the final line shape.
+1. **Client status transport = reuse the bridge→CLI spawn** (stdout JSON stream — the established pattern
+   for the other `xpair` commands). No new daemon socket.
+2. **Host accept seam = a CLI subcommand `xpair pair-accept` now** (the §0.1 brain seam; the GUI accept
+   window shells out to it). Not sequenced after D3 — when the D3 resident daemon lands it can absorb/call
+   the same subcommand. **The seam must carry the frozen pending request's identity, not a bare
+   fingerprint**: the host verifies the incoming request in memory and `acceptIncoming(requestID:fingerprint:)`
+   binds the decision to the exact displayed request/key (bind display→installed, per the pairing security
+   model). So the subcommand takes the **request-id + fingerprint** the accept window is showing.
+3. **Pairing key = keep the exact current path/format**: `RP_HOST_DIR/pairing_ed25519` (`PAIRING_KEY` in
+   `onboarding-bridge.js` — `~/.xpair/host/pairing_ed25519`, ed25519, unencrypted, `0600`). cli-rs must
+   produce the byte-identical key at that path and **reuse an existing key, never regenerate**
+   (generate-if-absent is idempotent) so already-paired hosts (key already in `authorized_keys`) stay
+   valid. Hard invariant — cover it with a test.
+4. **Sequencing = implement after D2/PR2**, and **preserve the two-phase `authorized_keys` shape**: the
+   Rust installer writes the *pending* line (`restrict,pty,command=…`, **no** `port-forwarding`/`permitopen`);
+   `xpair-ssh-gate` promotes it to the forwarding line only after SSH proof. PR2's forwarding tokens
+   (`permitopen` all-loopback) are what the **gate adds on promotion**, not what the installer writes; `-R`
+   denial is global `sshd_config`, not the key line. So the installer targets the final *pending* shape.
 
 Implementation follows the migration order, each step its own PR through the Codex gate, after D2's PRs.
+The full implementation plan (files + order) is routed to the planner before coding.
