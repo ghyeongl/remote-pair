@@ -275,10 +275,13 @@ enum XpairAuthorizedKeys {
         // command, hence never runs the proof) cannot reach the RD sidecar during the proof window.
         // xpair-ssh-gate adds `port-forwarding,permitopen=…` to this line the instant it flips the
         // ledger to `paired` (see add_authorized_key_forwarding). port-forwarding re-enables -L (and -R);
-        // permitopen constrains -L to the RD signaling port. There is NO valid authorized_keys value
-        // that denies all -R (permitlisten accepts only "[host:]port"/*), so -R is left un-narrowed on
-        // the paired line; the forced-command gate + fingerprint binding is the real boundary.
-        let forwarding = paired ? #"port-forwarding,permitopen="127.0.0.1:\#(remoteDesktopSignalPort)","# : ""
+        // permitopen constrains -L to loopback (all ports) so VSCode Remote / open-remote-ssh forwards
+        // work; permitopen does NO resolution, so IPv4, IPv6 and the `localhost` name are listed
+        // explicitly. `127.0.0.1:*` still covers the RD signaling port (remoteDesktopSignalPort). There is
+        // NO valid authorized_keys value that denies all -R (permitlisten accepts only "[host:]port"/*), so
+        // -R is denied host-wide by D2Hardening (AllowTcpForwarding local); the forced-command gate +
+        // fingerprint binding is the real boundary.
+        let forwarding = paired ? #"port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*","# : ""
         return #"restrict,pty,\#(forwarding)command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
     }
 
@@ -457,6 +460,28 @@ enum XpairAuthorizedKeys {
         chmod(authorizedKeysPath, 0o600)
     }
 
+    /// One-time upgrade reconcile: a pure `ssh -N -L` forward never runs the forced-command gate, so a key
+    /// paired under the old RD-port-only permitopen keeps the narrow allowlist (its -L forwards stay
+    /// administratively prohibited) until an unrelated shell login triggers the gate migration. Migrate those
+    /// xpair lines to the widened loopback allowlist at host launch, in place. Idempotent, atomic write.
+    static func reconcileForwardingAllowlist() {
+        let old = #"port-forwarding,permitopen="127.0.0.1:8890","#
+        let new = #"port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*","#
+        // Hold the same lock the gate's grant/revoke use, so the read-modify-write is atomic against a
+        // concurrent proof/revoke (else we could write back a stale snapshot and drop a grant or resurrect
+        // a revoked line).
+        withAuthorizedKeysLockNoThrow {
+            var changed = false
+            let migrated = readAuthorizedKeyLines().map { line -> String in
+                guard isXpairAuthorizedKeyLine(line), line.contains(old) else { return line }
+                changed = true
+                return line.replacingOccurrences(of: old, with: new)
+            }
+            guard changed else { return }
+            try? writeAuthorizedKeyLines(migrated)
+        }
+    }
+
     private static func readLedger() -> AuthorizedClientsLedger {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: ledgerPath)),
               let ledger = try? JSONDecoder().decode(AuthorizedClientsLedger.self, from: data) else {
@@ -610,8 +635,9 @@ enum XpairAuthorizedKeys {
         # only after the ledger is durably `paired`, so forwarding is never live while pending. Idempotent:
         # the `!$has_fwd` guard + the anchored `\Arestrict,pty,` match (only the pending shape) make a
         # re-run on an already-forwarding line a no-op. Atomic temp+rename+chmod, mirroring
-        # remove_authorized_key_line. 8890 is hardcoded (this gate is a literal raw string with no Swift
-        # interpolation); it MUST match remoteDesktopSignalPort — the self-test cross-checks both are 8890.
+        # remove_authorized_key_line. The permitopen allowlist is hardcoded (this gate is a literal raw
+        # string with no Swift interpolation); it MUST match the buildRestrictedLine paired forwarding value —
+        # the self-test cross-checks both emit the same three loopback permitopen forms.
         sub add_authorized_key_forwarding {
           return unless -f $auth_path;
           open(my $in, "<", $auth_path) or reject("cannot read authorized_keys", 65);
@@ -621,7 +647,12 @@ enum XpairAuthorizedKeys {
             my $is_client = index($line, "client_id=$id") >= 0;
             my $has_fwd   = index($line, "port-forwarding") >= 0;
             if ($is_xpair && $is_client && !$has_fwd
-                && $line =~ s/\Arestrict,pty,/restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",/) {
+                && $line =~ s/\Arestrict,pty,/restrict,pty,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*",/) {
+              $changed = 1;
+            }
+            # Migrate a key paired under the old RD-port-only permitopen to the widened loopback allowlist.
+            elsif ($is_xpair && $is_client && $has_fwd
+                && $line =~ s/\Qport-forwarding,permitopen="127.0.0.1:8890",\E/port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*",/) {
               $changed = 1;
             }
             push @out, $line;
@@ -1534,11 +1565,11 @@ enum PairingSecuritySelfTest {
         precondition(pendingLine.hasPrefix("restrict,pty,command="))
         precondition(!pendingLine.contains("port-forwarding"))
         precondition(!pendingLine.contains("permitopen"))
-        // Paired: forwarding granted, constrained to the RD signaling port.
+        // Paired: forwarding granted, constrained to loopback (all ports, both address families + localhost).
         let line = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
                                                                fingerprint: "SHA256:x", created: ts, name: "ok", paired: true)
         precondition(line.contains("restrict,pty,port-forwarding"))
-        precondition(line.contains(#"permitopen="127.0.0.1:8890""#))
+        precondition(line.contains(#"permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*""#))
         precondition(!line.contains("permitlisten"))   // no valid "deny all -R" value exists; must NOT emit an invalid one
         precondition(line.contains("command=\"\(XpairAuthorizedKeys.gatePath) abc_DEF-123 SHA256:x\""))
         precondition(!line.contains("no-port-forwarding"))
@@ -1551,6 +1582,7 @@ enum PairingSecuritySelfTest {
         try installPreservesUnmarkedSameBlobAuthorizedKey(pubLine: pubLine)
         try installRemovesMarkedDuplicateAuthorizedKey(pubLine: pubLine)
         try installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: pubLine)
+        try reconcileMigratesOldNarrowForwarding(pubLine: pubLine)
         // D2 gate routing (behind the d2-frontdoor flag): command/subsystem-first, tmux fall-through,
         // legacy path preserved. The SOCKET literal in the gate must match Config's SOCKET (drift guard,
         // like the 8890 cross-check above — the gate is a raw string with no Swift interpolation).
@@ -1695,14 +1727,14 @@ enum PairingSecuritySelfTest {
         precondition(proof.status == 0)
         precondition(proof.stdout.contains("paired"))
         let afterProof = try auth()
-        precondition(afterProof.contains(#"restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",command="\#(gate.path) fwd_123"#))
-        precondition(afterProof.components(separatedBy: "permitopen").count - 1 == 1)
+        precondition(afterProof.contains(#"restrict,pty,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*",command="\#(gate.path) fwd_123"#))
+        precondition(afterProof.components(separatedBy: "permitopen").count - 1 == 3)
 
         // A later paired login re-runs the grant but must NOT double-insert (idempotent self-heal).
         let again = runGate(gate: gate.path, home: root.path, id: "fwd_123", loginFingerprint: "SHA256:fwd", originalCommand: nil)
         precondition(again.status == 0)
         let afterAgain = try auth()
-        precondition(afterAgain.components(separatedBy: "permitopen").count - 1 == 1)
+        precondition(afterAgain.components(separatedBy: "permitopen").count - 1 == 3)
     }
 
     private static func gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: String) throws {
@@ -1843,6 +1875,25 @@ enum PairingSecuritySelfTest {
             precondition(auth.contains(" xpair:v1 "))
             precondition(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
             precondition(auth.contains("legacy-copy"))
+        }
+    }
+
+    private static func reconcileMigratesOldNarrowForwarding(pubLine: String) throws {
+        try withTemporaryAuthorizedKeysHome {
+            let old = #"restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",command="/g cid SHA256:x",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(pubLine) xpair:v1 client_id=cid"#
+            let other = "\(pubLine) not-an-xpair-key"
+            FileManager.default.createFile(atPath: XpairAuthorizedKeys.authorizedKeysPath,
+                                           contents: Data("\(old)\n\(other)\n".utf8),
+                                           attributes: [.posixPermissions: 0o600])
+            XpairAuthorizedKeys.reconcileForwardingAllowlist()
+            let after = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
+            precondition(after.contains(#"permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*""#))
+            precondition(!after.contains("127.0.0.1:8890"))
+            precondition(after.components(separatedBy: "permitopen").count - 1 == 3)
+            precondition(after.contains(other))                       // non-xpair line untouched
+            XpairAuthorizedKeys.reconcileForwardingAllowlist()        // idempotent: second run is a no-op
+            let again = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
+            precondition(again == after)
         }
     }
 

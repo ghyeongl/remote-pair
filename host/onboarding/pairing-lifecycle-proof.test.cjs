@@ -89,7 +89,7 @@ test("US-004 SSH proof requires observed fingerprint and has no filesystem marke
 	    /static var defaultGatePath: String \{ "\\\(home\)\/\.xpair\/host\/bin\/xpair-ssh-gate" \}/,
 	    "production gate path must live under the user-writable Xpair host bin dir",
 	  );
-		  assert.match(manager, /permitopen="127\.0\.0\.1:\\#\(remoteDesktopSignalPort\)"/);
+		  assert.match(manager, /permitopen="127\.0\.0\.1:\*",permitopen="\[::1\]:\*",permitopen="localhost:\*",/);
 		  assert.match(manager, /restrict,pty,port-forwarding/);
 		  assert.match(manager, /static let remoteDesktopSignalPort = 8890/);
 	  // precondition (not assert) so the self-test check survives `swift build -c release`, which
@@ -101,7 +101,7 @@ test("US-004 SSH proof requires observed fingerprint and has no filesystem marke
 	  assert.match(manager, /let forwarding = paired \?/);
 	  assert.match(manager, /paired: false\)/);
 	  assert.match(manager, /sub add_authorized_key_forwarding \{/);
-	  assert.match(manager, /\$line =~ s\/\\Arestrict,pty,\/restrict,pty,port-forwarding,permitopen="127\.0\.0\.1:8890",\//);
+	  assert.match(manager, /\$line =~ s\/\\Arestrict,pty,\/restrict,pty,port-forwarding,permitopen="127\.0\.0\.1:\*",permitopen="\[::1\]:\*",permitopen="localhost:\*",\//);
 	  assert.match(manager, /write_ledger\(\);\s*add_authorized_key_forwarding\(\);[^\n]*\n\s*print "paired/);
 	  assert.match(
 	    manager,
