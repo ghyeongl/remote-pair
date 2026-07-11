@@ -1136,8 +1136,10 @@ final class PairingManager {
     // ~/.xpair/host/pair-accept.request trigger (written by `xpair pair-accept` over SSH) → acceptIncoming
     // through the exact-fingerprint gate. GUI accept path unchanged.
     private var pairAcceptTimer: DispatchSourceTimer?
-    private var pairStatusPath: String { "\(RP_DIR)/pairing-status.json" }
-    private var pairAcceptTriggerPath: String { "\(RP_DIR)/pair-accept.request" }
+    static var selfTestPairDirOverride: String?   // self-test only: redirect status/trigger out of the real ~/.xpair/host
+    private var pairDir: String { PairingManager.selfTestPairDirOverride ?? RP_DIR }
+    private var pairStatusPath: String { "\(pairDir)/pairing-status.json" }
+    private var pairAcceptTriggerPath: String { "\(pairDir)/pair-accept.request" }
 
     func startPairAcceptWatcher() {
         queue.sync {
@@ -1153,6 +1155,7 @@ final class PairingManager {
     }
 
     private func pairAcceptTickLocked() {
+        expireFrozenIncomingLocked()   // drop a TTL-expired incoming BEFORE publishing, so the CLI never accepts a stale request
         _ = statusLocked()   // refreshes pairing-status.json so `xpair pair-accept` can read the pending request
         guard incoming != nil,
               let data = FileManager.default.contents(atPath: pairAcceptTriggerPath) else { return }
@@ -1735,9 +1738,11 @@ enum PairingSecuritySelfTest {
                                              keyBlob: parsed.keyBlob,
                                              fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
                                              timestamp: Int64(Date().timeIntervalSince1970))
-            let trigger = "\(RP_DIR)/pair-accept.request"
-            try? FileManager.default.createDirectory(atPath: RP_DIR, withIntermediateDirectories: true)
-            defer { PairingManager.shared.selfTestResetState(); try? FileManager.default.removeItem(atPath: trigger) }
+            let dir = NSTemporaryDirectory() + "xpair-pair-selftest-\(UUID().uuidString)"
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            PairingManager.selfTestPairDirOverride = dir
+            let trigger = "\(dir)/pair-accept.request"
+            defer { PairingManager.shared.selfTestResetState(); PairingManager.selfTestPairDirOverride = nil; try? FileManager.default.removeItem(atPath: dir) }
 
             PairingManager.shared.selfTestFreezeIncoming(req)
             try Data(#"{"id":"trig_accept","keyFingerprint":"SHA256:wrong"}"#.utf8).write(to: URL(fileURLWithPath: trigger))

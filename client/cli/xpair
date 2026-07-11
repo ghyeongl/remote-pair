@@ -2258,6 +2258,23 @@ EOF
   fi
 }
 
+# Headless pairing-accept: read the host's pairing-status.json and write the pair-accept.request trigger the
+# host app consumes (mirrors `xpair pair-accept` in cli-rs). Run ON the host over SSH.
+cmd_pair_accept() {
+  _sf="$RP_HOST_DIR/pairing-status.json"
+  [ -f "$_sf" ] || { echo "pair-accept: no pending pairing request (no pairing-status.json)" >&2; return 1; }
+  _json="$(cat "$_sf")"
+  _phase="$(_jget "$_json" phase)"; _id="$(_jget "$_json" id)"; _fp="$(_jget "$_json" keyFingerprint)"
+  { [ "$_phase" = incoming ] && [ -n "$_id" ] && [ -n "$_fp" ]; } || { echo "pair-accept: no pending pairing request (phase=${_phase:-unavailable})" >&2; return 1; }
+  if [ "${1:-}" = --fingerprint ] && [ -n "${2:-}" ] && [ "$2" != "$_fp" ]; then
+    echo "pair-accept: fingerprint mismatch (status=$_fp, supplied=$2)" >&2; return 1
+  fi
+  _t="$RP_HOST_DIR/pair-accept.request"
+  printf '{"id":%s,"keyFingerprint":%s}' "$(_json_str "$_id")" "$(_json_str "$_fp")" > "$_t.$$.tmp" \
+    && chmod 600 "$_t.$$.tmp" && mv "$_t.$$.tmp" "$_t" || { echo "pair-accept: failed to write trigger" >&2; return 1; }
+  echo "pair-accept: wrote trigger for $_id ($_fp)"
+}
+
 case "${1:-help}" in
   launch)  shift; cmd_launch "$@" ;;
   attach)  shift; cmd_attach "$@" ;;
@@ -2272,6 +2289,7 @@ case "${1:-help}" in
   host-permissions) shift; cmd_host_permissions "$@" ;;
   doctor)  cmd_doctor ;;
   approve) shift; cmd_approve "$@" ;;
+  pair-accept) shift; cmd_pair_accept "$@" ;;
   status)  cmd_status ;;
   editor)  shift; cmd_editor "$@" ;;
   desktop) shift; cmd_desktop "$@" ;;

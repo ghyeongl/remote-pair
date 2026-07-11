@@ -2399,11 +2399,13 @@ module.exports = bridge;
 // ponytail: reuses fetchPairingMetadata / normalizePairingMetadata / bridge.sendPairingRequest.
 if (require.main === module) {
   (async () => {
-    const [cmd, host] = process.argv.slice(2);
-    if (cmd !== "pair" || !host) {
+    const [cmd, rawHost] = process.argv.slice(2);
+    if (cmd !== "pair" || !rawHost) {
       console.error("usage: onboarding-bridge.js pair <host>");
       process.exit(2);
     }
+    // Normalize the ssh target (strip user@ / :port / whitespace) so sendPairingRequest's validHost accepts it.
+    const host = sshTargetHost(rawHost);
     try {
       const meta = normalizePairingMetadata(await fetchPairingMetadata(host));
       if (!meta.ok) {
