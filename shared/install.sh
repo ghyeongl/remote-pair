@@ -295,31 +295,38 @@ if is_host; then
   done
   rm -rf "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
   # A deliberately-kept standalone remotepair 0.4.12 (repo ghyeongl/remote-pair) and the OLD pre-rename xpair
-  # self BOTH install to com.x10lab.remote-pair* + RemotePairHost.app under ~/.remote-pair — so the runtime
-  # dir can't tell them apart. Discriminate by the app's CFBundleShortVersionString: standalone is 0.4.x; the
-  # pre-rename old-xpair self is 0.5.0a… (the rename landed at a29667b9). Preserve ONLY a coexisting standalone
-  # 0.4.x; clean an old-xpair upgrade (or an absent/unidentified app) — else the stale RemotePairHost +
-  # com.x10lab.remote-pair-host keeps the old /tmp/aqua-tmux.sock owner and shadows the new Xpair host.
-  # Read the version with `defaults` (handles binary AND XML plists; sed does not). The app may be a cask
-  # install in /Applications, so probe both. Fail-safe: PRESERVE for a standalone 0.4.x AND for ANY
-  # present-but-unreadable app — deleting a kept app is unrecoverable, leaving old cruft running is not.
-  # Reclaim only when every present app is readably >= 0.5.0a (old-xpair pre-rename) or none is present.
-  _rp_keep=0
-  for _d in ${LEGACY_APP_DIRS:-$HOME/Applications /Applications}; do
-    [ -d "$_d/RemotePairHost.app" ] || continue
-    _rp_ver="$(defaults read "$_d/RemotePairHost.app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || true)"
-    case "$_rp_ver" in
-      0.[0-4]|0.[0-4].*) _rp_keep=1 ;;   # standalone 0.4.x → preserve
-      "") _rp_keep=1; echo "install: RemotePairHost.app ($_d) version unreadable — preserving (won't delete an unidentified app)" >&2 ;;
-      *) : ;;                            # >= 0.5.0a old-xpair pre-rename → eligible to reclaim
-    esac
-  done
+  # self BOTH install to com.x10lab.remote-pair* + RemotePair(Host).app under ~/.remote-pair — the runtime dir
+  # can't tell them apart. Discriminate by CFBundleShortVersionString (read via `defaults`, which handles
+  # binary AND XML): standalone is 0.4.x; the pre-rename old-xpair self is 0.5.0a… (rename landed a29667b9).
+  # PRESERVE any 0.4.x AND any present-but-unreadable app (deleting a kept app is unrecoverable); reclaim only
+  # readable >= 0.5.0a old-xpair bundles. The app may be a cask install in /Applications and may be client-only
+  # (RemotePair.app), so probe both dirs and both bundles. Boot out the shared com.x10lab.remote-pair* service
+  # labels only when NO 0.4.x/unreadable app remains (a coexisting 0.4.12 keeps running); remove stale
+  # old-xpair bundles regardless of dir.
+  _rp_keep=0; _rp_old=""
+  while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    for _app in RemotePairHost.app RemotePair.app; do
+      [ -d "$_d/$_app" ] || continue
+      _rp_ver="$(defaults read "$_d/$_app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || true)"
+      case "$_rp_ver" in
+        0.[0-4]|0.[0-4].*) _rp_keep=1 ;;   # standalone 0.4.x → preserve
+        "") _rp_keep=1; echo "install: $_d/$_app version unreadable — preserving (won't delete an unidentified app)" >&2 ;;
+        *) _rp_old="$_rp_old$_d/$_app
+" ;;                                     # >= 0.5.0a old-xpair pre-rename → reclaim this bundle
+      esac
+    done
+  done < <(if [ -n "${LEGACY_APP_DIRS:-}" ]; then printf '%s\n' $LEGACY_APP_DIRS; else printf '%s\n' "$HOME/Applications" "/Applications"; fi)
   if [ "$_rp_keep" -eq 0 ]; then
     for L in com.x10lab.remote-pair com.x10lab.remote-pair-watchdog com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
       launchctl bootout "gui/$U/$L" 2>/dev/null || true
     done
-    rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" 2>/dev/null || true
   fi
+  # Remove the identified old-xpair bundles (either dir); best-effort — /Applications may need sudo.
+  # ponytail: newline-delimited; app bundle paths never contain newlines.
+  while IFS= read -r _p; do [ -n "$_p" ] && rm -rf "$_p" 2>/dev/null || true; done <<RPOLD
+$_rp_old
+RPOLD
 
   # watchdog
   install -d "$RP_DIR/bin" 2>/dev/null || mkdir -p "$RP_DIR/bin"
