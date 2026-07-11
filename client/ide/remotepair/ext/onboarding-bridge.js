@@ -2392,3 +2392,38 @@ const bridge = {
 };
 
 module.exports = bridge;
+
+// Direct-run headless entry: `node onboarding-bridge.js pair <host>` fetches the host's live pairing
+// metadata, sends a signed pairing request to its UDP endpoint, and prints the result as JSON. Gated on
+// require.main so `require()` from the extension is unaffected.
+// ponytail: reuses fetchPairingMetadata / normalizePairingMetadata / bridge.sendPairingRequest.
+if (require.main === module) {
+  (async () => {
+    const [cmd, host] = process.argv.slice(2);
+    if (cmd !== "pair" || !host) {
+      console.error("usage: onboarding-bridge.js pair <host>");
+      process.exit(2);
+    }
+    try {
+      const meta = normalizePairingMetadata(await fetchPairingMetadata(host));
+      if (!meta.ok) {
+        console.log(JSON.stringify({ ok: false, err: meta.err }));
+        process.exit(1);
+      }
+      const res = await bridge.sendPairingRequest({
+        host,
+        port: meta.pairPort,
+        hostKeyFP: meta.fp,
+        hostNonce: meta.hostNonce,
+        serviceInstanceID: meta.serviceInstanceID,
+        name: os.hostname(),
+        user: os.userInfo().username,
+      });
+      console.log(JSON.stringify(res));
+      process.exit(res && res.ok ? 0 : 1);
+    } catch (e) {
+      console.log(JSON.stringify({ ok: false, err: String((e && e.message) || e) }));
+      process.exit(1);
+    }
+  })();
+}
