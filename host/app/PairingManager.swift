@@ -281,7 +281,7 @@ enum XpairAuthorizedKeys {
         // NO valid authorized_keys value that denies all -R (permitlisten accepts only "[host:]port"/*), so
         // -R is denied host-wide by D2Hardening (AllowTcpForwarding local); the forced-command gate +
         // fingerprint binding is the real boundary.
-        let forwarding = paired ? #"port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*""# : ""
+        let forwarding = paired ? #"port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*","# : ""
         return #"restrict,pty,\#(forwarding)command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
     }
 
@@ -626,6 +626,11 @@ enum XpairAuthorizedKeys {
             my $has_fwd   = index($line, "port-forwarding") >= 0;
             if ($is_xpair && $is_client && !$has_fwd
                 && $line =~ s/\Arestrict,pty,/restrict,pty,port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*",/) {
+              $changed = 1;
+            }
+            # Migrate a key paired under the old RD-port-only permitopen to the widened loopback allowlist.
+            elsif ($is_xpair && $is_client && $has_fwd
+                && $line =~ s/\Qport-forwarding,permitopen="127.0.0.1:8890",\E/port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*",/) {
               $changed = 1;
             }
             push @out, $line;
