@@ -84,7 +84,10 @@ enum D2Hardening {
         let ls = lines("/etc/ssh/sshd_config")
         guard let inc = ls.firstIndex(where: { l in
             let t = l.trimmingCharacters(in: .whitespaces).lowercased()
-            return !t.hasPrefix("#") && t.hasPrefix("include") && t.contains("sshd_config.d")
+            guard !t.hasPrefix("#"), t.hasPrefix("include ") else { return false }
+            let p = t.dropFirst("include ".count).trimmingCharacters(in: .whitespaces)
+            let abs = p.hasPrefix("/") ? p : "/etc/ssh/" + p   // sshd resolves relative includes against /etc/ssh
+            return abs.hasPrefix("/etc/ssh/sshd_config.d/") && (abs.hasSuffix("/*.conf") || abs.hasSuffix("/00-xpair-d2.conf"))
         }) else { return false }
         if let bad = ls.firstIndex(where: { l in
             let t = l.trimmingCharacters(in: .whitespaces).lowercased()
@@ -97,7 +100,8 @@ enum D2Hardening {
     // `sshd -T` reports only the GLOBAL forwarding value, and only the ROOT apply path can run it. The
     // unprivileged launch/gate checks must catch two drifts it would otherwise miss: a `Match` block that
     // re-enables forwarding (yes/all) for the paired login, and a drop-in that sorts BEFORE 00-xpair-d2.conf
-    // setting global forwarding (first-wins). Refuse D2 if either sets forwarding to anything but no/local.
+    // setting global forwarding (first-wins). Refuse D2 if either sets forwarding to anything but `local`
+    // (our target) — `no` also disqualifies, since it denies the -L locals D2 relies on.
     // ponytail: per-file Match scan (a Match spanning an Include boundary isn't tracked) — repair path:
     // full `sshd -T -C` probe if that edge ever matters.
     static func noForwardingOverride() -> Bool {
@@ -114,7 +118,7 @@ enum D2Hardening {
                 if t.hasPrefix("match ") { inMatch = true; continue }  // any Match scope (incl. Match all) can override
                 if t.hasPrefix("allowtcpforwarding") || t.hasPrefix("allowstreamlocalforwarding") {
                     let v = t.split(separator: " ", maxSplits: 1).dropFirst().first?.trimmingCharacters(in: .whitespaces) ?? ""
-                    if v != "no" && v != "local" && (inMatch || early) { return false }
+                    if v != "local" && (inMatch || early) { return false }
                 }
             }
         }
@@ -141,7 +145,7 @@ enum D2Hardening {
     private static func pfConfAnchorReachable() -> Bool {
         let ls = lines("/etc/pf.conf")
         guard let anchorIdx = ls.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "anchor \"com.x10lab.xpair\"" }),
-              ls.contains(where: { $0.hasPrefix("load anchor \"com.x10lab.xpair\"") }) else { return false }
+              ls.contains(where: { $0.contains("load anchor \"com.x10lab.xpair\"") && $0.contains("from \"\(pfAnchor)\"") }) else { return false }
         // A `quick` pass shadows our block unless it restricts to a non-SSH port: broad passes
         // (`pass in quick all`, no `port` clause) and explicit :22/ssh passes both defeat the anchor.
         if let passIdx = ls.firstIndex(where: { l in
@@ -181,16 +185,30 @@ enum D2Hardening {
         #!/bin/sh
         set -e
         umask 022
+        # Atomic-ish apply: back up the two mutated configs and roll everything back on any failure, so a
+        # partial apply never leaves a half-hardened host.
+        _pfbak=$(mktemp); _sshbak=$(mktemp)
+        cp /etc/pf.conf "$_pfbak" 2>/dev/null || true
+        cp /etc/ssh/sshd_config "$_sshbak" 2>/dev/null || true
+        _rollback() {
+          cp "$_sshbak" /etc/ssh/sshd_config 2>/dev/null || true
+          rm -f '\(sshdDropIn)'
+          launchctl bootout system/com.x10lab.xpair.pf 2>/dev/null || launchctl unload '\(pfPlist)' 2>/dev/null || true
+          rm -f '\(pfLoader)' '\(pfPlist)' '\(pfAnchor)'
+          cp "$_pfbak" /etc/pf.conf 2>/dev/null || true
+          pfctl -f /etc/pf.conf 2>/dev/null || true
+        }
+        trap '_c=$?; if [ "$_c" -ne 0 ]; then _rollback; fi; rm -f "$_pfbak" "$_sshbak"; exit $_c' EXIT
         install -d /etc/ssh/sshd_config.d
         # Force our drop-in Include ABOVE any forwarding/Match directive (sshd keeps the first obtained value).
-        inc=$(grep -niE '^[[:space:]]*Include[[:space:]].*sshd_config\\.d' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)
+        inc=$(grep -niE '^[[:space:]]*Include[[:space:]]+(/etc/ssh/)?sshd_config\\.d/(\\*|00-xpair-d2)\\.conf' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)
         bad=$(grep -niE '^[[:space:]]*(AllowTcpForwarding|AllowStreamLocalForwarding|Match)([[:space:]]|$)' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)
         if [ -z "$inc" ] || { [ -n "$bad" ] && [ "$bad" -lt "$inc" ]; }; then t=$(mktemp); printf 'Include /etc/ssh/sshd_config.d/*.conf\\n' > "$t"; cat /etc/ssh/sshd_config >> "$t"; cat "$t" > /etc/ssh/sshd_config; rm -f "$t"; fi
         printf %s '\(b64(sshdContent))' | base64 -D > '\(sshdDropIn)'; chmod 644 '\(sshdDropIn)'
         # Assert EFFECTIVE forwarding policy (sshd -T merges Include + Match), not file presence.
         sshd -T 2>/dev/null | grep -qx 'allowtcpforwarding local' || { echo 'sshd -T: AllowTcpForwarding not local' >&2; exit 1; }
         sshd -T 2>/dev/null | grep -qx 'allowstreamlocalforwarding local' || { echo 'sshd -T: AllowStreamLocalForwarding not local' >&2; exit 1; }
-        awk -v ours="00-xpair-d2.conf" 'function base(p){ n=split(p,a,"/"); return a[n] } FNR==1{ inm=0; f=base(FILENAME); early=(index(FILENAME,"/sshd_config.d/")>0 && f<ours) } { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { inm=1; next } tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="no" && v!="local" && (inm||early)) found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || { echo 'sshd forwarding override (Match or earlier drop-in)' >&2; exit 1; }
+        awk -v ours="00-xpair-d2.conf" 'function base(p){ n=split(p,a,"/"); return a[n] } FNR==1{ inm=0; f=base(FILENAME); early=(index(FILENAME,"/sshd_config.d/")>0 && f<ours) } { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { inm=1; next } tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="local" && (inm||early)) found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || { echo 'sshd forwarding override (Match or earlier drop-in)' >&2; exit 1; }
         printf %s '\(b64(pfAnchorContent))' | base64 -D > '\(pfAnchor)'; chmod 644 '\(pfAnchor)'
         # Idempotently (re)install the anchor hook at the HEAD of the filter section: strip any prior
         # xpair anchor/load lines first, so a half-present hook (anchor without load, or vice versa) is repaired.
