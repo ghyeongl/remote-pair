@@ -294,17 +294,25 @@ if is_host; then
     launchctl bootout "gui/$U/$L" 2>/dev/null || true
   done
   rm -rf "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
-  # A deliberately-kept standalone remotepair 0.4.12 (repo ghyeongl/remote-pair) installs to the SAME
-  # com.x10lab.remote-pair* labels + RemotePairHost.app/RemotePair.app, keeping its runtime under
-  # ~/.remote-pair (xpair uses ~/.xpair). Only reclaim THOSE when no 0.4.12 coexists, so an xpair install
-  # never uninstalls OR stops (bootout) a 0.4.12 the user runs alongside it. ponytail: ~/.remote-pair is the
-  # discriminator; favor non-destruction for genuine 0.4.12 items.
-  if [ ! -d "$HOME/.remote-pair" ]; then
-    for L in com.x10lab.remote-pair com.x10lab.remote-pair-watchdog com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
-      launchctl bootout "gui/$U/$L" 2>/dev/null || true
-    done
-    rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" 2>/dev/null || true
-  fi
+  # A deliberately-kept standalone remotepair 0.4.12 (repo ghyeongl/remote-pair) and the OLD pre-rename xpair
+  # self BOTH install to com.x10lab.remote-pair* + RemotePairHost.app under ~/.remote-pair — so the runtime
+  # dir can't tell them apart. Discriminate by the app's CFBundleShortVersionString: standalone is 0.4.x; the
+  # pre-rename old-xpair self is 0.5.0a… (the rename landed at a29667b9). Preserve ONLY a coexisting standalone
+  # 0.4.x; clean an old-xpair upgrade (or an absent/unidentified app) — else the stale RemotePairHost +
+  # com.x10lab.remote-pair-host keeps the old /tmp/aqua-tmux.sock owner and shadows the new Xpair host.
+  _rp_plist="$HOME/Applications/RemotePairHost.app/Contents/Info.plist"; _rp_ver=""
+  # -f guard + tr-flatten so a missing/blank plist can't trip set -e -o pipefail (and to read the version
+  # whether the key/string are on one line or two).
+  [ -f "$_rp_plist" ] && _rp_ver="$(tr -d '\n' < "$_rp_plist" | sed -n 's/.*CFBundleShortVersionString<\/key>[[:space:]]*<string>\([^<]*\)<\/string>.*/\1/p' | head -1)"
+  case "$_rp_ver" in
+    0.[0-4]|0.[0-4].*) : ;;   # coexisting standalone 0.4.x → preserve app + labels
+    *)
+      for L in com.x10lab.remote-pair com.x10lab.remote-pair-watchdog com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
+        launchctl bootout "gui/$U/$L" 2>/dev/null || true
+      done
+      rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" 2>/dev/null || true
+      ;;
+  esac
 
   # watchdog
   install -d "$RP_DIR/bin" 2>/dev/null || mkdir -p "$RP_DIR/bin"
