@@ -20,7 +20,7 @@ We multiply the two. Remove either half and there is no product.
 | Axis | Mechanism | Notes |
 |------|-----------|-------|
 | **Access** | standard SSH (system sshd, tailnet-bound) | any client: iTerm, Blink, Termius, VSCode Remote, Orca, plain `ssh`. No Xpair client needed. |
-| **Persistence** | tmux(-aqua) session, daemon-owned | detach-survives, reboot-revives; client carries no state. |
+| **Persistence** | tmux(-aqua) session, daemon-owned | survives client detach; client carries no state. Reboot-revival is the **session registry's** job (Leaf #3 re-launches the agent), **not** tmux — a tmux server dies on reboot. |
 | **GUI** | inheritance (default) **or** broker (fallback) | macOS TCC forbids GUI to a bare SSH-descended process — see below. |
 
 The daemon (**XpairHost**) is the control plane: it owns/registers the SSH connections,
@@ -66,10 +66,11 @@ inherit. Canonical case: **VSCode Remote / Orca**. They bootstrap their own serv
 the SSH **exec channel** (passthrough), so their server is an `sshd` child, and the agent
 (e.g. a VSCode Claude extension) runs under it — outside our GUI tree. We **must not**
 re-parent their server (wrapping their bootstrap couples us to their internals = the
-maintenance treadmill D2 exists to avoid). Instead the agent **delegates GUI actions to
-the daemon over local IPC** (`rp-screencap`, `rp-input-inject`, approve-router,
-Claude-in-Chrome). The daemon, holding the grants, performs the action and returns the
-result. The agent never touches the screen API → macOS's per-identity rule is respected.
+maintenance treadmill D2 exists to avoid). Instead the agent invokes thin IPC shims
+(`rp-screencap`, `rp-input-inject`, approve-router, Claude-in-Chrome) that **hold no grant
+themselves** — they forward the request to the daemon over local IPC. The daemon, holding
+the grants, performs the action and returns the result. The agent never touches the screen
+API → macOS's per-identity rule is respected.
 
 Broker scope is therefore **narrow**: only processes that can't be in tmux-aqua. Steer
 agents to run inside tmux-aqua and inheritance covers them; the broker is the escape hatch.
@@ -85,8 +86,13 @@ The SSH ForceCommand gate routes to **XpairHost**, not directly to tmux:
 - `ForceCommand → xpair-ssh-gate → XpairHost` (daemon decides), **not** `→ tmux attach`.
 - Interactive terminal client → daemon lands it in the GUI-capable session (tmux-aqua) —
   ergonomically, so `tmux` is invisible plumbing, not something the user types.
-- `SSH_ORIGINAL_COMMAND` present (exec / scp / sftp / port-tunnel / VSCode-Remote
-  bootstrap / Orca forwarding) → **passthrough**, no session forced.
+- `SSH_ORIGINAL_COMMAND` present (exec / scp / VSCode-Remote bootstrap) → **passthrough**:
+  run the command, no session forced.
+- Non-command channels are gated **separately, not via this branch**: **port-forwarding**
+  (`-L`/`-R`) opens channels with no command (empty `SSH_ORIGINAL_COMMAND`) and is governed
+  by `AllowTcpForwarding` + the `-R` denial (PR #102); **sftp** arrives as the `sftp`
+  subsystem, which ForceCommand intercepts — so the gate must handle it explicitly (re-exec
+  `sftp-server`), not assume it passes through.
 - Access ≠ session: entry gives access; session engagement is the daemon's to route.
 
 The D2 **access-layer hardening** (pf tailnet-bind, `-R` denial, sshd drop-in — PR #102)
