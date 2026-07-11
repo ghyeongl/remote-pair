@@ -20,6 +20,11 @@ if CommandLine.arguments.contains("--sentry-self-test") {
     exit(SentryBridge.selfTest() ? 0 : 1)
 }
 
+if CommandLine.arguments.contains("--keepawake-self-test") {
+    AppDelegate.keepAwakeSelfTest()
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--capture-control-self-test") {
     do {
         try CaptureControlTests.runAll()
