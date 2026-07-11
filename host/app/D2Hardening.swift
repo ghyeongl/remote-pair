@@ -53,6 +53,7 @@ enum D2Hardening {
     pfctl -f /etc/pf.conf
     pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' || pfctl -e
     pfctl -a com.x10lab.xpair -sr 2>/dev/null | grep -q 'block .* port = 22' || { echo 'xpair pf anchor not enforcing' >&2; exit 1; }
+    printf %s '\(Data(pfAnchorContent.utf8).base64EncodedString())' | base64 -D | cmp -s - '\(pfAnchor)' || { echo 'xpair pf anchor content drifted (pass may precede block)' >&2; exit 1; }
     main=$(pfctl -sr 2>/dev/null)
     a=$(printf '%s\\n' "$main" | grep -n 'anchor "com.x10lab.xpair"' | head -1 | cut -d: -f1)
     p=$(printf '%s\\n' "$main" | awk 'tolower($0) ~ /pass/ && tolower($0) ~ /quick/ { l=tolower($0); mt=(l !~ /proto /)||(l ~ /tcp/); m22=(l !~ /port /)||(l ~ /port[ =]+(22|ssh)([^0-9]|$)/); if (mt && m22) { print NR; exit } }')
@@ -145,7 +146,10 @@ enum D2Hardening {
     private static func pfConfAnchorReachable() -> Bool {
         let ls = lines("/etc/pf.conf")
         guard let anchorIdx = ls.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "anchor \"com.x10lab.xpair\"" }),
-              ls.contains(where: { $0.contains("load anchor \"com.x10lab.xpair\"") && $0.contains("from \"\(pfAnchor)\"") }) else { return false }
+              ls.contains(where: { l in
+                  let t = l.trimmingCharacters(in: .whitespaces)   // ACTIVE line only — a commented `# load anchor` must not count
+                  return t.hasPrefix("load anchor \"com.x10lab.xpair\"") && t.contains("from \"\(pfAnchor)\"")
+              }) else { return false }
         // A `quick` pass shadows our block unless it restricts to a non-SSH port: broad passes
         // (`pass in quick all`, no `port` clause) and explicit :22/ssh passes both defeat the anchor.
         if let passIdx = ls.firstIndex(where: { l in
@@ -185,20 +189,23 @@ enum D2Hardening {
         #!/bin/sh
         set -e
         umask 022
-        # Atomic-ish apply: back up the two mutated configs and roll everything back on any failure, so a
-        # partial apply never leaves a half-hardened host.
-        _pfbak=$(mktemp); _sshbak=$(mktemp)
-        cp /etc/pf.conf "$_pfbak" 2>/dev/null || true
-        cp /etc/ssh/sshd_config "$_sshbak" 2>/dev/null || true
-        _rollback() {
-          cp "$_sshbak" /etc/ssh/sshd_config 2>/dev/null || true
-          rm -f '\(sshdDropIn)'
+        # Atomic apply: snapshot every file we touch and restore each to its pre-image (or remove if new) on
+        # any failure, so a partial apply — or a failed re-apply on an already-hardened host — never leaves an
+        # inconsistent state (e.g. a restored pf.conf pointing at an anchor file we deleted).
+        _bak=$(mktemp -d)
+        for _f in /etc/pf.conf /etc/ssh/sshd_config '\(sshdDropIn)' '\(pfAnchor)' '\(pfLoader)' '\(pfPlist)'; do
+          [ -e "$_f" ] && cp "$_f" "$_bak/$(echo "$_f" | tr / _)" 2>/dev/null || true
+        done
+        _restore() {
+          for _f in /etc/pf.conf /etc/ssh/sshd_config '\(sshdDropIn)' '\(pfAnchor)' '\(pfLoader)' '\(pfPlist)'; do
+            _b="$_bak/$(echo "$_f" | tr / _)"
+            if [ -e "$_b" ]; then cp "$_b" "$_f" 2>/dev/null || true; else rm -f "$_f"; fi
+          done
           launchctl bootout system/com.x10lab.xpair.pf 2>/dev/null || launchctl unload '\(pfPlist)' 2>/dev/null || true
-          rm -f '\(pfLoader)' '\(pfPlist)' '\(pfAnchor)'
-          cp "$_pfbak" /etc/pf.conf 2>/dev/null || true
+          [ -e '\(pfPlist)' ] && launchctl load -w '\(pfPlist)' 2>/dev/null || true
           pfctl -f /etc/pf.conf 2>/dev/null || true
         }
-        trap '_c=$?; if [ "$_c" -ne 0 ]; then _rollback; fi; rm -f "$_pfbak" "$_sshbak"; exit $_c' EXIT
+        trap '_c=$?; [ "$_c" -ne 0 ] && _restore; rm -rf "$_bak"; exit $_c' EXIT
         install -d /etc/ssh/sshd_config.d
         # Force our drop-in Include ABOVE any forwarding/Match directive (sshd keeps the first obtained value).
         inc=$(grep -niE '^[[:space:]]*Include[[:space:]]+(/etc/ssh/)?sshd_config\\.d/(\\*|00-xpair-d2)\\.conf' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)

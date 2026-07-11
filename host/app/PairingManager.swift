@@ -711,12 +711,15 @@ enum XpairAuthorizedKeys {
           { [ -z "$d2_bad" ] || [ "$d2_bad" -gt "$d2_inc" ]; } || return 1
           # No Match block may re-enable forwarding (yes/all) for the paired login.
           awk -v ours="00-xpair-d2.conf" 'function base(p){ n=split(p,a,"/"); return a[n] } FNR==1{ inm=0; f=base(FILENAME); early=(index(FILENAME,"/sshd_config.d/")>0 && f<ours) } { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { inm=1; next } tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="local" && (inm||early)) found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || return 1
-          # pf enforcement must be installed to load at boot (mirror D2Hardening.applied()): loader + LaunchDaemon.
-          [ -s '/Library/Application Support/Xpair/xpair-pf.sh' ] || return 1
-          [ -s /Library/LaunchDaemons/com.x10lab.xpair.pf.plist ] || return 1
+          # pf enforcement must be installed to load at boot (mirror D2Hardening.applied()): the loader
+          # must reload+enforce pf and the LaunchDaemon must RunAtLoad — check the enforcing markers, not size.
+          grep -q 'pfctl -f /etc/pf.conf' '/Library/Application Support/Xpair/xpair-pf.sh' 2>/dev/null || return 1
+          grep -q 'com.x10lab.xpair' '/Library/Application Support/Xpair/xpair-pf.sh' 2>/dev/null || return 1
+          grep -q 'RunAtLoad' /Library/LaunchDaemons/com.x10lab.xpair.pf.plist 2>/dev/null || return 1
+          grep -q 'com.x10lab.xpair.pf' /Library/LaunchDaemons/com.x10lab.xpair.pf.plist 2>/dev/null || return 1
           grep -qx 'block in quick proto tcp to any port 22' /etc/pf.anchors/com.x10lab.xpair 2>/dev/null || return 1
           grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || return 1
-          grep -qE '^[[:space:]]*load anchor "com\\.x10lab\\.xpair" from "/etc/pf\\.anchors/com\\.x10lab\\.xpair"' /etc/pf.conf 2>/dev/null || return 1
+          grep -qE '^[[:space:]]*load anchor "com\.x10lab\.xpair" from "/etc/pf\.anchors/com\.x10lab\.xpair"' /etc/pf.conf 2>/dev/null || return 1
           awk 'tolower($1)=="set" && tolower($2)=="skip" && tolower($3)=="on" { for (i=4;i<=NF;i++){ g=$i; gsub(/[{}]/,"",g); if (g!="" && g!="lo" && g!="lo0") bad=1 } } END { exit(bad?1:0) }' /etc/pf.conf || return 1
           d2_an=$(grep -nx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null | head -1 | cut -d: -f1)
           d2_pp=$(awk 'tolower($0) ~ /^[[:space:]]*pass/ && tolower($0) ~ /quick/ { l=tolower($0); mt=(l !~ /proto /)||(l ~ /tcp/); m22=(l !~ /port /)||(l ~ /port[ =]+(22|ssh)([^0-9]|$)/); if (mt && m22) { print NR; exit } }' /etc/pf.conf 2>/dev/null)
