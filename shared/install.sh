@@ -285,18 +285,25 @@ if is_host; then
     fi
   fi
 
-  # Reclaim pre-rename cruft (RemotePair→Xpair, a29667b9) — idempotent, best-effort. BUT a deliberately-kept
-  # standalone remotepair 0.4.12 (repo ghyeongl/remote-pair) installs to the SAME com.x10lab.remote-pair*
-  # labels + RemotePairHost.app while keeping its runtime under ~/.remote-pair (xpair uses ~/.xpair). When
-  # ~/.remote-pair exists, skip the WHOLE cleanup so an xpair install never uninstalls OR stops (bootout) a
-  # 0.4.12 the user runs alongside it. ponytail: ~/.remote-pair is the discriminator; favor non-destruction —
-  # any orphaned labels/apps are inert and get reclaimed on a later install without a coexisting 0.4.12.
+  # Reclaim pre-rename cruft (RemotePair→Xpair, a29667b9) — idempotent, best-effort. The com.ghyeong.* labels
+  # and AutoApprove.app are pre-0.4.12 lineage (no collision with standalone remotepair 0.4.12, which is
+  # com.x10lab.remote-pair*), so clean them UNCONDITIONALLY — leaving stale auto-approve automation running
+  # would be a real downside.
+  U=$(id -u)
+  for L in com.ghyeong.remote-pair com.ghyeong.remote-pair-watchdog com.ghyeong.auto-approve com.ghyeong.auto-approve-watchdog; do
+    launchctl bootout "gui/$U/$L" 2>/dev/null || true
+  done
+  rm -rf "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
+  # A deliberately-kept standalone remotepair 0.4.12 (repo ghyeongl/remote-pair) installs to the SAME
+  # com.x10lab.remote-pair* labels + RemotePairHost.app/RemotePair.app, keeping its runtime under
+  # ~/.remote-pair (xpair uses ~/.xpair). Only reclaim THOSE when no 0.4.12 coexists, so an xpair install
+  # never uninstalls OR stops (bootout) a 0.4.12 the user runs alongside it. ponytail: ~/.remote-pair is the
+  # discriminator; favor non-destruction for genuine 0.4.12 items.
   if [ ! -d "$HOME/.remote-pair" ]; then
-    U=$(id -u)
-    for L in com.ghyeong.remote-pair com.ghyeong.remote-pair-watchdog com.ghyeong.auto-approve com.ghyeong.auto-approve-watchdog com.x10lab.remote-pair com.x10lab.remote-pair-watchdog com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
+    for L in com.x10lab.remote-pair com.x10lab.remote-pair-watchdog com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
       launchctl bootout "gui/$U/$L" 2>/dev/null || true
     done
-    rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
+    rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" 2>/dev/null || true
   fi
 
   # watchdog
