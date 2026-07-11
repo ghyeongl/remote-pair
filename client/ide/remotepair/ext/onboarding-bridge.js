@@ -2392,3 +2392,44 @@ const bridge = {
 };
 
 module.exports = bridge;
+
+// Direct-run headless entry: `node onboarding-bridge.js pair <host>` fetches the host's live pairing
+// metadata, sends a signed pairing request to its UDP endpoint, and prints the result as JSON. Gated on
+// require.main so `require()` from the extension is unaffected.
+// ponytail: reuses fetchPairingMetadata / normalizePairingMetadata / bridge.sendPairingRequest.
+if (require.main === module) {
+  (async () => {
+    // ponytail: set process.exitCode + return (not process.exit) so buffered stdout flushes before exit
+    // on the SSH/pipe path.
+    const [cmd, rawHost] = process.argv.slice(2);
+    if (cmd !== "pair" || !rawHost) {
+      console.error("usage: onboarding-bridge.js pair <host>");
+      process.exitCode = 2;
+      return;
+    }
+    // Normalize the ssh target (strip user@ / :port / whitespace) so sendPairingRequest's validHost accepts it.
+    const host = sshTargetHost(rawHost);
+    try {
+      const meta = normalizePairingMetadata(await fetchPairingMetadata(host));
+      if (!meta.ok) {
+        console.log(JSON.stringify({ ok: false, err: meta.err }));
+        process.exitCode = 1;
+        return;
+      }
+      const res = await bridge.sendPairingRequest({
+        host,
+        port: meta.pairPort,
+        hostKeyFP: meta.fp,
+        hostNonce: meta.hostNonce,
+        serviceInstanceID: meta.serviceInstanceID,
+        name: os.hostname(),
+        user: os.userInfo().username,
+      });
+      console.log(JSON.stringify(res));
+      process.exitCode = res && res.ok ? 0 : 1;
+    } catch (e) {
+      console.log(JSON.stringify({ ok: false, err: String((e && e.message) || e) }));
+      process.exitCode = 1;
+    }
+  })();
+}

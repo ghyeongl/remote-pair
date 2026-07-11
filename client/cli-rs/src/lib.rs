@@ -27,6 +27,7 @@ pub mod mapping;
 pub mod mode;
 pub mod notify;
 pub mod open_gui;
+pub mod pair_accept;
 pub mod platform;
 pub mod remote_quote;
 pub mod respawn;
