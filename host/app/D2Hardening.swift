@@ -55,7 +55,7 @@ enum D2Hardening {
     pfctl -a com.x10lab.xpair -sr 2>/dev/null | grep -q 'block .* port = 22' || { echo 'xpair pf anchor not enforcing' >&2; exit 1; }
     main=$(pfctl -sr 2>/dev/null)
     a=$(printf '%s\\n' "$main" | grep -n 'anchor "com.x10lab.xpair"' | head -1 | cut -d: -f1)
-    p=$(printf '%s\\n' "$main" | grep -nE 'pass .*quick.*port = 22' | head -1 | cut -d: -f1)
+    p=$(printf '%s\\n' "$main" | grep -nE 'pass .*quick.*port ?=? ?(22|ssh)' | head -1 | cut -d: -f1)
     [ -n "$a" ] || { echo 'xpair pf anchor missing from ruleset' >&2; exit 1; }
     { [ -z "$p" ] || [ "$p" -gt "$a" ]; } || { echo 'xpair pf anchor shadowed by earlier quick pass' >&2; exit 1; }
     """
@@ -108,7 +108,7 @@ enum D2Hardening {
             for raw in lines(f) {
                 let t = raw.trimmingCharacters(in: .whitespaces).lowercased()
                 if t.hasPrefix("#") || t.isEmpty { continue }
-                if t.hasPrefix("match ") { inMatch = !(t == "match all" || t == "match any"); continue }
+                if t.hasPrefix("match ") { inMatch = true; continue }  // any Match scope (incl. Match all) can override
                 if inMatch, t.hasPrefix("allowtcpforwarding") || t.hasPrefix("allowstreamlocalforwarding") {
                     let v = t.split(separator: " ", maxSplits: 1).dropFirst().first?.trimmingCharacters(in: .whitespaces) ?? ""
                     if v != "no" && v != "local" { return false }
@@ -120,13 +120,28 @@ enum D2Hardening {
 
     // pf needs BOTH the `anchor "…"` evaluation line AND `load anchor … from …`, and the anchor call must
     // be reached before any earlier `quick` :22 pass or its block never evaluates.
+    // pf `set skip on <if>` passes that interface as if pf were disabled, bypassing our anchor block.
+    // Refuse unless every skipped interface is loopback.
+    private static func pfNoNonLoopbackSkip() -> Bool {
+        for l in lines("/etc/pf.conf") {
+            let t = l.trimmingCharacters(in: .whitespaces)
+            guard t.hasPrefix("set skip on") else { continue }
+            let rest = String(t.dropFirst("set skip on".count))
+                .replacingOccurrences(of: "{", with: " ").replacingOccurrences(of: "}", with: " ")
+            for tok in rest.split(whereSeparator: { $0 == " " || $0 == "\t" }) where tok != "lo" && tok != "lo0" {
+                return false
+            }
+        }
+        return true
+    }
+
     private static func pfConfAnchorReachable() -> Bool {
         let ls = lines("/etc/pf.conf")
         guard let anchorIdx = ls.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "anchor \"com.x10lab.xpair\"" }),
               ls.contains(where: { $0.hasPrefix("load anchor \"com.x10lab.xpair\"") }) else { return false }
         if let passIdx = ls.firstIndex(where: { l in
             let t = l.trimmingCharacters(in: .whitespaces)
-            return t.hasPrefix("pass") && t.contains("quick") && (t.contains("port 22") || t.contains("port = 22"))
+            return t.hasPrefix("pass") && t.contains("quick") && (t.contains("port 22") || t.contains("port = 22") || t.contains("port ssh"))
         }) { return anchorIdx < passIdx }
         return true
     }
@@ -142,6 +157,7 @@ enum D2Hardening {
             && fileEquals(pfPlist, plistContent)
             && fileEquals(pfAnchor, pfAnchorContent)
             && pfConfAnchorReachable()
+            && pfNoNonLoopbackSkip()
     }
 
     /// One-time privileged apply (both pieces) via the GUI admin prompt. No-op if already applied.
@@ -167,10 +183,11 @@ enum D2Hardening {
         sshd -T 2>/dev/null | grep -qx 'allowtcpforwarding local' || { echo 'sshd -T: AllowTcpForwarding not local' >&2; exit 1; }
         sshd -T 2>/dev/null | grep -qx 'allowstreamlocalforwarding local' || { echo 'sshd -T: AllowStreamLocalForwarding not local' >&2; exit 1; }
         # Refuse if any Match block re-enables forwarding (sshd -T shows only the global value).
-        awk 'FNR==1{inm=0} { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { l=tolower(t); inm=(l!="match all" && l!="match any"); next } inm && tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="no" && v!="local") found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || { echo 'sshd Match block re-enables forwarding' >&2; exit 1; }
+        awk 'FNR==1{inm=0} { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { inm=1; next } inm && tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="no" && v!="local") found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || { echo 'sshd Match block re-enables forwarding' >&2; exit 1; }
         printf %s '\(b64(pfAnchorContent))' | base64 -D > '\(pfAnchor)'; chmod 644 '\(pfAnchor)'
         # Insert our anchor call at the HEAD of the filter section (before any user quick rule) if absent.
         grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || { t=$(mktemp); awk '!ins && /^[[:space:]]*(block|pass|anchor)[[:space:]]/ && !/-anchor/ { print "anchor \\"com.x10lab.xpair\\""; print "load anchor \\"com.x10lab.xpair\\" from \\"\(pfAnchor)\\""; ins=1 } { print } END { if (!ins) { print "anchor \\"com.x10lab.xpair\\""; print "load anchor \\"com.x10lab.xpair\\" from \\"\(pfAnchor)\\"" } }' /etc/pf.conf > "$t"; cat "$t" > /etc/pf.conf; rm -f "$t"; }
+        awk 'tolower($1)=="set" && tolower($2)=="skip" && tolower($3)=="on" { for (i=4;i<=NF;i++){ g=$i; gsub(/[{}]/,"",g); if (g!="" && g!="lo" && g!="lo0") bad=1 } } END { exit(bad?1:0) }' /etc/pf.conf || { echo 'pf set skip on non-loopback interface' >&2; exit 1; }
         install -d -o root -g wheel -m 755 '\(supportDir)'
         printf %s '\(b64(loaderScript))' | base64 -D > '\(pfLoader)'; chown root:wheel '\(pfLoader)'; chmod 755 '\(pfLoader)'
         printf %s '\(b64(plistContent))' | base64 -D > '\(pfPlist)'; chmod 644 '\(pfPlist)'

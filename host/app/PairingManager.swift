@@ -710,15 +710,16 @@ enum XpairAuthorizedKeys {
           d2_bad=$(grep -nE '^[[:space:]]*(AllowTcpForwarding|AllowStreamLocalForwarding|Match)([[:space:]]|$)' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)
           { [ -z "$d2_bad" ] || [ "$d2_bad" -gt "$d2_inc" ]; } || return 1
           # No Match block may re-enable forwarding (yes/all) for the paired login.
-          awk 'FNR==1{inm=0} { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { l=tolower(t); inm=(l!="match all" && l!="match any"); next } inm && tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="no" && v!="local") found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || return 1
+          awk 'FNR==1{inm=0} { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { inm=1; next } inm && tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="no" && v!="local") found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || return 1
           # pf enforcement must be installed to load at boot (mirror D2Hardening.applied()): loader + LaunchDaemon.
           [ -s '/Library/Application Support/Xpair/xpair-pf.sh' ] || return 1
           [ -s /Library/LaunchDaemons/com.x10lab.xpair.pf.plist ] || return 1
           grep -qx 'block in quick proto tcp to any port 22' /etc/pf.anchors/com.x10lab.xpair 2>/dev/null || return 1
           grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || return 1
           grep -q '^load anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || return 1
+          awk 'tolower($1)=="set" && tolower($2)=="skip" && tolower($3)=="on" { for (i=4;i<=NF;i++){ g=$i; gsub(/[{}]/,"",g); if (g!="" && g!="lo" && g!="lo0") bad=1 } } END { exit(bad?1:0) }' /etc/pf.conf || return 1
           d2_an=$(grep -nx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null | head -1 | cut -d: -f1)
-          d2_pp=$(grep -nE '^[[:space:]]*pass .*quick.*port ?=? ?22' /etc/pf.conf 2>/dev/null | head -1 | cut -d: -f1)
+          d2_pp=$(grep -nE '^[[:space:]]*pass .*quick.*port ?=? ?(22|ssh)' /etc/pf.conf 2>/dev/null | head -1 | cut -d: -f1)
           { [ -z "$d2_pp" ] || [ "$d2_pp" -gt "$d2_an" ]; } || return 1
           return 0
         }
@@ -1575,6 +1576,8 @@ enum PairingSecuritySelfTest {
         precondition(D2Hardening.loaderScript.contains("shadowed by earlier quick pass"))          // verifies REACHABILITY, not mere presence
         precondition(gate.contains("d2_hardened()") && gate.contains(#"grep -qx 'anchor "com.x10lab.xpair"'"#))  // gate mirrors effective hardening (pf anchor)
         precondition(gate.contains(#"grep -qx 'AllowTcpForwarding local'"#) && gate.contains("block in quick proto tcp to any port 22")) // gate checks effective sshd + default-deny anchor
+        precondition(gate.contains("(22|ssh)"))                                                    // gate matches named SSH port
+        precondition(gate.contains(#"tolower($3)=="on""#))                                          // gate rejects pf set-skip bypass
         precondition(gate.contains("com.x10lab.xpair.pf.plist") && gate.contains("xpair-pf.sh"))    // gate requires the pf loader + LaunchDaemon (mirror applied())
         precondition(gate.contains("^allow(tcp|streamlocal)forwarding") && gate.contains(#"tolower(t) ~ /^match /"#)) // gate scans Match forwarding overrides
         precondition(D2Hardening.plistContent.contains("com.x10lab.xpair.pf") && D2Hardening.plistContent.contains("RunAtLoad"))
