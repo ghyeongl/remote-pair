@@ -2271,6 +2271,9 @@ cmd_pair_accept() {
   [ -f "$_sf" ] || { echo "pair-accept: no pending pairing request (no pairing-status.json)" >&2; return 1; }
   _json="$(cat "$_sf")"
   _phase="$(_jget "$_json" phase)"; _id="$(_jget "$_json" id)"; _fp="$(_jget "$_json" keyFingerprint)"
+  # Defensive: unescape a JSON `\/` so a `/`-containing fingerprint compares raw (some encoders escape it).
+  # ponytail: `\/` is the only escape base64 SHA256 fingerprints produce; add \" / \\ if a field ever needs them.
+  _id="$(printf '%s' "$_id" | sed 's|\\/|/|g')"; _fp="$(printf '%s' "$_fp" | sed 's|\\/|/|g')"
   { [ "$_phase" = incoming ] && [ -n "$_id" ] && [ -n "$_fp" ]; } || { echo "pair-accept: no pending pairing request (phase=${_phase:-unavailable})" >&2; return 1; }
   if [ "${1:-}" = --fingerprint ]; then
     { [ -n "${2:-}" ] && [ "$2" = "$_fp" ]; } || { echo "pair-accept: --fingerprint must be a non-empty value matching the pending fingerprint ($_fp)" >&2; return 1; }

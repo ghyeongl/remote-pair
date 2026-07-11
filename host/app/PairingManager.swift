@@ -1167,8 +1167,13 @@ final class PairingManager {
     }
 
     private func writeStatusFileLocked(_ out: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys]) else { return }
-        try? data.write(to: URL(fileURLWithPath: pairStatusPath), options: .atomic)
+        guard let data = try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys]),
+              var json = String(data: data, encoding: .utf8) else { return }
+        // Foundation escapes `/` as `\/`, which JSON does not require and the bash reader mis-compares.
+        // base64 SHA256 fingerprints contain `/`, so strip the redundant escape. Safe: escaped backslashes
+        // `\\` are preserved, only the slash-escape is removed.
+        json = json.replacingOccurrences(of: "\\/", with: "/")
+        try? Data(json.utf8).write(to: URL(fileURLWithPath: pairStatusPath), options: .atomic)
     }
 
     fileprivate func selfTestPairAcceptTick() { queue.sync { pairAcceptTickLocked() } }
@@ -1737,7 +1742,7 @@ enum PairingSecuritySelfTest {
                                              sourceIP: "127.0.0.1",
                                              clientPubKey: pubLine,
                                              keyBlob: parsed.keyBlob,
-                                             fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
+                                             fingerprint: "SHA256:yL56yOOkL/tW0+Vjt6WE7sCBezG5YJpRHg13CYLVClhk",  // force `/` and `+` to cover the JSON round-trip
                                              timestamp: Int64(Date().timeIntervalSince1970))
             let dir = NSTemporaryDirectory() + "xpair-pair-selftest-\(UUID().uuidString)"
             try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -1750,6 +1755,9 @@ enum PairingSecuritySelfTest {
             PairingManager.shared.selfTestPairAcceptTick()
             precondition((PairingManager.shared.status()["phase"] as? String) == "incoming")   // rejected
             precondition(!FileManager.default.fileExists(atPath: trigger))                       // consumed once
+            // pairing-status.json must store the fingerprint's `/` RAW (not \/) so `xpair pair-accept` compares it.
+            let published = (try? String(contentsOfFile: "\(dir)/pairing-status.json", encoding: .utf8)) ?? ""
+            precondition(published.contains("/tW0+Vjt6WE7") && !published.contains("\\/"))
 
             PairingManager.shared.selfTestFreezeIncoming(req)
             try Data("{\"id\":\"trig_accept\",\"keyFingerprint\":\"\(req.fingerprint)\"}".utf8).write(to: URL(fileURLWithPath: trigger))
