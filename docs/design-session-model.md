@@ -19,7 +19,7 @@ We multiply the two. Remove either half and there is no product.
 
 | Axis | Mechanism | Notes |
 |------|-----------|-------|
-| **Access** | standard SSH (system sshd, tailnet-bound) | any client: iTerm, Blink, Termius, VSCode Remote, Orca, plain `ssh`. No Xpair client needed. |
+| **Access** | standard SSH (system sshd, tailnet-bound) | any client: iTerm, Blink, Termius, VSCode Remote, Orca, plain `ssh` — **once paired** (the client's key is in `authorized_keys`). No Xpair *client app* needed, but the one-time pairing/key-install still gates access. |
 | **Persistence** | tmux(-aqua) session, daemon-owned | survives client detach; client carries no state. Reboot-revival is the **session registry's** job (Leaf #3 re-launches the agent), **not** tmux — a tmux server dies on reboot. |
 | **GUI** | inheritance (default) **or** broker (fallback) | macOS TCC forbids GUI to a bare SSH-descended process — see below. |
 
@@ -70,7 +70,9 @@ maintenance treadmill D2 exists to avoid). Instead the agent invokes thin IPC sh
 (`rp-screencap`, `rp-input-inject`, approve-router, Claude-in-Chrome) that **hold no grant
 themselves** — they forward the request to the daemon over local IPC. The daemon, holding
 the grants, performs the action and returns the result. The agent never touches the screen
-API → macOS's per-identity rule is respected.
+API → macOS's per-identity rule is respected. The broker IPC **authenticates its callers**
+(only sanctioned agent sessions may delegate) — otherwise any local process could borrow
+GUI through it.
 
 Broker scope is therefore **narrow**: only processes that can't be in tmux-aqua. Steer
 agents to run inside tmux-aqua and inheritance covers them; the broker is the escape hatch.
@@ -89,10 +91,11 @@ The SSH ForceCommand gate routes to **XpairHost**, not directly to tmux:
 - `SSH_ORIGINAL_COMMAND` present (exec / scp / VSCode-Remote bootstrap) → **passthrough**:
   run the command, no session forced.
 - Non-command channels are gated **separately, not via this branch**: **port-forwarding**
-  (`-L`/`-R`) opens channels with no command (empty `SSH_ORIGINAL_COMMAND`) and is governed
-  by `AllowTcpForwarding` + the `-R` denial (PR #102); **sftp** arrives as the `sftp`
-  subsystem, which ForceCommand intercepts — so the gate must handle it explicitly (re-exec
-  `sftp-server`), not assume it passes through.
+  opens channels with no command (empty `SSH_ORIGINAL_COMMAND`). **Local `-L` forwards must
+  be permitted** — VSCode Remote / Orca and other remote SSH tools depend on them — while
+  **remote `-R` forwards are denied** (PR #102 sets `AllowTcpForwarding local`). **sftp**
+  arrives as the `sftp` subsystem, which ForceCommand intercepts — so the gate must handle
+  it explicitly (re-exec `sftp-server`), not assume it passes through.
 - Access ≠ session: entry gives access; session engagement is the daemon's to route.
 
 The D2 **access-layer hardening** (pf tailnet-bind, `-R` denial, sshd drop-in — PR #102)
