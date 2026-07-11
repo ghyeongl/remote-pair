@@ -21,6 +21,10 @@ it "preserve/rc-ok"; assert_rc "$RP_RC" 0 "install rc=0 :: stderr=[$RP_ERR]"
 it "preserve/legacy-remotepair-app-kept"
 [ -d "$HOME/Applications/RemotePairHost.app" ] && _pass "0.4.12 RemotePairHost.app preserved" \
   || _fail "install deleted a coexisting remotepair 0.4.12 RemotePairHost.app"
+it "preserve/service-labels-not-booted"
+grep -q 'bootout.*com\.x10lab\.remote-pair' "$MOCKLOG" \
+  && _fail "install booted out a com.x10lab.remote-pair* label (stops the coexisting 0.4.12 service)" \
+  || _pass "0.4.12 service labels (com.x10lab.remote-pair*) left running"
 
 # No 0.4.12 present → genuinely-orphaned pre-rename RemotePairHost.app is still reclaimed.
 new_sandbox; make_mocks
@@ -29,5 +33,9 @@ run_install --role host --no-native --no-sync
 it "reclaim/orphaned-app-removed"
 [ -d "$HOME/Applications/RemotePairHost.app" ] && _fail "orphaned RemotePairHost.app not removed" \
   || _pass "orphaned pre-rename RemotePairHost.app removed"
+it "reclaim/orphaned-labels-booted"
+grep -q 'bootout.*com\.x10lab\.remote-pair' "$MOCKLOG" \
+  && _pass "orphaned com.x10lab.remote-pair* labels booted out" \
+  || _fail "orphaned com.x10lab.remote-pair* labels not reclaimed when no 0.4.12 present"
 
 finish
