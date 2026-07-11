@@ -2266,8 +2266,8 @@ cmd_pair_accept() {
   _json="$(cat "$_sf")"
   _phase="$(_jget "$_json" phase)"; _id="$(_jget "$_json" id)"; _fp="$(_jget "$_json" keyFingerprint)"
   { [ "$_phase" = incoming ] && [ -n "$_id" ] && [ -n "$_fp" ]; } || { echo "pair-accept: no pending pairing request (phase=${_phase:-unavailable})" >&2; return 1; }
-  if [ "${1:-}" = --fingerprint ] && [ -n "${2:-}" ] && [ "$2" != "$_fp" ]; then
-    echo "pair-accept: fingerprint mismatch (status=$_fp, supplied=$2)" >&2; return 1
+  if [ "${1:-}" = --fingerprint ]; then
+    { [ -n "${2:-}" ] && [ "$2" = "$_fp" ]; } || { echo "pair-accept: --fingerprint must be a non-empty value matching the pending fingerprint ($_fp)" >&2; return 1; }
   fi
   _t="$RP_HOST_DIR/pair-accept.request"
   printf '{"id":%s,"keyFingerprint":%s}' "$(_json_str "$_id")" "$(_json_str "$_fp")" > "$_t.$$.tmp" \

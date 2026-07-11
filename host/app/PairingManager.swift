@@ -1157,10 +1157,10 @@ final class PairingManager {
     private func pairAcceptTickLocked() {
         expireFrozenIncomingLocked()   // drop a TTL-expired incoming BEFORE publishing, so the CLI never accepts a stale request
         _ = statusLocked()   // refreshes pairing-status.json so `xpair pair-accept` can read the pending request
+        guard let data = FileManager.default.contents(atPath: pairAcceptTriggerPath) else { return }
+        try? FileManager.default.removeItem(atPath: pairAcceptTriggerPath)   // consume once whatever the state — never leave a stale trigger to fire against a later request
         guard incoming != nil,
-              let data = FileManager.default.contents(atPath: pairAcceptTriggerPath) else { return }
-        try? FileManager.default.removeItem(atPath: pairAcceptTriggerPath)   // consume once, whatever the outcome
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = obj["id"] as? String,
               let fp = obj["keyFingerprint"] as? String else { return }
         _ = try? acceptIncomingLocked(requestID: id, fingerprint: fp)   // gate rejects empty/mismatched fp
@@ -1225,6 +1225,7 @@ final class PairingManager {
             frozenDropLogCount = 0
             phase = "incoming"
             lastError = ""
+            _ = statusLocked()   // publish the new incoming to pairing-status.json now, so `xpair pair-accept` sees it promptly (not only on the 1s tick)
             log(.info, "pairing: verified incoming request fp=\(verified.fingerprint) from=\(ip)")
         } catch {
             lastError = String(describing: error)
@@ -1754,6 +1755,12 @@ enum PairingSecuritySelfTest {
             try Data("{\"id\":\"trig_accept\",\"keyFingerprint\":\"\(req.fingerprint)\"}".utf8).write(to: URL(fileURLWithPath: trigger))
             PairingManager.shared.selfTestPairAcceptTick()
             precondition((PairingManager.shared.status()["phase"] as? String) == "accepted-pending-proof")
+
+            // A trigger with no matching incoming is consumed, never left to fire against a later request.
+            PairingManager.shared.selfTestResetState()
+            try Data(#"{"id":"trig_accept","keyFingerprint":"SHA256:BB"}"#.utf8).write(to: URL(fileURLWithPath: trigger))
+            PairingManager.shared.selfTestPairAcceptTick()
+            precondition(!FileManager.default.fileExists(atPath: trigger))                       // stale trigger consumed
         }
     }
 

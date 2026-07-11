@@ -2399,10 +2399,13 @@ module.exports = bridge;
 // ponytail: reuses fetchPairingMetadata / normalizePairingMetadata / bridge.sendPairingRequest.
 if (require.main === module) {
   (async () => {
+    // ponytail: set process.exitCode + return (not process.exit) so buffered stdout flushes before exit
+    // on the SSH/pipe path.
     const [cmd, rawHost] = process.argv.slice(2);
     if (cmd !== "pair" || !rawHost) {
       console.error("usage: onboarding-bridge.js pair <host>");
-      process.exit(2);
+      process.exitCode = 2;
+      return;
     }
     // Normalize the ssh target (strip user@ / :port / whitespace) so sendPairingRequest's validHost accepts it.
     const host = sshTargetHost(rawHost);
@@ -2410,7 +2413,8 @@ if (require.main === module) {
       const meta = normalizePairingMetadata(await fetchPairingMetadata(host));
       if (!meta.ok) {
         console.log(JSON.stringify({ ok: false, err: meta.err }));
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
       const res = await bridge.sendPairingRequest({
         host,
@@ -2422,10 +2426,10 @@ if (require.main === module) {
         user: os.userInfo().username,
       });
       console.log(JSON.stringify(res));
-      process.exit(res && res.ok ? 0 : 1);
+      process.exitCode = res && res.ok ? 0 : 1;
     } catch (e) {
       console.log(JSON.stringify({ ok: false, err: String((e && e.message) || e) }));
-      process.exit(1);
+      process.exitCode = 1;
     }
   })();
 }
