@@ -1108,25 +1108,67 @@ final class PairingManager {
     }
 
     func acceptIncoming(requestID: String, fingerprint: String) throws -> [String: Any] {
-        try queue.sync {
-            expireFrozenIncomingLocked()
-            guard let req = incoming else { throw PairingSecurityError.noIncomingRequest }
-            guard req.id == requestID,
-                  !fingerprint.isEmpty,
-                  fingerprint == req.fingerprint else {
-                throw PairingSecurityError.requestMismatch
-            }
-            let rec = try XpairAuthorizedKeys.install(req)
-            accepted = rec
-            incoming = nil
-            incomingExpiresAt = nil
-            phase = "accepted-pending-proof"
-            closeEndpoint()
-            scheduleProofExpiryLocked()
-            log(.info, "pairing: accepted client_id=\(rec.clientID) fp=\(rec.fingerprint)")
-            return statusLocked()
+        try queue.sync { try acceptIncomingLocked(requestID: requestID, fingerprint: fingerprint) }
+    }
+
+    // Same exact-fingerprint gate as the GUI accept; callable with the pairing lock already held (the
+    // headless trigger watcher runs on `queue`).
+    private func acceptIncomingLocked(requestID: String, fingerprint: String) throws -> [String: Any] {
+        expireFrozenIncomingLocked()
+        guard let req = incoming else { throw PairingSecurityError.noIncomingRequest }
+        guard req.id == requestID,
+              !fingerprint.isEmpty,
+              fingerprint == req.fingerprint else {
+            throw PairingSecurityError.requestMismatch
+        }
+        let rec = try XpairAuthorizedKeys.install(req)
+        accepted = rec
+        incoming = nil
+        incomingExpiresAt = nil
+        phase = "accepted-pending-proof"
+        closeEndpoint()
+        scheduleProofExpiryLocked()
+        log(.info, "pairing: accepted client_id=\(rec.clientID) fp=\(rec.fingerprint)")
+        return statusLocked()
+    }
+
+    // Headless pairing (no host GUI): publish status to ~/.xpair/host/pairing-status.json and consume a
+    // ~/.xpair/host/pair-accept.request trigger (written by `xpair pair-accept` over SSH) → acceptIncoming
+    // through the exact-fingerprint gate. GUI accept path unchanged.
+    private var pairAcceptTimer: DispatchSourceTimer?
+    private var pairStatusPath: String { "\(RP_DIR)/pairing-status.json" }
+    private var pairAcceptTriggerPath: String { "\(RP_DIR)/pair-accept.request" }
+
+    func startPairAcceptWatcher() {
+        queue.sync {
+            guard pairAcceptTimer == nil else { return }
+            // ponytail: 1s poll — the trigger file is tiny and only appears during a pairing window; a
+            // filesystem watch would be more machinery than this is worth.
+            let t = DispatchSource.makeTimerSource(queue: queue)
+            t.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+            t.setEventHandler { [weak self] in self?.pairAcceptTickLocked() }
+            pairAcceptTimer = t
+            t.resume()
         }
     }
+
+    private func pairAcceptTickLocked() {
+        _ = statusLocked()   // refreshes pairing-status.json so `xpair pair-accept` can read the pending request
+        guard incoming != nil,
+              let data = FileManager.default.contents(atPath: pairAcceptTriggerPath) else { return }
+        try? FileManager.default.removeItem(atPath: pairAcceptTriggerPath)   // consume once, whatever the outcome
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = obj["id"] as? String,
+              let fp = obj["keyFingerprint"] as? String else { return }
+        _ = try? acceptIncomingLocked(requestID: id, fingerprint: fp)   // gate rejects empty/mismatched fp
+    }
+
+    private func writeStatusFileLocked(_ out: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys]) else { return }
+        try? data.write(to: URL(fileURLWithPath: pairStatusPath), options: .atomic)
+    }
+
+    fileprivate func selfTestPairAcceptTick() { queue.sync { pairAcceptTickLocked() } }
 
     func denyIncoming() -> [String: Any] {
         queue.sync {
@@ -1401,6 +1443,7 @@ final class PairingManager {
                 ]
             }
         }
+        writeStatusFileLocked(out)
         return out
     }
 
@@ -1577,6 +1620,7 @@ enum PairingSecuritySelfTest {
         precondition(!PairingSecurity.proofMatches(approvedFingerprint: "SHA256:A", loginFingerprint: "SHA256:B"))
         try markPairedRequiresObservedSSHLoginFingerprint(pubLine: pubLine)
         try acceptIncomingRequiresExactNonEmptyFingerprint(pubLine: pubLine)
+        try pairAcceptTriggerAcceptsMatchingFingerprint(pubLine: pubLine)
         try gateRequiresObservedFingerprintAndSeparatesProofFromCommand(pubLine: pubLine)
         try gateGrantsForwardingOnlyAfterProof(pubLine: pubLine)
         try installPreservesUnmarkedSameBlobAuthorizedKey(pubLine: pubLine)
@@ -1675,6 +1719,36 @@ enum PairingSecuritySelfTest {
             precondition((accepted["phase"] as? String) == "accepted-pending-proof")
             let auth = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
             precondition(auth.contains(" fp=\(req.fingerprint) "))
+        }
+    }
+
+    // Headless accept trigger: a pair-accept.request with the WRONG fingerprint is consumed but rejected
+    // (same gate as the GUI); the RIGHT fingerprint accepts.
+    private static func pairAcceptTriggerAcceptsMatchingFingerprint(pubLine: String) throws {
+        try withTemporaryAuthorizedKeysHome {
+            let parsed = try PairingSecurity.parseEd25519PublicKey(pubLine)
+            let req = VerifiedPairingRequest(id: "trig_accept",
+                                             name: "trig",
+                                             user: "tester",
+                                             sourceIP: "127.0.0.1",
+                                             clientPubKey: pubLine,
+                                             keyBlob: parsed.keyBlob,
+                                             fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
+                                             timestamp: Int64(Date().timeIntervalSince1970))
+            let trigger = "\(RP_DIR)/pair-accept.request"
+            try? FileManager.default.createDirectory(atPath: RP_DIR, withIntermediateDirectories: true)
+            defer { PairingManager.shared.selfTestResetState(); try? FileManager.default.removeItem(atPath: trigger) }
+
+            PairingManager.shared.selfTestFreezeIncoming(req)
+            try Data(#"{"id":"trig_accept","keyFingerprint":"SHA256:wrong"}"#.utf8).write(to: URL(fileURLWithPath: trigger))
+            PairingManager.shared.selfTestPairAcceptTick()
+            precondition((PairingManager.shared.status()["phase"] as? String) == "incoming")   // rejected
+            precondition(!FileManager.default.fileExists(atPath: trigger))                       // consumed once
+
+            PairingManager.shared.selfTestFreezeIncoming(req)
+            try Data("{\"id\":\"trig_accept\",\"keyFingerprint\":\"\(req.fingerprint)\"}".utf8).write(to: URL(fileURLWithPath: trigger))
+            PairingManager.shared.selfTestPairAcceptTick()
+            precondition((PairingManager.shared.status()["phase"] as? String) == "accepted-pending-proof")
         }
     }
 

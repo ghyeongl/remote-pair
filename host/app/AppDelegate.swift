@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ensureDirs()
         XpairAuthorizedKeys.expirePendingProofs()
         XpairAuthorizedKeys.reconcileForwardingAllowlist()   // migrate keys paired under the old narrow permitopen
+        PairingManager.shared.startPairAcceptWatcher()       // headless accept: pairing-status.json + pair-accept.request
         // Telemetry consent flags — both default OFF (opt-in). Registered so a never-toggled key reads false
         // (zero network calls by default).
         UserDefaults.standard.register(defaults: [
