@@ -6,6 +6,8 @@
 
 <p align="center"><b>English</b> · <a href="README.ko.md">Korean</a></p>
 
+<p align="center">Built by <a href="https://x10lab.ai">X10LAB</a></p>
+
 Run the agent you already subscribe to — **Claude**, **Codex**, or **OpenCode** — on an always-on Mac, with full macOS **computer-use** (screenshot, click, type) intact, and attach to it from your laptop or phone over mosh/SSH. Your work keeps running while you're away; you bring your own subscription, so there are no extra AI credits.
 
 <p align="center">
