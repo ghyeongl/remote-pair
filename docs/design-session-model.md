@@ -84,27 +84,40 @@ computer-use must be pointed at the broker (our tools) rather than raw screen AP
 reference client wires this; BYO gets the tools + docs. Vanilla raw computer-use inside
 VSCode Remote still fails — unavoidable per macOS.
 
-## D2 gate redesign (implication)
+## D2 gate — mostly already shipped (#100), small delta remaining
 
-The SSH ForceCommand gate routes to **XpairHost**, not directly to tmux:
-- `ForceCommand → xpair-ssh-gate → XpairHost` (daemon decides), **not** `→ tmux attach`.
-- Interactive terminal client → daemon lands it in the GUI-capable session (tmux-aqua) —
-  ergonomically, so `tmux` is invisible plumbing, not something the user types.
-- `SSH_ORIGINAL_COMMAND` present (exec / scp / VSCode-Remote bootstrap) → **passthrough**:
-  run the command, no session forced.
-- Non-command channels are gated **separately, not via this branch**: **port-forwarding**
-  opens channels with no command (empty `SSH_ORIGINAL_COMMAND`). **Local `-L` forwards must
-  be permitted** — VSCode Remote / Orca and other remote SSH tools depend on them — while
-  **remote `-R` forwards are denied** (PR #102 sets `AllowTcpForwarding local`). Permitting
-  `-L` also means the paired key's `permitopen` must list the allowed targets, else the
-  forward is refused despite `AllowTcpForwarding local`. **sftp**
-  arrives as the `sftp` subsystem, which ForceCommand intercepts — so the gate must handle
-  it explicitly (re-exec `sftp-server`), not assume it passes through.
-- Access ≠ session: entry gives access; session engagement is the daemon's to route.
+The shipped `xpair-ssh-gate` (PR #100) **already implements this session model** — it is not a
+rewrite. Per SSH channel, after ledger auth, it classifies **command/subsystem first, tmux as
+the fall-through** (routing on `SSH_ORIGINAL_COMMAND`/subsystem, **not** on the pty — `ssh -tt
+host cmd` has a pty *and* a command, so it must take the exec arm, not tmux):
 
-The D2 **access-layer hardening** (pf tailnet-bind, `-R` denial, sshd drop-in — PR #102)
-is unaffected by this and lands first; the **gate-routing** change (daemon routing +
-access/session split) is a separate follow-up PR.
+- **sftp subsystem** → `exec sftp-server` (passthrough).
+- **exec / scp / rsync / VSCode-Remote bootstrap** (`SSH_ORIGINAL_COMMAND` non-empty) →
+  `exec "$SHELL" -c "$CMD"` (passthrough, under the account's login shell). **No session forced**
+  — this is the access ≠ session behavior for non-interactive, already correct.
+- **Interactive** (no command, fall-through) → **attach the daemon-owned `tmux-aqua` session**
+  (iff its `_keeper` is alive; the gate never *starts* the server). Because the daemon
+  owns/keeps that tmux server in the **GUI login session**, attaching it is exactly what gives
+  the interactive session **GUI inheritance** — so a direct attach here is *correct*, the thing
+  you want, not something to route around. (This corrects an earlier draft of this doc that said
+  "ForceCommand → daemon, **not** → tmux attach": attaching the daemon-owned tmux-aqua **is** the
+  GUI-capable session.)
+- **Pure port-forward** (`ssh -N`) → the forced command never runs; governed by the
+  `authorized_keys` forwarding policy, not the gate.
+
+Access ≠ session holds for non-interactive (shipped); interactive fall-through auto-attaches the
+GUI-capable session **by design** — the "attach the box and you're in it" behavior.
+
+### Remaining delta (not a rewrite)
+1. **Forwarding-policy widening** — the paired key's `permitopen` is currently locked to the RD
+   signaling port (`127.0.0.1:8890`). VSCode Remote / open-remote-ssh (D5) need a `-L` forward to
+   their own remote-server port, so `permitopen` must widen accordingly. This is the one
+   **security-sensitive** decision (it was the D2 lockdown boundary) — the exact allowlist needs
+   deliberate sign-off. `-R` remote forwards stay denied (PR #102, `AllowTcpForwarding local`).
+2. **Broker (D3)** — GUI for BYO processes that can't run inside tmux-aqua; a separate unit.
+
+The D2 **access-layer hardening** (pf tailnet-bind, `-R` denial, sshd drop-in — PR #100 gate +
+PR #102 hardening) is in. What's left of D2 is item 1 above, not a gate rewrite.
 
 ## Reference client is not a runtime dependency
 
