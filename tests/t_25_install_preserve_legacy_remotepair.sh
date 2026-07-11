@@ -1,57 +1,67 @@
 #!/usr/bin/env bash
-# t_25_install_preserve_legacy_remotepair — install.sh must not uninstall/stop a deliberately-kept
-# standalone remotepair 0.4.12, but MUST reclaim an old-xpair pre-rename install (its "old self") on
-# upgrade. Both live under ~/.remote-pair with com.x10lab.remote-pair-host, so the discriminator is the
-# app's CFBundleShortVersionString: standalone = 0.4.x (preserve); pre-rename old-xpair = 0.5.0a… (clean).
+# t_25_install_preserve_legacy_remotepair — install.sh must preserve a deliberately-kept standalone
+# remotepair 0.4.x (app + com.x10lab.remote-pair* service), reclaim an old-xpair pre-rename install
+# (0.5.0a…) on upgrade, and — fail-safe — preserve any present-but-unreadable RemotePairHost.app rather
+# than delete an app it cannot identify. The app may be a cask install in /Applications, so both dirs are
+# probed (LEGACY_APP_DIRS overrides them to sandbox paths here). Version read via `defaults` (binary+XML).
 cd "$(dirname "$0")"; . ./lib.sh
 
 INSTALL_SRC="${INSTALL_SRC:-$_REPO_ROOT/shared/install.sh}"
 make_mocks() { local m; for m in ssh mosh pbs brew osascript launchctl open; do make_mock "$m"; done; }
-run_install() {
+run_install() {  # LEGACY_APP_DIRS points the app probe at two sandbox dirs (stand-in for ~/Applications + /Applications)
   RP_OUT="$(PATH="$MOCKBIN:$PATH" HOME="$HOME" RP_DIR="$RP_DIR" SERVICES_DIR="$SBX/Services" RP_YES=1 \
+            LEGACY_APP_DIRS="$HOME/Applications $HOME/Applications2" \
             bash "$INSTALL_SRC" "$@" </dev/null 2>"$RP_ERRFILE")"; RP_RC=$?
   RP_ERR="$(cat "$RP_ERRFILE" 2>/dev/null)"
 }
-make_remotepair_app() {  # $1 = CFBundleShortVersionString
-  mkdir -p "$HOME/Applications/RemotePairHost.app/Contents"
-  printf '<?xml version="1.0"?>\n<plist version="1.0"><dict>\n<key>CFBundleShortVersionString</key><string>%s</string>\n</dict></plist>\n' "$1" \
-    > "$HOME/Applications/RemotePairHost.app/Contents/Info.plist"
+make_app() {  # $1=dir $2=version   (empty version → plist with no CFBundleShortVersionString key = unreadable)
+  mkdir -p "$1/RemotePairHost.app/Contents"
+  if [ -n "$2" ]; then
+    printf '<?xml version="1.0"?>\n<plist version="1.0"><dict>\n<key>CFBundleShortVersionString</key><string>%s</string>\n</dict></plist>\n' "$2" > "$1/RemotePairHost.app/Contents/Info.plist"
+  else
+    printf '<?xml version="1.0"?>\n<plist version="1.0"><dict>\n<key>CFBundleName</key><string>RemotePairHost</string>\n</dict></plist>\n' > "$1/RemotePairHost.app/Contents/Info.plist"
+  fi
 }
+booted() { grep -q 'bootout.*com\.x10lab\.remote-pair' "$MOCKLOG"; }
 
-# 1) Standalone 0.4.12 coexisting → app + service preserved, but pre-0.4.12 auto-approve still cleaned.
+# 1) Standalone 0.4.12, BINARY plist, in ~/Applications → preserved (app + service).
 new_sandbox; make_mocks
-make_remotepair_app 0.4.12; mkdir -p "$HOME/Applications/AutoApprove.app" "$HOME/.remote-pair"
+make_app "$HOME/Applications" 0.4.12; plutil -convert binary1 "$HOME/Applications/RemotePairHost.app/Contents/Info.plist"
 run_install --role host --no-native --no-sync
-it "standalone/rc-ok"; assert_rc "$RP_RC" 0 "install rc=0 :: stderr=[$RP_ERR]"
-it "standalone/app-kept"
-[ -d "$HOME/Applications/RemotePairHost.app" ] && _pass "standalone 0.4.12 RemotePairHost.app preserved" \
-  || _fail "install deleted a coexisting standalone 0.4.12 RemotePairHost.app"
-it "standalone/service-not-booted"
-grep -q 'bootout.*com\.x10lab\.remote-pair' "$MOCKLOG" \
-  && _fail "install stopped the coexisting 0.4.12 service (com.x10lab.remote-pair*)" \
-  || _pass "0.4.12 service labels left running"
-it "standalone/auto-approve-still-cleaned"
-[ -d "$HOME/Applications/AutoApprove.app" ] && _fail "pre-0.4.12 AutoApprove.app left behind" \
-  || _pass "AutoApprove.app cleaned regardless"
+it "binary-0.4.x/rc-ok"; assert_rc "$RP_RC" 0 "install rc=0 :: stderr=[$RP_ERR]"
+it "binary-0.4.x/preserved"
+[ -d "$HOME/Applications/RemotePairHost.app" ] && ! booted && _pass "binary-plist 0.4.12 preserved (app+service)" \
+  || _fail "binary-plist 0.4.12 app deleted or service booted"
 
-# 2) Old-xpair pre-rename (0.5.0a…) being upgraded → its old self IS reclaimed.
+# 2) Standalone 0.4.x cask-installed in /Applications (2nd probe dir) → preserved (labels not booted).
 new_sandbox; make_mocks
-make_remotepair_app 0.5.0a37; mkdir -p "$HOME/.remote-pair"
+make_app "$HOME/Applications2" 0.4.9
 run_install --role host --no-native --no-sync
-it "upgrade/old-self-app-removed"
-[ -d "$HOME/Applications/RemotePairHost.app" ] && _fail "old-xpair RemotePairHost.app not reclaimed on upgrade" \
-  || _pass "old-xpair (0.5.0a) RemotePairHost.app removed on upgrade"
-it "upgrade/old-self-service-booted"
-grep -q 'bootout.*com\.x10lab\.remote-pair' "$MOCKLOG" \
-  && _pass "old-xpair com.x10lab.remote-pair* labels booted out" \
-  || _fail "old-xpair labels not reclaimed on upgrade"
+it "applications-dir-0.4.x/preserved"
+[ -d "$HOME/Applications2/RemotePairHost.app" ] && ! booted && _pass "/Applications 0.4.x preserved (service left running)" \
+  || _fail "/Applications 0.4.x not preserved"
 
-# 3) No app present → clean (rm is a no-op; labels still booted).
+# 3) App present but version UNREADABLE → preserved (fail-safe; never delete an unidentified app).
+new_sandbox; make_mocks
+make_app "$HOME/Applications" ""
+run_install --role host --no-native --no-sync
+it "unreadable/preserved"
+[ -d "$HOME/Applications/RemotePairHost.app" ] && ! booted && _pass "unreadable-version app preserved (fail-safe)" \
+  || _fail "unreadable-version app deleted/booted — must fail safe to preservation"
+
+# 4) No app anywhere → clean (labels booted).
 new_sandbox; make_mocks
 run_install --role host --no-native --no-sync
-it "noapp/labels-booted"
-grep -q 'bootout.*com\.x10lab\.remote-pair' "$MOCKLOG" \
-  && _pass "labels reclaimed when no RemotePairHost.app present" \
+it "noapp/reclaimed"
+booted && _pass "labels reclaimed when no RemotePairHost.app present" \
   || _fail "labels not reclaimed when no app present"
+
+# 5) Old-xpair pre-rename (0.5.0a…) → reclaimed (app removed + labels booted).
+new_sandbox; make_mocks
+make_app "$HOME/Applications" 0.5.0a37
+run_install --role host --no-native --no-sync
+it "old-xpair/reclaimed"
+[ ! -d "$HOME/Applications/RemotePairHost.app" ] && booted && _pass "old-xpair 0.5.0a app removed + labels booted" \
+  || _fail "old-xpair 0.5.0a not reclaimed"
 
 finish
