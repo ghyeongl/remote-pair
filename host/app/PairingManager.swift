@@ -467,14 +467,19 @@ enum XpairAuthorizedKeys {
     static func reconcileForwardingAllowlist() {
         let old = #"port-forwarding,permitopen="127.0.0.1:8890","#
         let new = #"port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*","#
-        var changed = false
-        let migrated = readAuthorizedKeyLines().map { line -> String in
-            guard isXpairAuthorizedKeyLine(line), line.contains(old) else { return line }
-            changed = true
-            return line.replacingOccurrences(of: old, with: new)
+        // Hold the same lock the gate's grant/revoke use, so the read-modify-write is atomic against a
+        // concurrent proof/revoke (else we could write back a stale snapshot and drop a grant or resurrect
+        // a revoked line).
+        withAuthorizedKeysLockNoThrow {
+            var changed = false
+            let migrated = readAuthorizedKeyLines().map { line -> String in
+                guard isXpairAuthorizedKeyLine(line), line.contains(old) else { return line }
+                changed = true
+                return line.replacingOccurrences(of: old, with: new)
+            }
+            guard changed else { return }
+            try? writeAuthorizedKeyLines(migrated)
         }
-        guard changed else { return }
-        try? writeAuthorizedKeyLines(migrated)
     }
 
     private static func readLedger() -> AuthorizedClientsLedger {
