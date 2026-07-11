@@ -285,12 +285,23 @@ if is_host; then
     fi
   fi
 
-  # Remove legacy label names — idempotent, best-effort
+  # Remove legacy label names left by the RemotePair→Xpair rename (a29667b9) — idempotent, best-effort.
   U=$(id -u)
-  for L in com.ghyeong.remote-pair com.ghyeong.remote-pair-watchdog com.ghyeong.auto-approve com.ghyeong.auto-approve-watchdog com.x10lab.remote-pair com.x10lab.remote-pair-watchdog com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
+  for L in com.ghyeong.remote-pair com.ghyeong.remote-pair-watchdog com.ghyeong.auto-approve com.ghyeong.auto-approve-watchdog com.x10lab.remote-pair com.x10lab.remote-pair-watchdog; do
     launchctl bootout "gui/$U/$L" 2>/dev/null || true
   done
-  rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
+  rm -rf "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
+  # A deliberately-kept standalone remotepair 0.4.12 (repo ghyeongl/remote-pair) installs to the SAME
+  # RemotePairHost.app / com.x10lab.remote-pair-host as our pre-rename cruft, but keeps its runtime under
+  # ~/.remote-pair (xpair uses ~/.xpair). Only reclaim those when no coexisting 0.4.12 is present, so an
+  # xpair install never uninstalls a 0.4.12 the user runs alongside it. ponytail: ~/.remote-pair is the
+  # discriminator; favor non-destruction if it exists.
+  if [ ! -d "$HOME/.remote-pair" ]; then
+    for L in com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
+      launchctl bootout "gui/$U/$L" 2>/dev/null || true
+    done
+    rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" 2>/dev/null || true
+  fi
 
   # watchdog
   install -d "$RP_DIR/bin" 2>/dev/null || mkdir -p "$RP_DIR/bin"
