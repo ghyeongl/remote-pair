@@ -695,10 +695,13 @@ enum XpairAuthorizedKeys {
         # absent (default) the legacy path below runs unchanged, so an unvalidated change cannot lock out
         # clients. When enabled, route command/subsystem FIRST, tmux-attach only as the fall-through
         # (a pty is not "interactive": `ssh -tt host cmd` has both a pty and a command).
-        # Fail-safe: also require the -R-denial drop-in as the "hardening applied" sentinel, so the front
-        # door never runs unhardened — including when the flag is flipped on a already-running host before
-        # the app has applied the privileged hardening (D2Hardening). Missing → legacy path below.
-        if [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ] && [ -f /etc/ssh/sshd_config.d/00-xpair-d2.conf ]; then
+        # Fail-safe: require the FULL hardening (the -R-denial drop-in AND the pf tailnet anchor evaluated
+        # in pf.conf) before the D2 path, so the front door never runs unhardened — including when the flag
+        # is flipped on an already-running host before the app applied it. Any piece missing → legacy path.
+        if [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ] \
+           && [ -f /etc/ssh/sshd_config.d/00-xpair-d2.conf ] \
+           && [ -s /etc/pf.anchors/com.x10lab.xpair ] \
+           && grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null; then
           # sftp subsystem → the real sftp-server. Under a `command=` forced command, sshd sets
           # SSH_ORIGINAL_COMMAND to the exact `Subsystem sftp <cmd>` value (incl. any args), NOT "sftp".
           # Read that configured value and match it exactly — handles internal-sftp, a custom path, and
@@ -1539,12 +1542,13 @@ enum PairingSecuritySelfTest {
         precondition(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
         // D2 hardening: -R-denial drop-in + osascript admin-escaping + pf loader (block en* only, utun
         // default-allow) + the boot RunAtLoad one-shot.
-        precondition(D2Hardening.sshdContent == "AllowTcpForwarding local\n")
+        precondition(D2Hardening.sshdContent == "AllowTcpForwarding local\nAllowStreamLocalForwarding local\n")  // deny -R TCP + unix-socket
         precondition(D2Hardening.osaCommand(#"printf 'x\n'"#) == #"do shell script "printf 'x\\n'" with administrator privileges"#)
         precondition(D2Hardening.loaderScript.contains("grep -vE '^(lo|utun)'"))                   // block all except lo/utun
-        precondition(D2Hardening.loaderScript.contains("block in quick proto tcp on & to any port 22"))
+        precondition(D2Hardening.loaderScript.contains("block in quick on & proto tcp to any port 22"))  // pf grammar: on before proto
         precondition(D2Hardening.loaderScript.contains("set -e") && D2Hardening.loaderScript.contains("pfctl -f /etc/pf.conf"))  // pf load must succeed
-        precondition(gate.contains("[ -f /etc/ssh/sshd_config.d/00-xpair-d2.conf ]"))              // gate requires hardening sentinel
+        precondition(D2Hardening.loaderScript.contains("port = 22") && D2Hardening.loaderScript.contains("not enforcing"))  // verifies anchor is live
+        precondition(gate.contains(#"grep -qx 'anchor "com.x10lab.xpair"'"#))                      // gate requires FULL hardening (pf too)
         precondition(D2Hardening.plistContent.contains("com.x10lab.xpair.pf") && D2Hardening.plistContent.contains("RunAtLoad"))
         print("pairing security self-test passed")
     }

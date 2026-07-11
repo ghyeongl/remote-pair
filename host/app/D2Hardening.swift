@@ -4,39 +4,41 @@
 // via the native GUI admin prompt (osascript "do shell script … with administrator privileges") —
 // terminal-free, no resident root daemon. The app verifies at launch and re-prompts ONLY if a piece is
 // missing/drifted. Two pieces:
-//   • -R denial  → /etc/ssh/sshd_config.d/00-xpair-d2.conf = "AllowTcpForwarding local" (the `00-` prefix
-//     wins sshd's first-value-per-keyword among drop-ins, which macOS Includes before the main file body).
-//   • tailnet bind → a pf anchor that blocks :22 on every interface EXCEPT loopback + utun (VPN/tailscale),
-//     loaded at boot by a RunAtLoad one-shot. Allowing utun (never blocking it) means a headless agent Mac
-//     can't be locked out by a boot-before-tailscale race or utun churn, while en*/bridge/VLAN/etc. — the
-//     LAN/public surface — stay closed.
+//   • remote-forward denial → /etc/ssh/sshd_config.d/00-xpair-d2.conf (AllowTcpForwarding local +
+//     AllowStreamLocalForwarding local: permit -L, deny -R for both TCP and unix-socket forwards).
+//   • tailnet bind → a pf anchor that blocks :22 on every interface except lo* and utun* (VPN/tailscale),
+//     loaded at boot by a RunAtLoad one-shot. Allowing any utun (never blocking it) keeps a headless
+//     agent Mac from being locked out by a boot-before-tailscale race or utun churn, while en*/bridge/VLAN
+//     — the LAN/public surface — stay closed.
 //
-// The privileged command carries the file bytes as base64 embedded in the (admin-authorized) osascript
-// string and writes them as root itself — there is NO user-writable stage a same-UID process could swap
-// between write and a root copy.
+// ponytail: continuous drift self-heal (reconcile live pf state / repair a half-edited pf.conf on every
+// launch) is deferred to a "D2 hardening drift-repair" follow-up. This PR = apply-once (which fully
+// verifies live enforcement at apply time, as root) + launch-verify-presence + fail-closed gating.
 
 import Foundation
 
 enum D2Hardening {
     static let sshdDropIn = "/etc/ssh/sshd_config.d/00-xpair-d2.conf"
-    static let sshdContent = "AllowTcpForwarding local\n"
+    static let sshdContent = "AllowTcpForwarding local\nAllowStreamLocalForwarding local\n"
     static let supportDir = "/Library/Application Support/Xpair"
     static let pfLoader = "\(supportDir)/xpair-pf.sh"
     static let pfPlist = "/Library/LaunchDaemons/com.x10lab.xpair.pf.plist"
     static let pfAnchor = "/etc/pf.anchors/com.x10lab.xpair"
 
-    // ponytail: block :22 on every interface except lo*/utun* (utun = VPN/tailscale, default-allow so a
-    // reconnect onto a new utun is never locked out). Refreshed at boot (RunAtLoad) + app-launch apply; a
-    // NIC hot-added without a reboot isn't blocked until the next boot — accepted on a dedicated host.
+    // pf.conf grammar is `action dir [quick] [on if] [proto p] …` — `on` BEFORE `proto`. Anchor file is
+    // chmod 644 so the unprivileged app can read it to verify. Enable + enforcement failures are fatal
+    // (set -e) so a broken pf makes apply() fail → the launch fail-safe removes the D2 flag.
     static let loaderScript = """
     #!/bin/sh
     set -e
     anchor=\(pfAnchor)
-    ifconfig -l | tr ' ' '\\n' | grep -vE '^(lo|utun)' | sed 's/.*/block in quick proto tcp on & to any port 22/' > "$anchor"
+    ifconfig -l | tr ' ' '\\n' | grep -vE '^(lo|utun)' | sed 's/.*/block in quick on & proto tcp to any port 22/' > "$anchor"
+    chmod 644 "$anchor"
     grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || \
       printf '\\nanchor "com.x10lab.xpair"\\nload anchor "com.x10lab.xpair" from "%s"\\n' "$anchor" >> /etc/pf.conf
-    pfctl -f /etc/pf.conf              # must succeed — set -e aborts (loader non-zero → apply() false → D2 flag removed)
-    pfctl -e 2>/dev/null || true       # enable if off; benign if already on. `-e` (not `-E`) so we don't leak PF enable-refs
+    pfctl -f /etc/pf.conf
+    pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' || pfctl -e
+    pfctl -a com.x10lab.xpair -s rules 2>/dev/null | grep -q 'port = 22' || { echo 'xpair pf anchor not enforcing' >&2; exit 1; }
     """
 
     static let plistContent = """
@@ -49,32 +51,39 @@ enum D2Hardening {
     </dict></plist>
     """
 
+    private static func lines(_ path: String) -> [String] {
+        ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
     private static func fileEquals(_ path: String, _ expected: String) -> Bool {
         (try? String(contentsOfFile: path, encoding: .utf8)) == expected
     }
-
     private static func fileContains(_ path: String, _ needle: String) -> Bool {
         ((try? String(contentsOfFile: path, encoding: .utf8)) ?? "").contains(needle)
     }
-
-    // pf needs BOTH lines: the `anchor "…"` line that EVALUATES the anchor in the main ruleset, and the
-    // `load anchor … from …` line that fills it. A substring/partial match would pass with only one.
+    // An ACTIVE (non-commented) `Include … sshd_config.d…` line — a commented mention doesn't count.
+    static func sshdIncludesDropInDir() -> Bool {
+        lines("/etc/ssh/sshd_config").contains {
+            let t = $0.trimmingCharacters(in: .whitespaces)
+            return !t.hasPrefix("#") && t.hasPrefix("Include") && t.contains("sshd_config.d")
+        }
+    }
+    // pf needs BOTH lines: the `anchor "…"` evaluation line AND `load anchor … from …`.
     private static func pfConfEvaluatesAnchor() -> Bool {
-        let lines = ((try? String(contentsOfFile: "/etc/pf.conf", encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
-        return lines.contains("anchor \"com.x10lab.xpair\"")
-            && lines.contains { $0.hasPrefix("load anchor \"com.x10lab.xpair\"") }
+        let ls = lines("/etc/pf.conf")
+        return ls.contains("anchor \"com.x10lab.xpair\"")
+            && ls.contains { $0.hasPrefix("load anchor \"com.x10lab.xpair\"") }
     }
 
-    // Verify CONTENT + every hook, not mere existence, so any drifted piece re-applies: the drop-in bytes
-    // AND that sshd actually Includes the drop-in dir; the loader + plist bytes; the /etc/pf.conf load line
-    // AND the anchor file (non-empty with a block rule — its interface list is dynamic so no byte compare).
+    // Unprivileged launch-verify of the durable config. Live pf-kernel state can't be read without root
+    // (ponytail: proven at apply time, re-asserted by the boot one-shot; continuous reconcile is the
+    // deferred follow-up).
     static func applied() -> Bool {
         fileEquals(sshdDropIn, sshdContent)
-            && fileContains("/etc/ssh/sshd_config", "/etc/ssh/sshd_config.d/")
+            && sshdIncludesDropInDir()
             && fileEquals(pfLoader, loaderScript)
             && fileEquals(pfPlist, plistContent)
             && pfConfEvaluatesAnchor()
-            && fileContains(pfAnchor, "block in quick proto tcp")
+            && fileContains(pfAnchor, "block in quick on ")
     }
 
     /// One-time privileged apply (both pieces) via the GUI admin prompt. No-op if already applied.
@@ -83,21 +92,21 @@ enum D2Hardening {
         if applied() { return true }
         func b64(_ s: String) -> String { Data(s.utf8).base64EncodedString() }
         // Root writes the files itself from base64 (safe single tokens — no user stage, no shell-metachar
-        // escaping). `set -e` aborts on any failure; the launchctl reload is the only non-fatal step.
+        // escaping). `set -e`; every step is fatal except the intentionally-guarded ones.
         let shell = [
             "set -e",
-            "umask 077",
+            "umask 022",
             "install -d /etc/ssh/sshd_config.d",
-            // Ensure sshd actually reads drop-ins: prepend the Include if the host's sshd_config lacks it
-            // (stock macOS has it; a drifted config would leave our -R denial unread). Prepend keeps it
-            // early so first-value-per-keyword still favors our 00- drop-in.
-            "grep -q '/etc/ssh/sshd_config.d/' /etc/ssh/sshd_config 2>/dev/null || { t=$(mktemp); printf 'Include /etc/ssh/sshd_config.d/*.conf\\n' > \"$t\"; cat /etc/ssh/sshd_config >> \"$t\"; cat \"$t\" > /etc/ssh/sshd_config; rm -f \"$t\"; }",
+            // Prepend an active Include if none exists (stock macOS has it; a drifted config would leave
+            // our drop-in unread). Match only an ACTIVE (uncommented) Include line.
+            "grep -qE '^[[:space:]]*Include[[:space:]].*sshd_config\\.d' /etc/ssh/sshd_config 2>/dev/null || { t=$(mktemp); printf 'Include /etc/ssh/sshd_config.d/*.conf\\n' > \"$t\"; cat /etc/ssh/sshd_config >> \"$t\"; cat \"$t\" > /etc/ssh/sshd_config; rm -f \"$t\"; }",
             "install -d -o root -g wheel -m 755 '\(supportDir)'",
             "printf %s '\(b64(sshdContent))' | base64 -D > '\(sshdDropIn)'; chmod 644 '\(sshdDropIn)'",
             "printf %s '\(b64(loaderScript))' | base64 -D > '\(pfLoader)'; chown root:wheel '\(pfLoader)'; chmod 755 '\(pfLoader)'",
             "printf %s '\(b64(plistContent))' | base64 -D > '\(pfPlist)'; chmod 644 '\(pfPlist)'",
-            "{ launchctl load -w '\(pfPlist)' 2>/dev/null || true; }",
-            "/bin/sh '\(pfLoader)'",
+            "launchctl load -w '\(pfPlist)' 2>/dev/null || true",
+            "launchctl list | grep -q com.x10lab.xpair.pf",   // registration must succeed
+            "/bin/sh '\(pfLoader)'",                            // applies pf now + verifies it enforces
         ].joined(separator: "; ")
         return runAdmin(shell)
     }
