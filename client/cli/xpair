@@ -2261,6 +2261,12 @@ EOF
 # Headless pairing-accept: read the host's pairing-status.json and write the pair-accept.request trigger the
 # host app consumes (mirrors `xpair pair-accept` in cli-rs). Run ON the host over SSH.
 cmd_pair_accept() {
+  # Only the documented forms: no args, or `--fingerprint <non-empty>`. Reject anything else (fail fast).
+  case "$#:${1:-}" in
+    0:*) ;;
+    2:--fingerprint) [ -n "${2:-}" ] || { echo "pair-accept: --fingerprint requires a non-empty value" >&2; return 1; } ;;
+    *) echo "pair-accept: usage: pair-accept [--fingerprint <fp>]" >&2; return 1 ;;
+  esac
   _sf="$RP_HOST_DIR/pairing-status.json"
   [ -f "$_sf" ] || { echo "pair-accept: no pending pairing request (no pairing-status.json)" >&2; return 1; }
   _json="$(cat "$_sf")"
