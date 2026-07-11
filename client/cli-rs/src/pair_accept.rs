@@ -35,7 +35,8 @@ pub fn run(args: &[String]) -> ExitCode {
     let phase = scan_string_field(&status, "phase").unwrap_or_default();
     let request = request_fields(&status);
     let id = request.and_then(|request| scan_string_field(request, "id"));
-    let status_fingerprint = request.and_then(|request| scan_string_field(request, "keyFingerprint"));
+    let status_fingerprint =
+        request.and_then(|request| scan_string_field(request, "keyFingerprint"));
 
     let (id, status_fingerprint) = match (id, status_fingerprint) {
         (Some(id), Some(status_fingerprint))
@@ -106,7 +107,10 @@ fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         std::process::id()
     ));
     let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
         set_mode_0600(&file)?;
         file.write_all(contents)?;
         file.sync_all()?;
