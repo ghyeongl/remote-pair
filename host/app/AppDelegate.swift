@@ -5,9 +5,11 @@
 // The menu redraws the session list on every open via NSMenuDelegate.menuNeedsUpdate.
 
 import Cocoa
+import IOKit.pwr_mgt
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let host = HostManager()
+    private var keepAwakeAssertion: IOPMAssertionID = 0
     let approve = ApproveManager()
     let lanBeacon = LanBeacon()   // LAN discovery: broadcast host hints (host role only)
     var statusItem: NSStatusItem!
@@ -19,6 +21,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         ensureDirs()
+        // Daemon-lifetime keep-awake: hold a system-sleep assertion for the app's whole life so the agent
+        // Mac keeps computing for unattended work, not only while an RD viewer is connected (that's the
+        // separate display-caffeinate in the RD server). ponytail: always-on while the daemon runs;
+        // session-aware release is a follow-up (needs the session registry to know "truly idle").
+        IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                    "Xpair keep-awake (agent worker)" as CFString,
+                                    &keepAwakeAssertion)
         XpairAuthorizedKeys.expirePendingProofs()
         XpairAuthorizedKeys.reconcileForwardingAllowlist()   // migrate keys paired under the old narrow permitopen
         // Telemetry consent flags — both default OFF (opt-in). Registered so a never-toggled key reads false
@@ -141,6 +151,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ note: Notification) {
         lanBeacon.stop()
+        if keepAwakeAssertion != 0 { IOPMAssertionRelease(keepAwakeAssertion) }
+    }
+
+    /// Self-test: the keep-awake assertion can be created (non-zero id) and released.
+    static func keepAwakeSelfTest() {
+        var id: IOPMAssertionID = 0
+        let rc = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                                             IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                             "Xpair keep-awake self-test" as CFString, &id)
+        precondition(rc == kIOReturnSuccess && id != 0)
+        IOPMAssertionRelease(id)
+        print("keep-awake self-test passed")
     }
 
     // ── dynamic menu ──
