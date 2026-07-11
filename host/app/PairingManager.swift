@@ -614,7 +614,7 @@ enum XpairAuthorizedKeys {
         # the `!$has_fwd` guard + the anchored `\Arestrict,pty,` match (only the pending shape) make a
         # re-run on an already-forwarding line a no-op. Atomic temp+rename+chmod, mirroring
         # remove_authorized_key_line. The permitopen allowlist is hardcoded (this gate is a literal raw
-        # string with no Swift interpolation); it MUST match buildRestrictedLine's paired forwarding value —
+        # string with no Swift interpolation); it MUST match the buildRestrictedLine paired forwarding value —
         # the self-test cross-checks both emit the same three loopback permitopen forms.
         sub add_authorized_key_forwarding {
           return unless -f $auth_path;
