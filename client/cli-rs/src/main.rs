@@ -24,6 +24,7 @@ use xpair::mapping::{
 };
 use xpair::notify;
 use xpair::open_gui;
+use xpair::pair_accept;
 use xpair::platform::Os;
 use xpair::self_update;
 use xpair::session::{self, SshTransport};
@@ -46,6 +47,7 @@ const SUBCOMMANDS: &[&str] = &[
     "host-permissions",
     "doctor",
     "approve",
+    "pair-accept",
     "status",
     "editor",
     "desktop",
@@ -86,6 +88,7 @@ fn main() -> ExitCode {
         "doctor" => doctor::run(&args[1..]),
         "host" => host::run(&args[1..]),
         "approve" => approve::run(&args[1..]),
+        "pair-accept" => pair_accept::run(&args[1..]),
         "discover" => discover::run(&args[1..]),
         "launch" => launch::run(&args[1..]),
         "open-gui" => open_gui::run(&args[1..]),
