@@ -460,6 +460,23 @@ enum XpairAuthorizedKeys {
         chmod(authorizedKeysPath, 0o600)
     }
 
+    /// One-time upgrade reconcile: a pure `ssh -N -L` forward never runs the forced-command gate, so a key
+    /// paired under the old RD-port-only permitopen keeps the narrow allowlist (its -L forwards stay
+    /// administratively prohibited) until an unrelated shell login triggers the gate migration. Migrate those
+    /// xpair lines to the widened loopback allowlist at host launch, in place. Idempotent, atomic write.
+    static func reconcileForwardingAllowlist() {
+        let old = #"port-forwarding,permitopen="127.0.0.1:8890","#
+        let new = #"port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*","#
+        var changed = false
+        let migrated = readAuthorizedKeyLines().map { line -> String in
+            guard isXpairAuthorizedKeyLine(line), line.contains(old) else { return line }
+            changed = true
+            return line.replacingOccurrences(of: old, with: new)
+        }
+        guard changed else { return }
+        try? writeAuthorizedKeyLines(migrated)
+    }
+
     private static func readLedger() -> AuthorizedClientsLedger {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: ledgerPath)),
               let ledger = try? JSONDecoder().decode(AuthorizedClientsLedger.self, from: data) else {
@@ -1560,6 +1577,7 @@ enum PairingSecuritySelfTest {
         try installPreservesUnmarkedSameBlobAuthorizedKey(pubLine: pubLine)
         try installRemovesMarkedDuplicateAuthorizedKey(pubLine: pubLine)
         try installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: pubLine)
+        try reconcileMigratesOldNarrowForwarding(pubLine: pubLine)
         // D2 gate routing (behind the d2-frontdoor flag): command/subsystem-first, tmux fall-through,
         // legacy path preserved. The SOCKET literal in the gate must match Config's SOCKET (drift guard,
         // like the 8890 cross-check above — the gate is a raw string with no Swift interpolation).
@@ -1852,6 +1870,25 @@ enum PairingSecuritySelfTest {
             precondition(auth.contains(" xpair:v1 "))
             precondition(!auth.contains("permitopen"))   // install writes the PENDING line (no forwarding); the gate grants it on proof
             precondition(auth.contains("legacy-copy"))
+        }
+    }
+
+    private static func reconcileMigratesOldNarrowForwarding(pubLine: String) throws {
+        try withTemporaryAuthorizedKeysHome {
+            let old = #"restrict,pty,port-forwarding,permitopen="127.0.0.1:8890",command="/g cid SHA256:x",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(pubLine) xpair:v1 client_id=cid"#
+            let other = "\(pubLine) not-an-xpair-key"
+            FileManager.default.createFile(atPath: XpairAuthorizedKeys.authorizedKeysPath,
+                                           contents: Data("\(old)\n\(other)\n".utf8),
+                                           attributes: [.posixPermissions: 0o600])
+            XpairAuthorizedKeys.reconcileForwardingAllowlist()
+            let after = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
+            precondition(after.contains(#"permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*""#))
+            precondition(!after.contains("127.0.0.1:8890"))
+            precondition(after.components(separatedBy: "permitopen").count - 1 == 3)
+            precondition(after.contains(other))                       // non-xpair line untouched
+            XpairAuthorizedKeys.reconcileForwardingAllowlist()        // idempotent: second run is a no-op
+            let again = try String(contentsOfFile: XpairAuthorizedKeys.authorizedKeysPath, encoding: .utf8)
+            precondition(again == after)
         }
     }
 

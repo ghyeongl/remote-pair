@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         ensureDirs()
         XpairAuthorizedKeys.expirePendingProofs()
+        XpairAuthorizedKeys.reconcileForwardingAllowlist()   // migrate keys paired under the old narrow permitopen
         // Telemetry consent flags — both default OFF (opt-in). Registered so a never-toggled key reads false
         // (zero network calls by default).
         UserDefaults.standard.register(defaults: [
