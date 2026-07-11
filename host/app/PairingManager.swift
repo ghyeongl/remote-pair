@@ -695,13 +695,29 @@ enum XpairAuthorizedKeys {
         # absent (default) the legacy path below runs unchanged, so an unvalidated change cannot lock out
         # clients. When enabled, route command/subsystem FIRST, tmux-attach only as the fall-through
         # (a pty is not "interactive": `ssh -tt host cmd` has both a pty and a command).
-        # Fail-safe: require the FULL hardening (the -R-denial drop-in AND the pf tailnet anchor evaluated
-        # in pf.conf) before the D2 path, so the front door never runs unhardened — including when the flag
-        # is flipped on an already-running host before the app applied it. Any piece missing → legacy path.
-        if [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ] \
-           && [ -f /etc/ssh/sshd_config.d/00-xpair-d2.conf ] \
-           && [ -s /etc/pf.anchors/com.x10lab.xpair ] \
-           && grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null; then
+        # Fail-safe: require the EFFECTIVE hardening (mirrors D2Hardening.applied()) before the D2 path, so
+        # the front door never runs unhardened — including when the flag is flipped on an already-running
+        # host before the app applied it. Presence alone is insufficient: the drop-in must be the first
+        # obtained forwarding policy (Include before any AllowTcpForwarding/Match) and the pf tailnet block
+        # must be reachable (anchor evaluated before any earlier `quick` :22 pass). Any check failing →
+        # legacy path.
+        d2_hardened() {
+          [ -f "$HOME/.xpair/host/d2-frontdoor.enabled" ] || return 1
+          grep -qx 'AllowTcpForwarding local' /etc/ssh/sshd_config.d/00-xpair-d2.conf 2>/dev/null || return 1
+          grep -qx 'AllowStreamLocalForwarding local' /etc/ssh/sshd_config.d/00-xpair-d2.conf 2>/dev/null || return 1
+          d2_inc=$(grep -nE '^[[:space:]]*Include[[:space:]].*sshd_config\.d' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)
+          [ -n "$d2_inc" ] || return 1
+          d2_bad=$(grep -nE '^[[:space:]]*(AllowTcpForwarding|AllowStreamLocalForwarding|Match)([[:space:]]|$)' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)
+          { [ -z "$d2_bad" ] || [ "$d2_bad" -gt "$d2_inc" ]; } || return 1
+          grep -qx 'block in quick proto tcp to any port 22' /etc/pf.anchors/com.x10lab.xpair 2>/dev/null || return 1
+          grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || return 1
+          grep -q '^load anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || return 1
+          d2_an=$(grep -nx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null | head -1 | cut -d: -f1)
+          d2_pp=$(grep -nE '^[[:space:]]*pass .*quick.*port ?=? ?22' /etc/pf.conf 2>/dev/null | head -1 | cut -d: -f1)
+          { [ -z "$d2_pp" ] || [ "$d2_pp" -gt "$d2_an" ]; } || return 1
+          return 0
+        }
+        if d2_hardened; then
           # sftp subsystem → the real sftp-server. Under a `command=` forced command, sshd sets
           # SSH_ORIGINAL_COMMAND to the exact `Subsystem sftp <cmd>` value (incl. any args), NOT "sftp".
           # Read that configured value and match it exactly — handles internal-sftp, a custom path, and
