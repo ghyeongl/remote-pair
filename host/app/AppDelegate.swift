@@ -42,6 +42,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.terminate(nil); return
         }
         Installer.ensureInstalled()     // self-install on first run of a downloaded .app (no-op if already installed)
+        // D2: when the SSH front door is enabled, ensure the privileged hardening (-R denial + pf tailnet
+        // bind) is applied. Verify at launch; the one-time GUI admin prompt only appears if missing/drifted.
+        let d2Flag = "\(RP_DIR)/d2-frontdoor.enabled"
+        if FileManager.default.fileExists(atPath: d2Flag), !D2Hardening.applied() {
+            if !D2Hardening.apply() {
+                // Fail SAFE: hardening didn't apply, so do NOT run the D2 front door unhardened (-R open,
+                // physical :22 open). Disable the flag → the gate falls back to the legacy path until the
+                // next launch re-prompts and it succeeds.
+                try? FileManager.default.removeItem(atPath: d2Flag)
+                log(.error, "D2 hardening not applied (admin prompt cancelled/failed) — disabled the D2 front door (removed \(d2Flag)); re-enable to retry")
+            }
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // Menu-bar icon: monochrome template (auto-adapts to light/dark menu bar).
         // Loaded by name from Resources (menubar.png + menubar@2x.png). Falls back to text glyph.
