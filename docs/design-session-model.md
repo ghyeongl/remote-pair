@@ -87,9 +87,13 @@ VSCode Remote still fails — unavoidable per macOS.
 ## D2 gate — mostly already shipped (#100), small delta remaining
 
 The shipped `xpair-ssh-gate` (PR #100) **already implements this session model** — it is not a
-rewrite. Per SSH channel, after ledger auth, it classifies **command/subsystem first, tmux as
-the fall-through** (routing on `SSH_ORIGINAL_COMMAND`/subsystem, **not** on the pty — `ssh -tt
-host cmd` has a pty *and* a command, so it must take the exec arm, not tmux):
+rewrite. **It is flag-gated**: the command/subsystem-first routing runs only when
+`~/.xpair/host/d2-frontdoor.enabled` exists **and** the fail-closed hardening checks pass;
+otherwise the gate falls through to the legacy `exec $SHELL -l` + passthrough path (a bad gate
+change locks out every client, so it ships behind a flag to flip after validation). Per SSH
+channel, after ledger auth, it classifies **command/subsystem first, tmux as the fall-through**
+(routing on `SSH_ORIGINAL_COMMAND`/subsystem, **not** on the pty — `ssh -tt host cmd` has a pty
+*and* a command, so it must take the exec arm, not tmux):
 
 - **sftp subsystem** → `exec sftp-server` (passthrough).
 - **exec / scp / rsync / VSCode-Remote bootstrap** (`SSH_ORIGINAL_COMMAND` non-empty) →
@@ -109,15 +113,25 @@ Access ≠ session holds for non-interactive (shipped); interactive fall-through
 GUI-capable session **by design** — the "attach the box and you're in it" behavior.
 
 ### Remaining delta (not a rewrite)
-1. **Forwarding-policy widening** — the paired key's `permitopen` is currently locked to the RD
-   signaling port (`127.0.0.1:8890`). VSCode Remote / open-remote-ssh (D5) need a `-L` forward to
-   their own remote-server port, so `permitopen` must widen accordingly. This is the one
-   **security-sensitive** decision (it was the D2 lockdown boundary) — the exact allowlist needs
-   deliberate sign-off. `-R` remote forwards stay denied (PR #102, `AllowTcpForwarding local`).
-2. **Broker (D3)** — GUI for BYO processes that can't run inside tmux-aqua; a separate unit.
+1. **`permitopen` widening — a CONFIRMED decision, just not yet implemented.** The paired key's
+   `permitopen` is still locked to the RD signaling port (`127.0.0.1:8890`, `PairingManager.swift`
+   ~line 281 and the gate's Perl ~line 624), so VSCode Remote / open-remote-ssh `-L` forwards to a
+   dynamic loopback port are denied. The confirmed allowlist (see `design-d2-ssh-frontdoor.md`
+   "Confirmed decisions" #2) is **all loopback forms with wildcard ports**:
+   `permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*"` (`permitopen` does no
+   name/address resolution, so `localhost` and IPv6 `[::1]` must be listed explicitly; `:*` = any
+   port). This is **not** an open security fork — it was reasoned and settled (a paired client
+   already has a shell that can reach any loopback port, so `-L` to loopback grants nothing beyond
+   the shell). It just needs implementing. `-R` stays denied globally (`AllowTcpForwarding local`,
+   shipped in #102).
+2. **Enable + validate the `d2-frontdoor.enabled` flag** — the gate ships default-off; the rollout
+   step is to validate on a real host (incl. the live pairing E2E) then flip the flag. The
+   privileged hardening (pf bind + `-R` denial) persists regardless of the flag.
+3. **Broker (D3)** — GUI for BYO processes that can't run inside tmux-aqua; a separate unit.
 
 The D2 **access-layer hardening** (pf tailnet-bind, `-R` denial, sshd drop-in — PR #100 gate +
-PR #102 hardening) is in. What's left of D2 is item 1 above, not a gate rewrite.
+PR #102 hardening) is in. What's left of D2 is items 1–2 above (implement the confirmed
+`permitopen` widening, then validate and flip the flag), not a gate rewrite.
 
 ## Reference client is not a runtime dependency
 
