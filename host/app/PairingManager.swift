@@ -709,6 +709,11 @@ enum XpairAuthorizedKeys {
           [ -n "$d2_inc" ] || return 1
           d2_bad=$(grep -nE '^[[:space:]]*(AllowTcpForwarding|AllowStreamLocalForwarding|Match)([[:space:]]|$)' /etc/ssh/sshd_config 2>/dev/null | head -1 | cut -d: -f1)
           { [ -z "$d2_bad" ] || [ "$d2_bad" -gt "$d2_inc" ]; } || return 1
+          # No Match block may re-enable forwarding (yes/all) for the paired login.
+          awk 'FNR==1{inm=0} { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { l=tolower(t); inm=(l!="match all" && l!="match any"); next } inm && tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="no" && v!="local") found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || return 1
+          # pf enforcement must be installed to load at boot (mirror D2Hardening.applied()): loader + LaunchDaemon.
+          [ -s '/Library/Application Support/Xpair/xpair-pf.sh' ] || return 1
+          [ -s /Library/LaunchDaemons/com.x10lab.xpair.pf.plist ] || return 1
           grep -qx 'block in quick proto tcp to any port 22' /etc/pf.anchors/com.x10lab.xpair 2>/dev/null || return 1
           grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || return 1
           grep -q '^load anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || return 1
@@ -1563,12 +1568,15 @@ enum PairingSecuritySelfTest {
         precondition(D2Hardening.osaCommand(#"printf 'x\n'"#) == #"do shell script "printf 'x\\n'" with administrator privileges"#)
         precondition(D2Hardening.pfAnchorContent.contains("block in quick proto tcp to any port 22"))                          // default-deny :22
         precondition(D2Hardening.pfAnchorContent.contains("pass in quick on lo0 proto tcp to any port 22"))                    // loopback pass
-        precondition(D2Hardening.pfAnchorContent.contains("pass in quick on utun proto tcp from 100.64.0.0/10 to any port 22"))// tailnet-only pass
+        precondition(D2Hardening.pfAnchorContent.contains("pass in quick on utun proto tcp from 100.64.0.0/10 to any port 22"))// tailnet IPv4 pass
+        precondition(D2Hardening.pfAnchorContent.contains("pass in quick on utun inet6 proto tcp from fd7a:115c:a1e0::/48 to any port 22")) // tailnet IPv6 pass
         precondition(D2Hardening.loaderScript.contains("set -e") && D2Hardening.loaderScript.contains("pfctl -f /etc/pf.conf"))// pf load must succeed
         precondition(D2Hardening.loaderScript.contains("block .* port = 22") && D2Hardening.loaderScript.contains("not enforcing")) // verifies anchor block is live
         precondition(D2Hardening.loaderScript.contains("shadowed by earlier quick pass"))          // verifies REACHABILITY, not mere presence
         precondition(gate.contains("d2_hardened()") && gate.contains(#"grep -qx 'anchor "com.x10lab.xpair"'"#))  // gate mirrors effective hardening (pf anchor)
         precondition(gate.contains(#"grep -qx 'AllowTcpForwarding local'"#) && gate.contains("block in quick proto tcp to any port 22")) // gate checks effective sshd + default-deny anchor
+        precondition(gate.contains("com.x10lab.xpair.pf.plist") && gate.contains("xpair-pf.sh"))    // gate requires the pf loader + LaunchDaemon (mirror applied())
+        precondition(gate.contains("^allow(tcp|streamlocal)forwarding") && gate.contains(#"tolower(t) ~ /^match /"#)) // gate scans Match forwarding overrides
         precondition(D2Hardening.plistContent.contains("com.x10lab.xpair.pf") && D2Hardening.plistContent.contains("RunAtLoad"))
         print("pairing security self-test passed")
     }

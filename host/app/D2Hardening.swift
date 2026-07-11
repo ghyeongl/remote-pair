@@ -32,12 +32,14 @@ enum D2Hardening {
     static let pfPlist = "/Library/LaunchDaemons/com.x10lab.xpair.pf.plist"
     static let pfAnchor = "/etc/pf.anchors/com.x10lab.xpair"
 
-    // Static default-deny for :22 (no `ifconfig` enumeration). `quick` = first match wins, so the two
-    // passes precede the block. Pass: loopback, and any utun carrying a Tailscale CGNAT (100.64.0.0/10)
-    // source — the tailnet-only bind. Everything else on :22, including any future NIC, hits the block.
+    // Static default-deny for :22 (no `ifconfig` enumeration). `quick` = first match wins, so the passes
+    // precede the block. Pass: loopback, and any utun carrying a Tailscale source — IPv4 CGNAT
+    // (100.64.0.0/10) or IPv6 tailnet (fd7a:115c:a1e0::/48). The trailing block has no address-family
+    // qualifier, so it drops :22 on BOTH inet and inet6 for every other path, including any future NIC.
     static let pfAnchorContent = """
     pass in quick on lo0 proto tcp to any port 22
     pass in quick on utun proto tcp from 100.64.0.0/10 to any port 22
+    pass in quick on utun inet6 proto tcp from fd7a:115c:a1e0::/48 to any port 22
     block in quick proto tcp to any port 22
     """
 
@@ -92,6 +94,30 @@ enum D2Hardening {
         return true
     }
 
+    // `sshd -T` only reports the GLOBAL forwarding value; a `Match` block can re-enable -R for the paired
+    // login (AllowTcpForwarding/AllowStreamLocalForwarding yes/all). Refuse D2 if any Match section in the
+    // merged sshd config (main + drop-ins) sets either forwarding directive to anything but no/local.
+    // ponytail: per-file Match scan (a Match opened in the main file and continued into an Include is not
+    // tracked across the boundary) — repair path: full sshd -T -C probe if that edge ever matters.
+    static func noMatchForwardingOverride() -> Bool {
+        var files = ["/etc/ssh/sshd_config"]
+        files += ((try? FileManager.default.contentsOfDirectory(atPath: "/etc/ssh/sshd_config.d")) ?? [])
+            .filter { $0.hasSuffix(".conf") }.sorted().map { "/etc/ssh/sshd_config.d/\($0)" }
+        for f in files {
+            var inMatch = false
+            for raw in lines(f) {
+                let t = raw.trimmingCharacters(in: .whitespaces).lowercased()
+                if t.hasPrefix("#") || t.isEmpty { continue }
+                if t.hasPrefix("match ") { inMatch = !(t == "match all" || t == "match any"); continue }
+                if inMatch, t.hasPrefix("allowtcpforwarding") || t.hasPrefix("allowstreamlocalforwarding") {
+                    let v = t.split(separator: " ", maxSplits: 1).dropFirst().first?.trimmingCharacters(in: .whitespaces) ?? ""
+                    if v != "no" && v != "local" { return false }
+                }
+            }
+        }
+        return true
+    }
+
     // pf needs BOTH the `anchor "…"` evaluation line AND `load anchor … from …`, and the anchor call must
     // be reached before any earlier `quick` :22 pass or its block never evaluates.
     private static func pfConfAnchorReachable() -> Bool {
@@ -111,6 +137,7 @@ enum D2Hardening {
     static func applied() -> Bool {
         fileEquals(sshdDropIn, sshdContent)
             && sshdIncludeIsFirst()
+            && noMatchForwardingOverride()
             && fileEquals(pfLoader, loaderScript)
             && fileEquals(pfPlist, plistContent)
             && fileEquals(pfAnchor, pfAnchorContent)
@@ -139,6 +166,8 @@ enum D2Hardening {
         # Assert EFFECTIVE forwarding policy (sshd -T merges Include + Match), not file presence.
         sshd -T 2>/dev/null | grep -qx 'allowtcpforwarding local' || { echo 'sshd -T: AllowTcpForwarding not local' >&2; exit 1; }
         sshd -T 2>/dev/null | grep -qx 'allowstreamlocalforwarding local' || { echo 'sshd -T: AllowStreamLocalForwarding not local' >&2; exit 1; }
+        # Refuse if any Match block re-enables forwarding (sshd -T shows only the global value).
+        awk 'FNR==1{inm=0} { t=$0; sub(/^[[:space:]]+/,"",t) } t ~ /^#/ {next} tolower(t) ~ /^match / { l=tolower(t); inm=(l!="match all" && l!="match any"); next } inm && tolower(t) ~ /^allow(tcp|streamlocal)forwarding/ { v=tolower($2); if (v!="no" && v!="local") found=1 } END { exit(found?1:0) }' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/*.conf 2>/dev/null) || { echo 'sshd Match block re-enables forwarding' >&2; exit 1; }
         printf %s '\(b64(pfAnchorContent))' | base64 -D > '\(pfAnchor)'; chmod 644 '\(pfAnchor)'
         # Insert our anchor call at the HEAD of the filter section (before any user quick rule) if absent.
         grep -qx 'anchor "com.x10lab.xpair"' /etc/pf.conf 2>/dev/null || { t=$(mktemp); awk '!ins && /^[[:space:]]*(block|pass|anchor)[[:space:]]/ && !/-anchor/ { print "anchor \\"com.x10lab.xpair\\""; print "load anchor \\"com.x10lab.xpair\\" from \\"\(pfAnchor)\\""; ins=1 } { print } END { if (!ins) { print "anchor \\"com.x10lab.xpair\\""; print "load anchor \\"com.x10lab.xpair\\" from \\"\(pfAnchor)\\"" } }' /etc/pf.conf > "$t"; cat "$t" > /etc/pf.conf; rm -f "$t"; }
