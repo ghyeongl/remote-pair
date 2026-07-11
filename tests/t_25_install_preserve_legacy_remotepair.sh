@@ -29,3 +29,5 @@ run_install --role host --no-native --no-sync
 it "reclaim/orphaned-app-removed"
 [ -d "$HOME/Applications/RemotePairHost.app" ] && _fail "orphaned RemotePairHost.app not removed" \
   || _pass "orphaned pre-rename RemotePairHost.app removed"
+
+finish
