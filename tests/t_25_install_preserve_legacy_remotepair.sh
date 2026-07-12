@@ -30,53 +30,98 @@ make_app() {  # $1=dir $2=app-bundle $3=version  (empty version → no .mockver 
   [ -n "$3" ] && printf '%s\n' "$3" > "$1/$2/.mockver"
   return 0
 }
-booted() { grep -q 'bootout.*com\.x10lab\.remote-pair' "$MOCKLOG"; }
+booted_label() { grep -q "bootout.*$1$" "$MOCKLOG"; }
+booted_base() { booted_label com.x10lab.remote-pair && booted_label com.x10lab.remote-pair-watchdog; }
+booted_host() { booted_label com.x10lab.remote-pair-host && booted_label com.x10lab.remote-pair-host-watchdog; }
+booted_all() { booted_base && booted_host; }
 
 # 1) standalone 0.4.x host (~/Applications) → preserved (app + service)
 new_sandbox; make_mocks; make_app "$HOME/Applications" RemotePairHost.app 0.4.12
 run_install --role host --no-native --no-sync
 it "host-0.4.x/rc-ok"; assert_rc "$RP_RC" 0 "install rc=0 :: stderr=[$RP_ERR]"
 it "host-0.4.x/preserved"
-[ -d "$HOME/Applications/RemotePairHost.app" ] && ! booted && _pass "0.4.x host preserved (app+service)" || _fail "0.4.x host deleted/booted"
+if [ -d "$HOME/Applications/RemotePairHost.app" ] && booted_base && ! booted_host; then
+  _pass "0.4.x host preserved; stale unified agents reclaimed"
+else
+  _fail "0.4.x host deleted/stopped or stale unified agents preserved"
+fi
 
 # 2) standalone 0.4.x cask-installed in /Applications (2nd probe dir) → preserved
 new_sandbox; make_mocks; make_app "$HOME/Applications2" RemotePairHost.app 0.4.9
 run_install --role host --no-native --no-sync
 it "applications-dir-0.4.x/preserved"
-[ -d "$HOME/Applications2/RemotePairHost.app" ] && ! booted && _pass "/Applications 0.4.x preserved" || _fail "/Applications 0.4.x not preserved"
+if [ -d "$HOME/Applications2/RemotePairHost.app" ] && booted_base && ! booted_host; then
+  _pass "/Applications 0.4.x host preserved; stale unified agents reclaimed"
+else
+  _fail "/Applications 0.4.x host deleted/stopped or stale unified agents preserved"
+fi
 
 # 3) client-only RemotePair.app 0.4.x (no host app) → preserved
 new_sandbox; make_mocks; make_app "$HOME/Applications" RemotePair.app 0.4.12
 run_install --role host --no-native --no-sync
 it "client-only-0.4.x/preserved"
-[ -d "$HOME/Applications/RemotePair.app" ] && ! booted && _pass "client-only 0.4.x RemotePair.app preserved" || _fail "client-only 0.4.x deleted/booted"
+if [ -d "$HOME/Applications/RemotePair.app" ] && booted_all; then
+  _pass "client-only 0.4.x app preserved; stale host agents reclaimed"
+else
+  _fail "client-only 0.4.x deleted or stale host agents preserved"
+fi
 
 # 4) present-but-unreadable version → preserved (fail-safe)
 new_sandbox; make_mocks; make_app "$HOME/Applications" RemotePairHost.app ""
 run_install --role host --no-native --no-sync
 it "unreadable/preserved"
-[ -d "$HOME/Applications/RemotePairHost.app" ] && ! booted && _pass "unreadable-version app preserved (fail-safe)" || _fail "unreadable app deleted/booted"
+if [ -d "$HOME/Applications/RemotePairHost.app" ] && booted_base && ! booted_host; then
+  _pass "unreadable host app preserved fail-safe; stale unified agents reclaimed"
+else
+  _fail "unreadable host app deleted/stopped or stale unified agents preserved"
+fi
 
 # 5) no app anywhere → reclaimed (labels booted)
 new_sandbox; make_mocks
 run_install --role host --no-native --no-sync
 it "noapp/reclaimed"
-booted && _pass "labels reclaimed when no app present" || _fail "labels not reclaimed when no app"
+booted_all && _pass "labels reclaimed when no app present" || _fail "labels not reclaimed when no app"
 
 # 6) old-xpair (0.5.0a) in /Applications → reclaimed FROM /Applications (both-dirs removal) + labels booted
 new_sandbox; make_mocks; make_app "$HOME/Applications2" RemotePairHost.app 0.5.0a37
 run_install --role host --no-native --no-sync
 it "old-xpair-cask/removed"
-[ ! -d "$HOME/Applications2/RemotePairHost.app" ] && booted && _pass "old-xpair reclaimed from /Applications + labels booted" || _fail "old-xpair /Applications not reclaimed"
+[ ! -d "$HOME/Applications2/RemotePairHost.app" ] && booted_all && _pass "old-xpair reclaimed from /Applications + labels booted" || _fail "old-xpair /Applications not reclaimed"
 
-# 7) mixed: 0.4.x host in ~/Applications + old-xpair host in /Applications → keep 0.4.x, remove old-xpair, labels NOT booted
+# 7) mixed: preserve 0.4.x host + its host labels; remove old-xpair bundle + stale unified labels
 new_sandbox; make_mocks
 make_app "$HOME/Applications" RemotePairHost.app 0.4.12
 make_app "$HOME/Applications2" RemotePairHost.app 0.5.0a37
 run_install --role host --no-native --no-sync
 it "mixed/0.4.x-kept"
 [ -d "$HOME/Applications/RemotePairHost.app" ] && _pass "mixed: 0.4.x preserved" || _fail "mixed: 0.4.x deleted"
-it "mixed/old-xpair-removed-labels-kept"
-[ ! -d "$HOME/Applications2/RemotePairHost.app" ] && ! booted && _pass "mixed: old-xpair removed, 0.4.12 service kept" || _fail "mixed: old-xpair left or 0.4.12 service booted"
+it "mixed/old-xpair-removed-stale-labels-cleaned"
+if [ ! -d "$HOME/Applications2/RemotePairHost.app" ] && booted_base && ! booted_host; then
+  _pass "mixed: old-xpair removed, stale unified agents reclaimed, 0.4.12 host kept"
+else
+  _fail "mixed: old-xpair/stale agents left or 0.4.12 host stopped"
+fi
+
+# 8) mixed client-only standalone + old-xpair host: keep client, remove old host, reclaim every host agent
+new_sandbox; make_mocks
+make_app "$HOME/Applications" RemotePair.app 0.4.12
+make_app "$HOME/Applications2" RemotePairHost.app 0.5.0a37
+run_install --role host --no-native --no-sync
+it "mixed-client/standalone-kept-old-host-cleaned"
+if [ -d "$HOME/Applications/RemotePair.app" ] && [ ! -d "$HOME/Applications2/RemotePairHost.app" ] && booted_all; then
+  _pass "mixed client-only: client preserved, old host bundle and all agents reclaimed"
+else
+  _fail "mixed client-only: client deleted or old host bundle/agents preserved"
+fi
+
+# 9) unreadable client-only app is preserved fail-safe but cannot own/suppress host agents
+new_sandbox; make_mocks; make_app "$HOME/Applications" RemotePair.app ""
+run_install --role host --no-native --no-sync
+it "unreadable-client/preserved-agents-cleaned"
+if [ -d "$HOME/Applications/RemotePair.app" ] && booted_all; then
+  _pass "unreadable client app preserved fail-safe; all stale host agents reclaimed"
+else
+  _fail "unreadable client app deleted or stale host agents preserved"
+fi
 
 finish
