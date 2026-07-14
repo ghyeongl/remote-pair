@@ -344,10 +344,12 @@ enum XpairAuthorizedKeys {
 
     /// Self-authorize the LOCAL loopback pairing key so `xpair launch` can attach to this host over
     /// loopback ssh through the same ForceCommand gate a normal paired client uses. Same-machine key
-    /// trust is inherent (no network handshake): we read the local pairing PUBLIC key and authorize it
-    /// via the SAME install() path — the exact hardened restricted line (paired:false; the gate promotes
-    /// it to paired on the first observed-fingerprint loopback login). Idempotent AND proof-preserving
-    /// (an already-paired local key is left untouched). Ensures the pairing keypair/pubkey first.
+    /// trust is inherent — we derive the fingerprint from the local pairing key we control — so no
+    /// network handshake / observed-login proof is needed. Writes a FULLY PAIRED entry (the same hardened
+    /// restricted line + loopback-scoped forwarding a proven client gets; never a bare key), so the gate
+    /// does NOT consume the first launch/attach connection as proof. Idempotent and self-healing:
+    /// regenerates a missing keypair, tightens perms to 0600, re-derives a stale .pub from the private
+    /// key, refreshes the gate helper, and recreates a dropped authorized_keys line.
     @discardableResult
     static func authorizeLocalLoopbackKey() throws -> AuthorizedClientRecord {
         let priv = localPairingKeyPath
@@ -356,63 +358,66 @@ enum XpairAuthorizedKeys {
         try ensureSSHDir()
         try fm.createDirectory(atPath: (priv as NSString).deletingLastPathComponent,
                                withIntermediateDirectories: true)
-        // Ensure a usable PRIVATE key with 0600. Loopback attach uses `ssh -i pairing_ed25519` only when
-        // that file exists, and OpenSSH rejects a private key with loose permissions — either would make
-        // --authorize-local-loopback "succeed" while attach silently can't authenticate through the gate.
+        // Ensure a usable PRIVATE key with 0600 (OpenSSH rejects loose perms). Regenerate if missing — a
+        // stale .pub without its private half would authorize a key `xpair launch` can never offer.
         if fm.fileExists(atPath: priv) {
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: priv)
-            // Derive the .pub from the private key if missing (`-y`); the generation form (`-t ... -f
-            // priv`) fails against an existing private key.
-            if !fm.fileExists(atPath: pub) {
-                let derived = try runSshKeygen(["-y", "-f", priv], capture: true)
-                try derived.write(toFile: pub, atomically: true, encoding: .utf8)
-            }
         } else {
-            // No private key: a stale .pub alone would authorize a key no local client can offer.
-            // Regenerate the keypair (dropping any orphan .pub first so `-t` recreates the pair).
             try? fm.removeItem(atPath: pub)
             _ = try runSshKeygen(["-t", "ed25519", "-N", "", "-f", priv, "-C", "xpair-local-loopback"],
                                  capture: false)
         }
-        // ssh-keygen writes `ssh-ed25519 <base64> [comment]`; parseEd25519PublicKey wants exactly the
-        // 2-field `ssh-ed25519 <base64>` form, so drop any trailing comment.
-        let rawPub = try String(contentsOfFile: pub, encoding: .utf8)
+        // The PRIVATE key is the source of truth: always derive the pubkey from it (an existing .pub may
+        // be stale/mismatched with the key `xpair launch` offers) and keep the .pub file in sync.
+        let derived = try runSshKeygen(["-y", "-f", priv], capture: true)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let fields = rawPub.split(separator: " ", omittingEmptySubsequences: true)
+        try derived.write(toFile: pub, atomically: true, encoding: .utf8)
+        let fields = derived.split(separator: " ", omittingEmptySubsequences: true)
         guard fields.count >= 2 else { throw PairingSecurityError.malformedKey("empty local pairing pubkey") }
         let parsed = try PairingSecurity.parseEd25519PublicKey("\(fields[0]) \(fields[1])")
         let clientID = PairingSecurity.clientID(forKeyBlob: parsed.keyBlob)
-        // Proof-preserving: if this local key is ALREADY paired, keep it — but only when its
-        // authorized_keys line is still present. Re-running install() would rewrite it
-        // accepted-pending-proof (no forwarding), and the gate's pending branch would then consume the
-        // next loopback connection as PROOF and exit before running SSH_ORIGINAL_COMMAND. If the ledger
-        // says paired but the line was dropped (authorized_keys recreated), recreate the PAIRED restricted
-        // line so attach can authenticate — without resetting the proven state.
-        if let paired = readLedger().clients.first(where: { $0.clientID == clientID && $0.status == "paired" }) {
-            let hasLine = readAuthorizedKeyLines().contains {
+        let fingerprint = PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob)
+        // Always refresh the gate helper — even the already-paired fast path must not leave a
+        // missing/stale ~/.xpair/host/bin/xpair-ssh-gate to run on the next loopback login.
+        try ensureGateHelperReady()
+        return try withAuthorizedKeysLock {
+            var lines = readAuthorizedKeyLines()
+            let hasLine = lines.contains {
                 isXpairAuthorizedKeyLine($0) && $0.contains("client_id=\(clientID)")
             }
-            if hasLine { return paired }
-            try withAuthorizedKeysLock {
-                var lines = readAuthorizedKeyLines()
-                lines.append(try buildRestrictedLine(publicKey: parsed.publicKey, clientID: clientID,
-                                                     fingerprint: paired.fingerprint, created: paired.created,
-                                                     name: paired.name, paired: true))
-                try ensureGateHelperReady()
-                try writeAuthorizedKeyLines(lines)
+            var ledger = readLedger()
+            // Proof-preserving fast path: already paired AND its line is present → leave it untouched
+            // (the gate was refreshed above).
+            if hasLine, let paired = ledger.clients.first(where: { $0.clientID == clientID && $0.status == "paired" }) {
+                return paired
             }
-            return paired
+            // Otherwise (re)write a fully PAIRED local entry, deduping any prior xpair line/record for this
+            // key. Same hardened options as a normal paired client (restrict,pty,port-forwarding,
+            // permitopen=loopback,command=gate) — loopback-scoped, no bare key, no widened surface.
+            let now = Int64(Date().timeIntervalSince1970)
+            let line = try buildRestrictedLine(publicKey: parsed.publicKey, clientID: clientID,
+                                               fingerprint: fingerprint, created: now,
+                                               name: "local-loopback", paired: true)
+            lines.removeAll {
+                isXpairAuthorizedKeyLine($0) &&
+                    ($0.contains("client_id=\(clientID)") || authorizedKeyBlob(in: $0) == parsed.keyBlob)
+            }
+            lines.append(line)
+            ledger.clients.removeAll { $0.clientID == clientID || $0.keyBlob == parsed.keyBlob }
+            let rec = AuthorizedClientRecord(clientID: clientID,
+                                             publicKey: parsed.publicKey,
+                                             keyBlob: parsed.keyBlob,
+                                             fingerprint: fingerprint,
+                                             name: "local-loopback",
+                                             created: now,
+                                             status: "paired",
+                                             proofDeadline: now,
+                                             pairedAt: now)
+            ledger.clients.append(rec)
+            try writeLedger(ledger)
+            try writeAuthorizedKeyLines(lines)
+            return rec
         }
-        let now = Int64(Date().timeIntervalSince1970)
-        let req = VerifiedPairingRequest(id: clientID,
-                                         name: "local-loopback",
-                                         user: NSUserName(),
-                                         sourceIP: "127.0.0.1",
-                                         clientPubKey: parsed.publicKey,
-                                         keyBlob: parsed.keyBlob,
-                                         fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
-                                         timestamp: now)
-        return try install(req)
     }
 
     /// Run `/usr/bin/ssh-keygen`; when `capture` is true, return stdout (used for `-y` pubkey derivation).
@@ -1709,9 +1714,10 @@ enum PairingSecuritySelfTest {
             publicKey: llParsed.publicKey,
             clientID: PairingSecurity.clientID(forKeyBlob: llParsed.keyBlob),
             fingerprint: PairingSecurity.fingerprintForKeyBlob(llParsed.wireBlob),
-            created: 0, name: "local-loopback", paired: false)
+            created: 0, name: "local-loopback", paired: true)
         precondition(llLine.hasPrefix("restrict,pty,"))
         precondition(llLine.contains(#"command="#))
+        precondition(llLine.contains(#"permitopen="127.0.0.1:*""#))  // loopback-scoped forwarding only
         precondition(!llLine.hasSuffix(llParsed.publicKey))
         // Pending (accepted-pending-proof): bare restrict, NO forwarding — a forwarding-only ssh -N -L
         // cannot reach the RD port before proof completes.
