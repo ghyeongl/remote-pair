@@ -2132,7 +2132,6 @@ fn resolve_aqua_sock(path: &Path) -> io::Result<String> {
         .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()))
 }
 
-
 fn normalize_windows_exe(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
