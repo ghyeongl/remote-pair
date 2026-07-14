@@ -81,6 +81,10 @@ struct AuthorizedClientRecord: Codable {
     var status: String
     var proofDeadline: Int64
     var pairedAt: Int64?
+    /// True only for the synthetic local-loopback bootstrap key. It is a non-user-controlled marker
+    /// (never set from a pairing request) used to identify/revoke that entry and to EXCLUDE it from
+    /// real-client state (latestPaired/hasPairedClient). Optional for backward-compat with old ledgers.
+    var local: Bool? = nil
 }
 
 private struct AuthorizedClientsLedger: Codable {
@@ -263,12 +267,18 @@ enum XpairAuthorizedKeys {
     /// loopback ssh). Same file the client's session.rs offers via `-i`.
     static var localPairingKeyPath: String { "\(home)/.xpair/host/pairing_ed25519" }
 
+    /// Source-address value pinning the local-loopback key to loopback only (`from="…"`). Loopback IPs
+    /// (no hostnames → no DNS). Also the non-user-controlled marker identifying the local-loopback line.
+    static let localLoopbackFromValue = "127.0.0.1,::1"
+    static var localLoopbackFromMarker: String { #"from="\#(localLoopbackFromValue)""# }
+
     static func buildRestrictedLine(publicKey: String,
                                     clientID: String,
                                     fingerprint: String,
                                     created: Int64,
                                     name: String,
-                                    paired: Bool) throws -> String {
+                                    paired: Bool,
+                                    from: String? = nil) throws -> String {
         let parsed = try PairingSecurity.parseEd25519PublicKey(publicKey)
         guard PairingSecurity.validateClientID(clientID) else { throw PairingSecurityError.invalidClientID }
         let safeName = PairingSecurity.sanitizeCommentValue(name)
@@ -286,7 +296,10 @@ enum XpairAuthorizedKeys {
         // -R is denied host-wide by D2Hardening (AllowTcpForwarding local); the forced-command gate +
         // fingerprint binding is the real boundary.
         let forwarding = paired ? #"port-forwarding,permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*","# : ""
-        return #"restrict,pty,\#(forwarding)command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
+        // `from="…"` pins the key to specific source addresses (used to make the local-loopback key
+        // usable ONLY from loopback, so a client that copies the private key cannot reuse it remotely).
+        let fromRestriction = from.map { #"from="\#($0)","# } ?? ""
+        return #"\#(fromRestriction)restrict,pty,\#(forwarding)command="\#(gatePath) \#(clientID) \#(fingerprint)",no-agent-forwarding,no-X11-forwarding,no-user-rc \#(parsed.publicKey) \#(comment)"#
     }
 
     static func install(_ req: VerifiedPairingRequest) throws -> AuthorizedClientRecord {
@@ -386,34 +399,38 @@ enum XpairAuthorizedKeys {
             // line for this client_id — a stale pending line (e.g. a crash between the gate's ledger
             // promotion and the authorized_keys rewrite) would otherwise be accepted, leaving forwarding
             // (`ssh -N -L`) denied while reporting success.
+            // The local-loopback line is identified by its `from="127.0.0.1,::1"` restriction (a
+            // non-user-controlled marker — a real paired client line never carries `from=`), NOT by the
+            // user-controllable display name.
             let hasPairedLine = lines.contains {
-                isXpairAuthorizedKeyLine($0) && $0.contains("client_id=\(clientID)") && $0.contains("port-forwarding")
+                isXpairAuthorizedKeyLine($0) && $0.contains("client_id=\(clientID)")
+                    && $0.contains("port-forwarding") && $0.contains(Self.localLoopbackFromMarker)
             }
             var ledger = readLedger()
-            // Proof-preserving fast path: already paired AND its fully-paired line is present → untouched
-            // (the gate was refreshed above).
-            if hasPairedLine, let paired = ledger.clients.first(where: { $0.clientID == clientID && $0.status == "paired" }) {
+            // Proof-preserving fast path: already paired AND its fully-paired loopback line is present →
+            // untouched (the gate was refreshed above).
+            if hasPairedLine, let paired = ledger.clients.first(where: { $0.clientID == clientID && $0.status == "paired" && $0.local == true }) {
                 return paired
             }
-            // Otherwise (re)write a fully PAIRED local entry. Purge EVERY prior local-loopback record —
-            // by client_id/keyBlob AND by the singular `name=local-loopback` marker — so regenerating the
-            // pairing key REVOKES the old key's still-active line/record (otherwise a holder of the old
-            // deleted private key could still pass the gate). Same hardened options as a normal paired
-            // client (restrict,pty,port-forwarding,permitopen=loopback,command=gate) — loopback-scoped, no
-            // bare key, no widened surface.
+            // Otherwise (re)write the local entry. Purge EVERY prior local-loopback record — by
+            // client_id/keyBlob AND by the non-user-controlled markers (`from=` in the line, `local` in
+            // the ledger) — so regenerating the pairing key REVOKES the old key's still-active
+            // line/record. `from="127.0.0.1,::1"` pins the key to loopback sources so a client that copies
+            // the private key cannot reuse it remotely; port-forwarding/permitopen stay loopback-scoped.
             let now = Int64(Date().timeIntervalSince1970)
             let line = try buildRestrictedLine(publicKey: parsed.publicKey, clientID: clientID,
                                                fingerprint: fingerprint, created: now,
-                                               name: "local-loopback", paired: true)
+                                               name: "local-loopback", paired: true,
+                                               from: Self.localLoopbackFromValue)
             lines.removeAll {
                 isXpairAuthorizedKeyLine($0) &&
                     ($0.contains("client_id=\(clientID)") ||
                      authorizedKeyBlob(in: $0) == parsed.keyBlob ||
-                     $0.contains("name=local-loopback"))
+                     $0.contains(Self.localLoopbackFromMarker))
             }
             lines.append(line)
             ledger.clients.removeAll {
-                $0.clientID == clientID || $0.keyBlob == parsed.keyBlob || $0.name == "local-loopback"
+                $0.clientID == clientID || $0.keyBlob == parsed.keyBlob || $0.local == true
             }
             let rec = AuthorizedClientRecord(clientID: clientID,
                                              publicKey: parsed.publicKey,
@@ -423,7 +440,8 @@ enum XpairAuthorizedKeys {
                                              created: now,
                                              status: "paired",
                                              proofDeadline: now,
-                                             pairedAt: now)
+                                             pairedAt: now,
+                                             local: true)
             ledger.clients.append(rec)
             try writeLedger(ledger)
             try writeAuthorizedKeyLines(lines)
@@ -505,7 +523,9 @@ enum XpairAuthorizedKeys {
     static func latestPaired() -> AuthorizedClientRecord? {
         withAuthorizedKeysLockNoThrow {
             readLedger().clients
-                .filter { $0.status == "paired" }
+                // Exclude the synthetic local-loopback bootstrap key: it is not a real external client,
+                // so it must not satisfy hasPairedClient()/the onboarding "client paired" gate.
+                .filter { $0.status == "paired" && $0.local != true }
                 .sorted { ($0.pairedAt ?? 0) > ($1.pairedAt ?? 0) }
                 .first
         }
@@ -1725,8 +1745,9 @@ enum PairingSecuritySelfTest {
             publicKey: llParsed.publicKey,
             clientID: PairingSecurity.clientID(forKeyBlob: llParsed.keyBlob),
             fingerprint: PairingSecurity.fingerprintForKeyBlob(llParsed.wireBlob),
-            created: 0, name: "local-loopback", paired: true)
-        precondition(llLine.hasPrefix("restrict,pty,"))
+            created: 0, name: "local-loopback", paired: true,
+            from: XpairAuthorizedKeys.localLoopbackFromValue)
+        precondition(llLine.hasPrefix(#"from="127.0.0.1,::1",restrict,pty,"#))  // pinned to loopback sources
         precondition(llLine.contains(#"command="#))
         precondition(llLine.contains(#"permitopen="127.0.0.1:*""#))  // loopback-scoped forwarding only
         precondition(!llLine.hasSuffix(llParsed.publicKey))
