@@ -533,14 +533,16 @@ fn run_local_macos(path: &Path, _host: &str, req: &LaunchReq) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let tmux_aqua_bin = match resolve_tmux_aqua_bin(path) {
+    // Local-direct talks to the HOST's tmux-aqua — resolve its binary + socket from the host env stack,
+    // not the client config (a co-located client may carry a different LOCAL_BIN/AQUA_SOCK).
+    let tmux_aqua_bin = match resolve_local_tmux_aqua_bin(path) {
         Ok(tmux_aqua_bin) => tmux_aqua_bin,
         Err(err) => {
             eprintln!("xpair launch: {err}");
             return ExitCode::from(1);
         }
     };
-    let aqua_sock = match resolve_aqua_sock(path) {
+    let aqua_sock = match resolve_local_aqua_sock(path) {
         Ok(aqua_sock) => aqua_sock,
         Err(err) => {
             eprintln!("xpair launch: {err}");
@@ -2130,27 +2132,6 @@ fn resolve_aqua_sock(path: &Path) -> io::Result<String> {
         .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()))
 }
 
-fn resolve_tmux_aqua_bin(path: &Path) -> io::Result<String> {
-    if let Some(tmux_b) = non_empty_env("TMUXB") {
-        return Ok(normalize_windows_exe(PathBuf::from(tmux_b))
-            .to_string_lossy()
-            .into_owned());
-    }
-
-    let local_bin = if let Some(local_bin) = non_empty_env("LOCAL_BIN") {
-        PathBuf::from(local_bin)
-    } else if let Some(local_bin) =
-        config::get(path, "LOCAL_BIN")?.filter(|value| !value.is_empty())
-    {
-        PathBuf::from(local_bin)
-    } else {
-        home_dir()?.join(".local").join("bin")
-    };
-
-    Ok(normalize_windows_exe(local_bin.join(TMUX_AQUA))
-        .to_string_lossy()
-        .into_owned())
-}
 
 fn normalize_windows_exe(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
@@ -2223,26 +2204,71 @@ fn local_host_role_expected(remote_host: &str) -> bool {
 fn remote_is_local(remote: &str) -> bool {
     // Strip an optional `user@` prefix — a self-host remote may be `alice@localhost` / `alice@hostname`.
     let host = remote.rsplit_once('@').map(|(_, h)| h).unwrap_or(remote);
-    !host.is_empty()
-        && (matches!(host, "localhost" | "127.0.0.1" | "::1")
-            || short_hostname()
-                .map(|h| h.eq_ignore_ascii_case(host))
-                .unwrap_or(false))
+    if host.is_empty() {
+        return false;
+    }
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return true;
+    }
+    // Compare the first DNS label so `myhost`, `myhost.local`, and `myhost.lan` all match this Mac.
+    let label = host.split('.').next().unwrap_or(host);
+    short_hostname()
+        .map(|h| h.eq_ignore_ascii_case(label))
+        .unwrap_or(false)
 }
 
-/// True when the XpairHost app process is running — then its tmux-aqua keeper is in the app's granted
-/// AX/SR subtree. Guards local-direct against attaching to an orphaned/stray server. macOS-only path.
-/// `app_name` comes from the config stack (a non-default APP_NAME is not exported into local shells).
+/// True when the current user's XpairHost app process is running — then its tmux-aqua keeper is in the
+/// app's granted AX/SR subtree. Guards local-direct against attaching to an orphaned/stray server.
+/// Constrained to the current user (-U) AND the bundle exec path (-f) so a stray or another user's
+/// process merely NAMED like the app can't satisfy it. macOS-only path; `app_name` from the config stack.
 fn xpair_host_running(app_name: &str) -> bool {
-    Command::new("pgrep")
-        .arg("-x")
-        .arg(app_name)
+    let user = std::env::var("USER")
+        .ok()
+        .or_else(|| std::env::var("LOGNAME").ok())
+        .filter(|u| !u.is_empty());
+    let mut cmd = Command::new("pgrep");
+    if let Some(user) = &user {
+        cmd.arg("-U").arg(user);
+    }
+    cmd.arg("-f")
+        .arg(format!("/{app_name}.app/Contents/MacOS/{app_name}"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// Resolve the LOCAL host's tmux-aqua binary, preferring the HOST env stack (host.env) over the client
+/// config — a co-located client may carry a different LOCAL_BIN than the self-installed host, and
+/// local-direct must probe/attach the HOST's binary, not the client's.
+fn resolve_local_tmux_aqua_bin(path: &Path) -> io::Result<String> {
+    if let Some(tmux_b) = non_empty_env("TMUXB") {
+        return Ok(normalize_windows_exe(PathBuf::from(tmux_b))
+            .to_string_lossy()
+            .into_owned());
+    }
+    let host_env = config::default_rp_dir()?.join("host.env");
+    let local_bin = match resolve_env_stack_value_with_host_env(path, &host_env, "LOCAL_BIN")?
+        .filter(|value| !value.is_empty())
+    {
+        Some(local_bin) => PathBuf::from(local_bin),
+        None => home_dir()?.join(".local").join("bin"),
+    };
+    Ok(normalize_windows_exe(local_bin.join(TMUX_AQUA))
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Resolve the LOCAL host's tmux-aqua socket, preferring the HOST env stack over the client config.
+fn resolve_local_aqua_sock(path: &Path) -> io::Result<String> {
+    let host_env = config::default_rp_dir()?.join("host.env");
+    Ok(
+        resolve_env_stack_value_with_host_env(path, &host_env, "AQUA_SOCK")?
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()),
+    )
 }
 
 fn local_tmux_aqua_ready(tmux_aqua_bin: &str, aqua_sock: &str) -> bool {
