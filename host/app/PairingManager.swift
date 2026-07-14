@@ -346,35 +346,46 @@ enum XpairAuthorizedKeys {
     /// loopback ssh through the same ForceCommand gate a normal paired client uses. Same-machine key
     /// trust is inherent (no network handshake): we read the local pairing PUBLIC key and authorize it
     /// via the SAME install() path — the exact hardened restricted line (paired:false; the gate promotes
-    /// it to paired on the first observed-fingerprint loopback login). Idempotent (install() dedups the
-    /// same-blob line). Generates the pairing keypair first if absent.
+    /// it to paired on the first observed-fingerprint loopback login). Idempotent AND proof-preserving
+    /// (an already-paired local key is left untouched). Ensures the pairing keypair/pubkey first.
     @discardableResult
     static func authorizeLocalLoopbackKey() throws -> AuthorizedClientRecord {
         let priv = localPairingKeyPath
         let pub = priv + ".pub"
-        if !FileManager.default.fileExists(atPath: pub) {
-            // ponytail: reuse ssh-keygen; same ed25519 pairing key the client would generate.
+        let fm = FileManager.default
+        // Ensure the .pub exists. If neither key exists, generate the ed25519 pairing keypair. If only the
+        // PRIVATE key survives (e.g. an uninstall that preserved ~/.xpair/host/pairing_ed25519), DERIVE the
+        // .pub from it with `ssh-keygen -y` — the generation form (`-t ... -f priv`) fails against an
+        // existing private key instead of recreating the pubkey.
+        if !fm.fileExists(atPath: pub) {
             try ensureSSHDir()
             let dir = (priv as NSString).deletingLastPathComponent
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            let kg = Process()
-            kg.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-            kg.arguments = ["-t", "ed25519", "-N", "", "-f", priv, "-C", "xpair-local-loopback"]
-            try kg.run()
-            kg.waitUntilExit()
-            guard kg.terminationStatus == 0 else {
-                throw PairingSecurityError.malformedKey("ssh-keygen failed")
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            if fm.fileExists(atPath: priv) {
+                let derived = try runSshKeygen(["-y", "-f", priv], capture: true)
+                try derived.write(toFile: pub, atomically: true, encoding: .utf8)
+            } else {
+                _ = try runSshKeygen(["-t", "ed25519", "-N", "", "-f", priv, "-C", "xpair-local-loopback"],
+                                     capture: false)
             }
         }
-        // ssh-keygen writes `ssh-ed25519 <base64> <comment>`; parseEd25519PublicKey wants exactly
-        // the 2-field `ssh-ed25519 <base64>` form, so drop the trailing comment.
+        // ssh-keygen writes `ssh-ed25519 <base64> [comment]`; parseEd25519PublicKey wants exactly the
+        // 2-field `ssh-ed25519 <base64>` form, so drop any trailing comment.
         let rawPub = try String(contentsOfFile: pub, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let fields = rawPub.split(separator: " ", omittingEmptySubsequences: true)
         guard fields.count >= 2 else { throw PairingSecurityError.malformedKey("empty local pairing pubkey") }
         let parsed = try PairingSecurity.parseEd25519PublicKey("\(fields[0]) \(fields[1])")
+        let clientID = PairingSecurity.clientID(forKeyBlob: parsed.keyBlob)
+        // Proof-preserving: if this local key is ALREADY paired, keep its record/line untouched. Re-running
+        // install() would rewrite it accepted-pending-proof (no forwarding), and the gate's pending branch
+        // would then consume the next loopback connection as PROOF and exit before running
+        // SSH_ORIGINAL_COMMAND — silently no-oping the first real launch/attach after a re-authorize.
+        if let paired = readLedger().clients.first(where: { $0.clientID == clientID && $0.status == "paired" }) {
+            return paired
+        }
         let now = Int64(Date().timeIntervalSince1970)
-        let req = VerifiedPairingRequest(id: PairingSecurity.clientID(forKeyBlob: parsed.keyBlob),
+        let req = VerifiedPairingRequest(id: clientID,
                                          name: "local-loopback",
                                          user: NSUserName(),
                                          sourceIP: "127.0.0.1",
@@ -383,6 +394,21 @@ enum XpairAuthorizedKeys {
                                          fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
                                          timestamp: now)
         return try install(req)
+    }
+
+    /// Run `/usr/bin/ssh-keygen`; when `capture` is true, return stdout (used for `-y` pubkey derivation).
+    private static func runSshKeygen(_ args: [String], capture: Bool) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+        p.arguments = args
+        let pipe = Pipe()
+        if capture { p.standardOutput = pipe }
+        try p.run()
+        // ssh-keygen -y emits a single short line; read before wait is safe (no pipe-buffer deadlock).
+        let out = capture ? pipe.fileHandleForReading.readDataToEndOfFile() : Data()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { throw PairingSecurityError.malformedKey("ssh-keygen failed") }
+        return String(data: out, encoding: .utf8) ?? ""
     }
 
     static func revoke(clientID: String) throws {
