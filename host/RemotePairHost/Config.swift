@@ -17,7 +17,7 @@ func helper(_ name: String, _ fallback: String) -> String {
 }
 
 let TMUX = helper("tmux-aqua", "\(HOME)/.local/bin/tmux-aqua")        // daemon→setsid 패치된 tmux
-let SOCKET = "/tmp/aqua-tmux.sock"                                    // host tmux 서버 소켓
+let SOCKET = "/tmp/aqua-tmux-rp.sock"                                    // host tmux 서버 소켓
 let ROUTER = helper("remote-pair-approve-router.sh", "\(RP_DIR)/bin/remote-pair-approve-router.sh")
 let LOGP = "\(LOG_DIR)/remote-pair.log"
 let HEARTBEAT = "\(LOG_DIR)/remote-pair.heartbeat"                    // watchdog 가 읽음

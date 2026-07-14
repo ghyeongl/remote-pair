@@ -31,7 +31,7 @@ done
 APP_NAME="${APP_NAME:-RemotePairHost}"
 BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.x10lab.remote-pair-host}"
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
-AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux.sock}"
+AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux-rp.sock}"
 APPROVE_TRIGGER="${APPROVE_TRIGGER:-/tmp/remote-pair.approve-request}"
 LOG_FILE="${LOG_FILE:-$RP_DIR/logs/remote-pair.log}"
 HEARTBEAT_FILE="${HEARTBEAT_FILE:-$RP_DIR/logs/remote-pair.heartbeat}"
@@ -70,7 +70,7 @@ app_pid() {
 _jget() { printf '%s' "$1" | sed -n "s/.*\"$2\":\"\{0,1\}\([^,\"}]*\)\"\{0,1\}.*/\1/p"; }
 _mark() { [ "$1" = true ] && printf '✓' || printf '✗'; }
 # Are we running INSIDE a RemotePair host tmux session? (computer-use available here)
-in_host_session() { case "${TMUX:-}" in *aqua-tmux.sock*) return 0;; *) return 1;; esac; }
+in_host_session() { case "${TMUX:-}" in *aqua-tmux-rp.sock*) return 0;; *) return 1;; esac; }
 
 # Is the RemotePairHost app available to serve app-dependent commands here?
 #   true if the app is installed locally (bundle/process/status.json) OR we're inside a live host session.

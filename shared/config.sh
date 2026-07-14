@@ -55,7 +55,7 @@ TERMINAL_APP="${TERMINAL_APP:-$( [ -d /Applications/iTerm.app ] && echo iterm2 |
 
 # ── Common ──
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
-AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux.sock}"
+AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux-rp.sock}"
 LAUNCH_AGENTS="${LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
 SERVICES_DIR="${SERVICES_DIR:-$HOME/Library/Services}"
 

@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."                       # repo 루트
 . shared/config.sh                            # SSOT: APP_NAME·BUNDLE_PREFIX·SIGN_CN·GH_REPO
 
-VERSION="${RP_VERSION:-0.4.12}"                # 버전 단일 출처(Info.plist 로 박힘). 릴리스 태그 = v$VERSION. (pre-1.0, 패치 +0.0.1)
+VERSION="${RP_VERSION:-0.4.13}"                # 버전 단일 출처(Info.plist 로 박힘). 릴리스 태그 = v$VERSION. (pre-1.0, 패치 +0.0.1)
 SRC_DIR=host/RemotePairHost
 APP="build/${APP_NAME}.app"
 EXEC="$APP_NAME"

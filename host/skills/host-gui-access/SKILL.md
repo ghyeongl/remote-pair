@@ -1,6 +1,6 @@
 ---
 name: host-gui-access
-description: host 의 macOS GUI 를 보거나 조작해야 할 때 — 스크린샷·클릭, 메뉴바/창/다이얼로그 확인, 또는 "이 세션에서 computer-use 가 되나?" 불확실할 때 사용. 현재 세션이 RemotePair(Host) 하위인지 판별하는 법($TMUX 소켓이 aqua-tmux.sock 인지)과, 그렇다면 host GUI·computer-use(스크린샷·클릭·타이핑)를 쓸 수 있음을 알려준다.
+description: host 의 macOS GUI 를 보거나 조작해야 할 때 — 스크린샷·클릭, 메뉴바/창/다이얼로그 확인, 또는 "이 세션에서 computer-use 가 되나?" 불확실할 때 사용. 현재 세션이 RemotePair(Host) 하위인지 판별하는 법($TMUX 소켓이 aqua-tmux-rp.sock 인지)과, 그렇다면 host GUI·computer-use(스크린샷·클릭·타이핑)를 쓸 수 있음을 알려준다.
 ---
 
 # RemotePair 하위 세션 판별 → host GUI + computer-use 가능
@@ -8,7 +8,7 @@ description: host 의 macOS GUI 를 보거나 조작해야 할 때 — 스크린
 ## 활성화 조건 (이게 핵심 — 먼저 판별)
 현재 claude 가 RemotePair(Host) 가 띄운 tmux 안에서 도는가?
 ```bash
-case "${TMUX:-}" in *aqua-tmux.sock*) echo yes;; *) echo no;; esac
+case "${TMUX:-}" in *aqua-tmux-rp.sock*) echo yes;; *) echo no;; esac
 ```
 - `yes` → 아래가 성립. (보강 확인: 프로세스 조상에 `RemotePairHost.app`(구 `RemotePair.app`) → `/usr/bin/script` → `tmux-aqua` 체인이 있으면 확실.)
 - `no` → 일반 원격/로컬 셸. host GUI 접근 보장 없음.
