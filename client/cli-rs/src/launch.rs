@@ -481,8 +481,16 @@ pub fn run(args: &[String]) -> ExitCode {
     // Host-list picker: configured REMOTE_HOST + the local host (when XpairHost is installed here).
     // Single entry auto-selects; >1 prompts on a tty. Folder-first is preserved — the chosen host's
     // run_local/run_remote handles the dir/mapping exactly as before.
-    let local_available = local_host_role_expected(&path, &host);
-    let choices = build_host_choices(&host, local_available);
+    let local_available = local_host_role_expected(&host);
+    // Self-host: if the configured remote IS this Mac, prefer the local-direct entry and drop the remote
+    // one — never offer ssh-to-self (which would reintroduce the loopback auth path this change removes,
+    // and would make the non-tty picker fail on two entries that are the same machine).
+    let remote = if local_available && remote_is_local(&host) {
+        ""
+    } else {
+        host.as_str()
+    };
+    let choices = build_host_choices(remote, local_available);
     let is_tty = std::io::stdin().is_terminal();
     let mut input = std::io::stdin().lock();
     let mut err = std::io::stderr();
@@ -547,10 +555,11 @@ fn run_local_macos(path: &Path, _host: &str, req: &LaunchReq) -> ExitCode {
         }
     };
 
-    // ponytail: keeper-alive guard ONLY — never start the server from the CLI. A tmux-aqua server
-    // spawned by the CLI escapes XpairHost's granted AX/SR subtree, so if the keeper is down we tell
-    // the user to start the app rather than launching it ourselves.
-    if !local_tmux_aqua_ready(&tmux_aqua_bin, &aqua_sock) {
+    // ponytail: local-direct requires the REAL XpairHost. Verify the APP PROCESS is running — not just
+    // that some tmux-aqua server answers on the socket: an orphaned/stray server (app dead) would pass a
+    // bare has-session but runs OUTSIDE HostManager's granted AX/SR subtree (no computer-use). We also
+    // never start the server from the CLI (a CLI-spawned one likewise escapes that subtree).
+    if !xpair_host_running() || !local_tmux_aqua_ready(&tmux_aqua_bin, &aqua_sock) {
         eprintln!(
             "XpairHost isn't running — start it from the menu bar, then run xpair launch again."
         );
@@ -2185,22 +2194,50 @@ fn short_hostname() -> io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn local_host_role_expected(path: &Path, remote_host: &str) -> bool {
-    let Some(rp_dir) = path.parent() else {
+/// True when XpairHost is installed on THIS machine. Reads the AUTHORITATIVE host marker
+/// `~/.xpair/host/role` (RP_HOST_DIR) — a host-only install writes the role there, NOT under the
+/// client dir, so keying off the client env path would miss it.
+fn local_host_role_expected(remote_host: &str) -> bool {
+    let Ok(rp_host_dir) = config::default_rp_dir() else {
         return false;
     };
-    let role = fs::read_to_string(rp_dir.join("role"))
+    let role = fs::read_to_string(rp_host_dir.join("role"))
         .unwrap_or_default()
         .trim()
         .to_string();
     match role.as_str() {
         "host" | "both" => true,
         "client" => false,
-        _ if rp_dir.join("host.env").is_file() => short_hostname()
+        _ if rp_host_dir.join("host.env").is_file() => short_hostname()
             .map(|host| remote_host.is_empty() || host == remote_host)
             .unwrap_or(false),
         _ => false,
     }
+}
+
+/// True when the configured remote string actually points at THIS machine (loopback or same hostname) —
+/// used to prefer local-direct over ssh-to-self.
+fn remote_is_local(remote: &str) -> bool {
+    !remote.is_empty()
+        && (matches!(remote, "localhost" | "127.0.0.1" | "::1")
+            || short_hostname()
+                .map(|host| host.eq_ignore_ascii_case(remote))
+                .unwrap_or(false))
+}
+
+/// True when the XpairHost app process is running — then its tmux-aqua keeper is in the app's granted
+/// AX/SR subtree. Guards local-direct against attaching to an orphaned/stray server. macOS-only path.
+fn xpair_host_running() -> bool {
+    let app_name = non_empty_env("APP_NAME").unwrap_or_else(|| DEFAULT_APP_NAME.to_string());
+    Command::new("pgrep")
+        .arg("-x")
+        .arg(&app_name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn local_tmux_aqua_ready(tmux_aqua_bin: &str, aqua_sock: &str) -> bool {
@@ -2768,6 +2805,12 @@ mod tests {
             HostChoice::Local
         );
         assert!(select_host_choice(two, false, &mut Cursor::new(""), &mut out).is_err());
+
+        // self-host detection: loopback literals point at this machine; empty never does.
+        assert!(remote_is_local("localhost"));
+        assert!(remote_is_local("127.0.0.1"));
+        assert!(remote_is_local("::1"));
+        assert!(!remote_is_local(""));
     }
 
     #[test]
