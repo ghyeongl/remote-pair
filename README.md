@@ -14,7 +14,7 @@ Run the agent you already subscribe to — **Claude**, **Codex**, or **OpenCode*
 
 - **Host Mac** — runs your agent inside persistent tmux sessions, 24/7, with computer-use working.
 - **Client** — **Xpair**, the desktop app (a VSCodium-based fork), or the `xpair` CLI; attach with a Finder right-click.
-- **Mobile** — SSH/mosh in from any client (Claude Code on your phone included). You land in a plain shell; run `xpair launch` to enter the live session.
+- **Mobile** — reach the same sessions from any SSH/mosh client (Claude Code on your phone included); enter one with `xpair launch`.
 
 ---
 
@@ -47,7 +47,7 @@ Bring whichever subscription you have: `claude` (with its unique `--remote-contr
 First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, installs the engine via its official installer, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or disk.
 
 ### Attach from your laptop or your phone
-Enter a session with `xpair launch` — from a client Mac (Finder → right-click → *Launch Xpair*), Xpair's Sessions sidebar, or by SSH/mosh-ing in and running `xpair launch`. A bare interactive login just gives you a plain shell; `xpair launch` is what attaches.
+Enter a session with `xpair launch` — from a client Mac (Finder → right-click → *Launch Xpair*), Xpair's Sessions sidebar, or any SSH/mosh client including Claude Code on mobile. It attaches to your configured host. Same sessions, same state, wherever you are.
 
 ### Remote Desktop, built in
 View and drive the host screen from Xpair's Remote Desktop tab over a native H.264/WebRTC stream with authenticated pointer, wheel, keyboard, and text input. `xpair desktop` falls back to macOS Screen Sharing.
@@ -62,7 +62,7 @@ A blocking "Allow?" dialog (or a 1Password unlock prompt) on a headless host sta
 - Apple Silicon Mac (host and client)
 - macOS Ventura (13) or later
 - **Remote Login** enabled on the host (onboarding generates the SSH key and wires the rest)
-- **File Sharing** enabled on the host — Xpair serves mapped host folders over SMB (`xpair mount`); onboarding surfaces it (System Settings → General → Sharing → File Sharing).
+- **File Sharing** enabled on the host, with each mapped project folder added to its Shared Folders list — Xpair serves those folders over SMB (`xpair mount` / Browser *Add Root*); onboarding surfaces it (System Settings → General → Sharing → File Sharing).
 - `mosh` on both machines — shipped as a bundled static binary (the client's is inside Xpair.app → `~/.local/bin`; the host `mosh-server` inside XpairHost.app), no Homebrew required. Without it, attach falls back to plain SSH (which dies on disconnect).
 - **Host:** no Homebrew needed for app-driven onboarding — the client pushes the signed XpairHost.app over SSH (`xpair install-host`) and installs the engine via its official installer. (Only the manual CLI bootstrap uses brew, for the cask + cliclick.)
 
@@ -110,18 +110,18 @@ This is the one step onboarding can't do for you; it can't be done over SSH (TCC
 |---|---|---|
 | **Accessibility** | Synthetic input (click/type) for computer-use | **Required** |
 | **Screen Recording** | Screenshots for computer-use | **Required** |
-| **Full Disk Access** | Prevents macOS folder prompts a headless host can't answer (an unanswered prompt stalls the session). The grant is exercised by the agent session running inside the app, which can then read the whole disk — keep project folders under a non-protected root to limit that exposure. | **Required** |
+| **Full Disk Access** | Prevents macOS folder prompts a headless host can't answer (an unanswered prompt stalls the session). The grant is exercised by the agent session running inside the app, which can then read the whole disk — the grant is whole-disk and is not scoped by where your project folder lives. | **Required** |
 
 Then pick up the grants: `launchctl kickstart -k gui/$(id -u)/com.x10lab.xpair-host` (or menu bar → Restart tmux host).
 
-> FDA is a required grant today, but you can limit its exposure: keep project folders under a non-protected root (e.g. `~/Spaces`, not `~/Desktop`/`~/Documents`/`~/Downloads`) so sessions stay clear of protected folders.
+> FDA is a required grant today, and it grants the agent subtree whole-disk read regardless of where your project lives. Keeping projects under a non-protected root (e.g. `~/Spaces`, not `~/Desktop`/`~/Documents`/`~/Downloads`) only avoids folder *prompts* — it does not narrow the grant.
 
 ### Doing it by hand (CLI only)
 
 Prefer the CLI to the app? The bootstrap script and `xpair install-host` do the same work (the bootstrap script needs `git` — it clones the repo for its source):
 
 ```bash
-# Client: CLI + Finder "Launch Xpair" Quick Action (check SSH with `xpair doctor`; guided setup lives in the Xpair app):
+# Client: CLI + Finder "Launch Xpair" Quick Action (run `xpair onboard` to set up SSH/mappings; `xpair doctor` to verify):
 curl -fsSL https://raw.githubusercontent.com/x10lab/xpair/main/shared/bootstrap.sh | ROLE=client bash
 
 # Host: install the CLI + approve glue on the host itself:
@@ -157,7 +157,7 @@ xpair launch <dir>     # launch / attach a session for a folder (--engine to ove
 xpair attach <name>    # attach an existing tmux-aqua session by exact name
 xpair ls               # host sessions + folder mappings
 xpair map add|rm|list  # client path ↔ host path mappings
-xpair onboard          # deferred — the in-app onboarding flow drives setup (native CLI just prints a pointer)
+xpair onboard          # re-runnable client setup (host, terminal, mappings, doctor)
 xpair discover         # find Xpair/SSH hosts (LAN UDP beacon + Tailscale)
 xpair status           # app PID, host server, heartbeat age
 xpair doctor           # check SSH auth, host app, tmux-aqua on host
@@ -172,7 +172,7 @@ xpair config set engine codex
 
 Host-side / install helpers: `xpair install-host` (idempotent, integrity-verified remote install), `xpair update` / `xpair self-update` (hot-swap the glue layer without touching the signed `.app`), `xpair approve` (handle a blocked dialog), `xpair host` (ensure the tmux-aqua server is up).
 
-`xpair launch <dir>` (or Finder → right-click → Quick Actions → *Launch Xpair*) maps the folder to a host, picks one when more than one is available (your configured remote, plus this Mac when it's also a host — the local pick attaches directly, no SSH), and starts/attaches that folder's session. The only per-session prompt is the agent's "Allow for this session" — press Enter once.
+`xpair launch <dir>` (or Finder → right-click → Quick Actions → *Launch Xpair*) maps the folder to your configured host and starts/attaches that folder's session over SSH; the only per-session prompt is the agent's "Allow for this session" — press Enter once.
 
 <p align="center">
   <img src="assets/usage-finder-launch.png" alt="Finder right-click → Quick Actions → Launch Xpair" width="380">
@@ -180,10 +180,7 @@ Host-side / install helpers: `xpair install-host` (idempotent, integrity-verifie
 
 ### How a session is served
 
-Two ways in, both folder-first:
-
-- **`xpair launch`** is the front door — it maps a folder to a host, picks one when there's more than one (your configured remote, plus this Mac when it's also a host — the local pick attaches directly, no SSH), and starts or attaches that folder's session.
-- **A bare `ssh`/`mosh` login no longer auto-attaches** — you land in a plain shell with a hint to run `xpair launch`. Non-interactive traffic (scp/sftp, `xpair` commands, port forwards) routes straight through, untouched.
+Sessions live on the host in `tmux-aqua`, and you enter them folder-first. `xpair launch <dir>` (or Finder → *Launch Xpair*, or Xpair's Sessions sidebar) maps the folder to your configured host and starts or attaches that folder's session over SSH/mosh. `xpair ls` lists what's running; `xpair attach <name>` re-enters a session by name.
 
 ---
 
