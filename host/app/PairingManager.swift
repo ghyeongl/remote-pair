@@ -382,28 +382,39 @@ enum XpairAuthorizedKeys {
         try ensureGateHelperReady()
         return try withAuthorizedKeysLock {
             var lines = readAuthorizedKeyLines()
-            let hasLine = lines.contains {
-                isXpairAuthorizedKeyLine($0) && $0.contains("client_id=\(clientID)")
+            // Fast path requires the FULLY PAIRED line (carries port-forwarding/permitopen), not just any
+            // line for this client_id — a stale pending line (e.g. a crash between the gate's ledger
+            // promotion and the authorized_keys rewrite) would otherwise be accepted, leaving forwarding
+            // (`ssh -N -L`) denied while reporting success.
+            let hasPairedLine = lines.contains {
+                isXpairAuthorizedKeyLine($0) && $0.contains("client_id=\(clientID)") && $0.contains("port-forwarding")
             }
             var ledger = readLedger()
-            // Proof-preserving fast path: already paired AND its line is present → leave it untouched
+            // Proof-preserving fast path: already paired AND its fully-paired line is present → untouched
             // (the gate was refreshed above).
-            if hasLine, let paired = ledger.clients.first(where: { $0.clientID == clientID && $0.status == "paired" }) {
+            if hasPairedLine, let paired = ledger.clients.first(where: { $0.clientID == clientID && $0.status == "paired" }) {
                 return paired
             }
-            // Otherwise (re)write a fully PAIRED local entry, deduping any prior xpair line/record for this
-            // key. Same hardened options as a normal paired client (restrict,pty,port-forwarding,
-            // permitopen=loopback,command=gate) — loopback-scoped, no bare key, no widened surface.
+            // Otherwise (re)write a fully PAIRED local entry. Purge EVERY prior local-loopback record —
+            // by client_id/keyBlob AND by the singular `name=local-loopback` marker — so regenerating the
+            // pairing key REVOKES the old key's still-active line/record (otherwise a holder of the old
+            // deleted private key could still pass the gate). Same hardened options as a normal paired
+            // client (restrict,pty,port-forwarding,permitopen=loopback,command=gate) — loopback-scoped, no
+            // bare key, no widened surface.
             let now = Int64(Date().timeIntervalSince1970)
             let line = try buildRestrictedLine(publicKey: parsed.publicKey, clientID: clientID,
                                                fingerprint: fingerprint, created: now,
                                                name: "local-loopback", paired: true)
             lines.removeAll {
                 isXpairAuthorizedKeyLine($0) &&
-                    ($0.contains("client_id=\(clientID)") || authorizedKeyBlob(in: $0) == parsed.keyBlob)
+                    ($0.contains("client_id=\(clientID)") ||
+                     authorizedKeyBlob(in: $0) == parsed.keyBlob ||
+                     $0.contains("name=local-loopback"))
             }
             lines.append(line)
-            ledger.clients.removeAll { $0.clientID == clientID || $0.keyBlob == parsed.keyBlob }
+            ledger.clients.removeAll {
+                $0.clientID == clientID || $0.keyBlob == parsed.keyBlob || $0.name == "local-loopback"
+            }
             let rec = AuthorizedClientRecord(clientID: clientID,
                                              publicKey: parsed.publicKey,
                                              keyBlob: parsed.keyBlob,
