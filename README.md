@@ -47,7 +47,7 @@ Bring whichever subscription you have: `claude` (with its unique `--remote-contr
 First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, installs the engine via its official installer, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or a log.
 
 ### Attach from your laptop or your phone
-Enter a session with `xpair launch` — from a client Mac (Finder → right-click → *Launch Xpair*) or Xpair's Sessions sidebar. A bare SSH/mosh login (including from Claude Code on mobile) drops you into a plain shell on the host with a hint to run `xpair launch`. Same sessions, same state, wherever you are.
+Enter a session with `xpair launch` — from a client Mac (Finder → right-click → *Launch Xpair*) or Xpair's Sessions sidebar. A bare SSH/mosh login (including from Claude Code on mobile) just drops you into a plain shell on the host; run `xpair launch` to attach. Same sessions, same state, wherever you are.
 
 ### Remote Desktop, built in
 View and drive the host screen from Xpair's Remote Desktop tab over a native H.264/WebRTC stream with authenticated pointer, wheel, keyboard, and text input. `xpair desktop` falls back to macOS Screen Sharing.
@@ -96,7 +96,7 @@ Open Xpair. First run opens onboarding (in-app, not a separate window) and walks
 
 - **CLI** — auto-installs the bundled `xpair` CLI if it's missing.
 - **Connection** — generates an SSH key, discovers hosts (LAN UDP beacon + Tailscale), and verifies passwordless reachability. You enable **Remote Login** on the host once (System Settings → General → Sharing); outside your LAN, a mesh VPN like [Tailscale](https://tailscale.com) gives the host a stable name.
-- **Engine** — checks whether the host has your engine (`claude` / `codex` / `opencode`) installed and authenticated. Installing it and setting its API key happen in the **host** onboarding, on the host itself (`XpairHost.app` → EngineGuard); the key is passed over stdin (never argv or a log) and stored in the host's login-shell rc (`~/.zshrc`/`~/.bashrc`) for the engine.
+- **Engine** — checks whether the host has your engine (`claude` / `codex` / `opencode`) installed and authenticated. Installing it and setting its API key happen in the **host** onboarding, on the host itself (`XpairHost.app` → EngineGuard). The key is passed over stdin (never argv or a log); Claude/OpenCode store it in the host's login-shell rc (`~/.zshrc`/`~/.bashrc`), while Codex hands it to `codex login` (`~/.codex/auth.json`).
 - **Host app** — runs `xpair install-host`, copying the signed `XpairHost.app` to the host and installing its daemon (LaunchAgent, `~/.xpair/host`, tmux-aqua, watchdog). The app is self-signed but its grants stick to a stable signing identity.
 - **Permissions** — polls the host's grant status and stops at the one manual step below.
 
@@ -182,7 +182,7 @@ Host-side / install helpers: `xpair install-host` (idempotent, integrity-verifie
 
 ### How a session is served
 
-Sessions live on the host in `tmux-aqua`, and you enter them folder-first with `xpair launch <dir>` (or Finder → *Launch Xpair*, or Xpair's Sessions sidebar), which maps the folder to your configured host and starts or attaches that session over SSH. A bare `ssh`/`mosh` login doesn't auto-attach — it drops to a plain shell with a hint to run `xpair launch`. `xpair ls` lists what's running; `xpair attach <name>` re-enters a session by name.
+Sessions live on the host in `tmux-aqua`, and you enter them folder-first with `xpair launch <dir>` (or Finder → *Launch Xpair*, or Xpair's Sessions sidebar), which maps the folder to your configured host and starts or attaches that session over SSH. A bare `ssh`/`mosh` login doesn't auto-attach — it drops to a plain shell, so you run `xpair launch` to attach. `xpair ls` lists what's running; `xpair attach <name>` re-enters a session by name.
 
 ---
 
