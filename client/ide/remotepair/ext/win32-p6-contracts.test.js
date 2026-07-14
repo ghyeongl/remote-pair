@@ -78,6 +78,7 @@ function fakeElectronCapture() {
       BrowserWindow,
       ipcMain: { handle() {} },
       shell: { openExternal() {} },
+      Menu: { setApplicationMenu() {}, buildFromTemplate: () => ({}) },
     },
     options: () => options,
   };

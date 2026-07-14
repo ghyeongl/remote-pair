@@ -90,6 +90,7 @@ function fakeElectron() {
       BrowserWindow,
       ipcMain: { handle() {} },
       shell: { openExternal() {} },
+      Menu: { setApplicationMenu() {}, buildFromTemplate: () => ({}) },
     },
   };
 }
