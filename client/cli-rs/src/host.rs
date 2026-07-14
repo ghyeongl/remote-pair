@@ -76,7 +76,7 @@ pub(crate) struct HostCommon {
 }
 
 impl HostCommon {
-    fn tmux_aqua_bin(&self) -> PathBuf {
+    pub(crate) fn tmux_aqua_bin(&self) -> PathBuf {
         self.local_bin.join("tmux-aqua")
     }
 }
@@ -320,7 +320,7 @@ fn app_installed<R: LocalRuntime>(context: &LocalContext, runtime: &R) -> bool {
     false
 }
 
-fn app_pid<R: LocalRuntime>(context: &LocalContext, runtime: &mut R) -> Option<String> {
+pub(crate) fn app_pid<R: LocalRuntime>(context: &LocalContext, runtime: &mut R) -> Option<String> {
     let launchctl = CommandSpec::new("launchctl", vec!["list".to_string()]);
     if let Ok(output) = runtime.output(&launchctl) {
         if let Some(pid) = parse_launchctl_pid(
@@ -459,7 +459,7 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-struct RealRuntime;
+pub(crate) struct RealRuntime;
 
 impl LocalRuntime for RealRuntime {
     fn is_dir(&self, path: &Path) -> bool {
