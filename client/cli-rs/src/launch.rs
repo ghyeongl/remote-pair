@@ -492,13 +492,19 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     let choices = build_host_choices(remote, local_available);
     let is_tty = std::io::stdin().is_terminal();
-    let mut input = std::io::stdin().lock();
-    let mut err = std::io::stderr();
-    let choice = match select_host_choice(choices, is_tty, &mut input, &mut err) {
-        Ok(choice) => choice,
-        Err((msg, code)) => {
-            eprintln!("{msg}");
-            return ExitCode::from(code);
+    // Scope the picker's StdinLock so it is DROPPED before dispatching. std::io::Stdin locking is
+    // non-reentrant, and run_remote → prompt_unmapped_folder_if_needed locks stdin again — holding this
+    // lock across the call would deadlock the common remote path.
+    let choice = {
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+        let mut err = std::io::stderr();
+        match select_host_choice(choices, is_tty, &mut input, &mut err) {
+            Ok(choice) => choice,
+            Err((msg, code)) => {
+                eprintln!("{msg}");
+                return ExitCode::from(code);
+            }
         }
     };
     match choice {
@@ -533,23 +539,23 @@ fn run_local_macos(path: &Path, _host: &str, req: &LaunchReq) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // Local-direct talks to the HOST's tmux-aqua — resolve its binary + socket from the host env stack,
-    // not the client config (a co-located client may carry a different LOCAL_BIN/AQUA_SOCK).
-    let tmux_aqua_bin = match resolve_local_tmux_aqua_bin(path) {
+    // Local-direct talks to the HOST's tmux-aqua — resolve its binary + socket from the host config
+    // (common.env), not the client config (a co-located client may carry a different LOCAL_BIN/AQUA_SOCK).
+    let tmux_aqua_bin = match resolve_local_tmux_aqua_bin() {
         Ok(tmux_aqua_bin) => tmux_aqua_bin,
         Err(err) => {
             eprintln!("xpair launch: {err}");
             return ExitCode::from(1);
         }
     };
-    let aqua_sock = match resolve_local_aqua_sock(path) {
+    let aqua_sock = match resolve_local_aqua_sock() {
         Ok(aqua_sock) => aqua_sock,
         Err(err) => {
             eprintln!("xpair launch: {err}");
             return ExitCode::from(1);
         }
     };
-    let engine = match resolve_engine(path, req) {
+    let engine = match resolve_local_engine(path, req) {
         Ok(engine) => engine,
         Err(err) => {
             eprintln!("xpair launch: {err}");
@@ -2239,19 +2245,17 @@ fn xpair_host_running(app_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the LOCAL host's tmux-aqua binary, preferring the HOST env stack (host.env) over the client
-/// config — a co-located client may carry a different LOCAL_BIN than the self-installed host, and
-/// local-direct must probe/attach the HOST's binary, not the client's.
-fn resolve_local_tmux_aqua_bin(path: &Path) -> io::Result<String> {
+/// Resolve the LOCAL host's tmux-aqua binary from the HOST's `~/.xpair/host/common.env` (where the
+/// installer stores LOCAL_BIN), not the client config — a co-located client may carry a different
+/// LOCAL_BIN, and local-direct must probe/attach the HOST's binary. Mirrors host.rs load_host_common.
+fn resolve_local_tmux_aqua_bin() -> io::Result<String> {
     if let Some(tmux_b) = non_empty_env("TMUXB") {
         return Ok(normalize_windows_exe(PathBuf::from(tmux_b))
             .to_string_lossy()
             .into_owned());
     }
-    let host_env = config::default_rp_dir()?.join("host.env");
-    let local_bin = match resolve_env_stack_value_with_host_env(path, &host_env, "LOCAL_BIN")?
-        .filter(|value| !value.is_empty())
-    {
+    let common_env = config::default_rp_dir()?.join("common.env");
+    let local_bin = match config::get(&common_env, "LOCAL_BIN")?.filter(|value| !value.is_empty()) {
         Some(local_bin) => PathBuf::from(local_bin),
         None => home_dir()?.join(".local").join("bin"),
     };
@@ -2260,14 +2264,35 @@ fn resolve_local_tmux_aqua_bin(path: &Path) -> io::Result<String> {
         .into_owned())
 }
 
-/// Resolve the LOCAL host's tmux-aqua socket, preferring the HOST env stack over the client config.
-fn resolve_local_aqua_sock(path: &Path) -> io::Result<String> {
-    let host_env = config::default_rp_dir()?.join("host.env");
-    Ok(
-        resolve_env_stack_value_with_host_env(path, &host_env, "AQUA_SOCK")?
+/// Resolve the LOCAL host's tmux-aqua socket from the HOST's `common.env` (AQUA_SOCK), not the client.
+fn resolve_local_aqua_sock() -> io::Result<String> {
+    if let Some(aqua_sock) = non_empty_env("AQUA_SOCK") {
+        return Ok(aqua_sock);
+    }
+    let common_env = config::default_rp_dir()?.join("common.env");
+    Ok(config::get(&common_env, "AQUA_SOCK")?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()))
+}
+
+/// Resolve the session engine for a LOCAL-direct launch: an explicit `--engine` wins, else the HOST's
+/// configured engine (`~/.xpair/host/host.env` ENGINE, where host onboarding persists it), else the
+/// client fallback — mirroring how the remote path prefers the host engine.
+fn resolve_local_engine(path: &Path, req: &LaunchReq) -> Result<Engine, String> {
+    if req.engine.is_some() {
+        return resolve_engine(path, req);
+    }
+    if let Ok(host_env) = config::default_rp_dir().map(|dir| dir.join("host.env")) {
+        if let Some(engine) = config::get(&host_env, "ENGINE")
+            .ok()
+            .flatten()
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| session::DEFAULT_AQUA_SOCK.to_string()),
-    )
+            .and_then(|raw| canonical_engine(&raw))
+        {
+            return Ok(Engine::from_canonical(&engine));
+        }
+    }
+    resolve_engine(path, req)
 }
 
 fn local_tmux_aqua_ready(tmux_aqua_bin: &str, aqua_sock: &str) -> bool {
