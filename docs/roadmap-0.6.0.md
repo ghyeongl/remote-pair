@@ -45,8 +45,11 @@ highest-leverage decision of 0.6.0.
     (`$SHELL -c`), never wrapped in tmux.
   - **Interactive shell** (no command and no subsystem — the fall-through) → a **plain login shell**
     (`$SHELL -l`). Session entry is **opt-in**: a bare interactive `ssh host` no longer auto-attaches
-    tmux-aqua; the computer-use session is entered explicitly via `xpair launch` (which arrives on the
-    exec arm above), and the plain shell prints a one-line hint pointing at it.
+    tmux-aqua; the computer-use session is entered explicitly via `xpair launch`, and the plain shell
+    prints a one-line hint pointing at it. `xpair launch` shows a host picker (configured `REMOTE_HOST`
+    ∪ the local host when XpairHost is installed here); a **remote** host attaches over ssh (the exec arm
+    above), the **local** host attaches **directly** to the local tmux-aqua (`Target::Local`, keeper-alive
+    guard, no ssh / no `authorized_keys`).
   - **Pure port-forwarding** (`ssh -N -L …` / `-R …`) runs **no** remote command, so the forced command
     never executes; forwarding is governed by the `authorized_keys` forwarding policy, not the branch.
 - **Payoff:** any standards-compliant SSH client — Orca, VS Code Remote, iTerm, phone clients
