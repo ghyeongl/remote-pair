@@ -14,7 +14,7 @@ Run the agent you already subscribe to — **Claude**, **Codex**, or **OpenCode*
 
 - **Host Mac** — runs your agent inside persistent tmux sessions, 24/7, with computer-use working.
 - **Client** — **Xpair**, the desktop app (a VSCodium-based fork), or the `xpair` CLI; attach with a Finder right-click.
-- **Mobile** — reach the same sessions from any SSH/mosh client (Claude Code on your phone included); enter one with `xpair launch`.
+- **Mobile** — reach the same sessions from any SSH/mosh client, including Claude Code on your phone.
 
 ---
 
@@ -41,13 +41,13 @@ Run your agent over SSH and macOS strips its Accessibility (AX) and Screen Recor
 Close the laptop or drop Wi-Fi and a normal agent session dies with the connection. A patched tmux (`tmux-aqua`) keeps every session alive on the host — `Attached` while you're there, `Detached` while you're gone, running 24/7 either way.
 
 ### Pick your engine
-Bring whichever subscription you have: `claude` (with its unique `--remote-control`), `codex`, or `opencode`. The agent runs on the host, so it must be installed there. Switch with `xpair config set engine <claude|codex|opencode|shell>` (`claudecode`/`claude-code` are aliases for `claude`), or override per launch with `xpair launch --engine <e>`.
+Bring whichever subscription you have: `claude` (with its unique `--remote-control`), `codex`, or `opencode`. The agent runs on the host, so it must be installed there. The host's configured engine (its `host.env`) is used by default; `xpair config set engine <claude|codex|opencode|shell>` (`claudecode`/`claude-code` alias `claude`) is a client-side fallback for when the host hasn't pinned one, and `xpair launch --engine <e>` overrides per launch.
 
 ### Onboarding that resolves, not just blocks
 First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, installs the engine via its official installer, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or disk.
 
 ### Attach from your laptop or your phone
-Enter a session with `xpair launch` — from a client Mac (Finder → right-click → *Launch Xpair*), Xpair's Sessions sidebar, or any SSH/mosh client including Claude Code on mobile. It attaches to your configured host. Same sessions, same state, wherever you are.
+Enter a session with `xpair launch` from a client Mac (Finder → right-click → *Launch Xpair*) or Xpair's Sessions sidebar; or SSH/mosh in from any client — including Claude Code on mobile — to reach the same sessions directly. Same state, wherever you are.
 
 ### Remote Desktop, built in
 View and drive the host screen from Xpair's Remote Desktop tab over a native H.264/WebRTC stream with authenticated pointer, wheel, keyboard, and text input. `xpair desktop` falls back to macOS Screen Sharing.
@@ -113,6 +113,8 @@ This is the one step onboarding can't do for you; it can't be done over SSH (TCC
 | **Full Disk Access** | Prevents macOS folder prompts a headless host can't answer (an unanswered prompt stalls the session). The grant is exercised by the agent session running inside the app, which can then read the whole disk — the grant is whole-disk and is not scoped by where your project folder lives. | **Required** |
 
 Then pick up the grants: `launchctl kickstart -k gui/$(id -u)/com.x10lab.xpair-host` (or menu bar → Restart tmux host).
+
+> **File Sharing** is a required gate too (`xpair status` lists it): turn it ON at System Settings → General → Sharing → File Sharing and share each project folder — the host won't reach the serving state without it.
 
 > FDA is a required grant today, and it grants the agent subtree whole-disk read regardless of where your project lives. Keeping projects under a non-protected root (e.g. `~/Spaces`, not `~/Desktop`/`~/Documents`/`~/Downloads`) only avoids folder *prompts* — it does not narrow the grant.
 

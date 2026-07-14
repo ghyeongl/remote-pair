@@ -14,7 +14,7 @@
 
 - **호스트 Mac** — 에이전트를 영속 tmux 세션 안에서, Computer Use가 살아 있는 채로 24/7 돌립니다.
 - **클라이언트** — **Xpair**, 데스크톱 앱(VSCodium 기반 포크) 또는 `xpair` CLI; Finder 우클릭으로 붙습니다.
-- **모바일** — 폰의 Claude Code를 포함한 모든 SSH/mosh 클라이언트에서 같은 세션에 닿습니다; `xpair launch`로 세션에 들어갑니다.
+- **모바일** — 폰의 Claude Code를 포함한 모든 SSH/mosh 클라이언트에서 같은 세션에 들어갑니다.
 
 ---
 
@@ -41,13 +41,13 @@ Set up Xpair (https://github.com/x10lab/xpair) on this Mac. Fetch and read its R
 노트북을 닫거나 Wi-Fi가 끊기면 보통 에이전트 세션은 연결과 함께 죽습니다. 패치된 tmux(`tmux-aqua`)가 모든 세션을 호스트에 살려둡니다 — 붙어 있으면 `Attached`, 떠나 있으면 `Detached`, 어느 쪽이든 24/7 돌아갑니다.
 
 ### 엔진 선택
-가진 구독을 그대로 가져오세요: `claude`(고유의 `--remote-control` 사용), `codex`, 또는 `opencode`. 에이전트는 호스트에서 돌기 때문에 호스트에 설치돼 있어야 합니다. `xpair config set engine <claude|codex|opencode|shell>`로 바꾸거나(`claudecode`/`claude-code`는 `claude`의 별칭), `xpair launch --engine <e>`로 실행마다 덮어쓰세요.
+가진 구독을 그대로 가져오세요: `claude`(고유의 `--remote-control` 사용), `codex`, 또는 `opencode`. 에이전트는 호스트에서 돌기 때문에 호스트에 설치돼 있어야 합니다. 기본적으로는 호스트에 설정된 엔진(`host.env`)이 쓰입니다; `xpair config set engine <claude|codex|opencode|shell>`(`claudecode`/`claude-code`는 `claude`의 별칭)은 호스트가 엔진을 지정하지 않았을 때 쓰이는 클라이언트 폴백이고, `xpair launch --engine <e>`로 실행마다 덮어씁니다.
 
 ### 막기만 하지 않고 해결하는 온보딩
 첫 실행 시 안내형 설정이 열리고, 각 단계는 막다른 골목 대신 **스스로 고치는 hard-gate**입니다: CLI를 깔고, 엔진을 공식 설치 프로그램으로 설치하고, API 키를 설정하고, SSH 키 인증을 검증합니다. 비밀값은 argv·디스크가 아닌 stdin으로 전달됩니다.
 
 ### 노트북에서도 폰에서도 붙기
-`xpair launch`로 세션에 들어갑니다 — 클라이언트 Mac(Finder → 우클릭 → *Launch Xpair*), Xpair의 Sessions 사이드바, 또는 폰의 Claude Code를 포함한 모든 SSH/mosh 클라이언트에서. 설정한 호스트에 attach합니다. 어디서 붙든 같은 세션, 같은 상태입니다.
+클라이언트 Mac(Finder → 우클릭 → *Launch Xpair*)이나 Xpair의 Sessions 사이드바에서는 `xpair launch`로 세션에 들어갑니다; 또는 폰의 Claude Code를 포함한 모든 클라이언트에서 SSH/mosh로 접속해 같은 세션에 바로 닿습니다. 어디서 붙든 같은 상태입니다.
 
 ### 내장 Remote Desktop
 Xpair의 Remote Desktop 탭에서 네이티브 H.264/WebRTC 스트림으로 호스트 화면을 보고 조작합니다 — 인증된 포인터·휠·키보드·텍스트 입력을 지원합니다. `xpair desktop`은 macOS 화면 공유로 fallback합니다.
@@ -107,6 +107,8 @@ Xpair를 엽니다. 첫 실행 시 온보딩(별도 창이 아닌 앱 내장)이
 | **전체 디스크 접근(Full Disk Access)** | headless 호스트가 답할 수 없는 macOS 폴더 프롬프트를 예방(답 없는 프롬프트는 세션을 멈춤). 이 권한을 실제로 행사하는 건 앱 안에서 도는 에이전트 세션이고, 그러면 디스크 전체를 읽을 수 있습니다 — 이 권한은 프로젝트 폴더 위치와 무관하게 디스크 전체에 적용됩니다. | **필수** |
 
 그다음 권한을 반영: `launchctl kickstart -k gui/$(id -u)/com.x10lab.xpair-host` (또는 메뉴바 → Restart tmux host).
+
+> **파일 공유**도 필수 게이트입니다(`xpair status`에 표시됨): 시스템 설정 → 일반 → 공유 → 파일 공유를 켜고 각 프로젝트 폴더를 공유하세요 — 이게 없으면 호스트가 serving 상태에 도달하지 못합니다.
 
 > FDA는 현재 필수 권한이며, 프로젝트 위치와 무관하게 에이전트 하위 트리에 디스크 전체 읽기를 허용합니다. 프로젝트를 보호되지 않은 루트(예: `~/Desktop`/`~/Documents`/`~/Downloads`가 아닌 `~/Spaces`)에 두는 것은 폴더 *프롬프트*를 피할 뿐, 권한 범위를 좁히지는 않습니다.
 
