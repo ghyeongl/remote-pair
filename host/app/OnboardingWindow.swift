@@ -33,6 +33,9 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
     // Set true once the React side calls complete() (Screen Recording granted). Distinguishes a
     // legitimate finish from the user dismissing the window while still ungranted (→ hard gate quit).
     private var completed = false
+    // Saved so the onboarding Edit menu (installEditMenu) can be reverted on close — the host
+    // normally runs as a menu-bar accessory with no application menu.
+    private var previousMainMenu: NSMenu?
     private static let onboardingStepPath = "\(RP_DIR)/onboarding-step.json"
     private static let onboardingStepMax = 10
 
@@ -139,6 +142,7 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         // XpairHost is LSUIElement (menu-bar accessory) → no Dock icon + weak window focus, so
         // the onboarding can end up invisible/behind. Temporarily become a regular app so it shows in
         // the Dock and can take focus; revert to .accessory in finish() (menu-bar-only after onboarding).
+        installEditMenu()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -368,6 +372,29 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
         self.webView = nil
     }
 
+    /// Install a minimal Edit menu so the onboarding WKWebView's text fields get the standard
+    /// clipboard shortcuts. The host runs as a menu-bar accessory with no application menu, so
+    /// Cmd+C/V/X/A have no key-equivalents to route to the first responder; show() flips the app to
+    /// .regular, which surfaces this menu bar. macOS-only app, so no cross-platform guard is needed.
+    /// The previous main menu is saved and restored in windowWillClose so nothing lingers afterward.
+    private func installEditMenu() {
+        previousMainMenu = NSApp.mainMenu
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+        let bar = NSMenu()
+        bar.addItem(editItem)
+        NSApp.mainMenu = bar
+    }
+
     /// React Done → complete(): close the window and start serving.
     private func finish() {
         completed = true
@@ -386,6 +413,8 @@ final class OnboardingWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler
     // MARK: - NSWindowDelegate (hard gate)
 
     func windowWillClose(_ notification: Notification) {
+        // Revert the onboarding Edit menu — the host goes back to menu-bar-only with no app menu.
+        NSApp.mainMenu = previousMainMenu
         _ = PairingManager.shared.endWindow()
         tearDownWebViewBridge()
         switch mode {
