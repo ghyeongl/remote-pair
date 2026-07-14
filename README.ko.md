@@ -50,7 +50,7 @@ Set up Xpair (https://github.com/x10lab/xpair) on this Mac. Fetch and read its R
 `xpair launch`로 세션에 들어갑니다 — 클라이언트 Mac(Finder → 우클릭 → *Launch Xpair*)에서, Xpair의 Sessions 사이드바에서, 또는 SSH/mosh로 접속해 `xpair launch`를 실행해서. 그냥 대화형 로그인만 하면 평범한 셸만 주어지고, 붙이는 건 `xpair launch`입니다.
 
 ### 내장 Remote Desktop
-Xpair의 Remote Desktop 탭에서 네이티브 H.264/WebRTC 스트림으로 호스트 화면을 보고 조작합니다(view-only). `xpair desktop`은 macOS 화면 공유로 fallback합니다.
+Xpair의 Remote Desktop 탭에서 네이티브 H.264/WebRTC 스트림으로 호스트 화면을 보고 조작합니다 — 인증된 포인터·휠·키보드·텍스트 입력을 지원합니다. `xpair desktop`은 macOS 화면 공유로 fallback합니다.
 
 ### 대신 답해주는 권한 대화상자
 headless 호스트에서 "허용?" 대화상자(또는 1Password 잠금 해제 프롬프트)가 세션을 막아 세웁니다. on-demand approve 라우터(OCR + 클릭, miss 시 Claude 분류 fallback)가 올바른 버튼을 감지해 눌러줘서, 무인 세션이 멈추지 않습니다.
@@ -187,7 +187,7 @@ Xpair는 원격 페어링을 중심으로 재구성한 **VSCodium 기반 데스�
 
 - **Sessions 사이드바** — 호스트 세션(Attached / Detached)을 세션 피커와 함께 나열하는, 앱의 홈 베이스.
 - **Browser 컨테이너** — 폴더 / Search / Extensions와 폴더별 즐겨찾기.
-- **Remote Desktop** — 앱 안에서 네이티브 H.264/WebRTC 파이프라인(`host/rd`)으로 호스트 화면을 보고 조작; 설계상 view-only이며 `xpair desktop`이 macOS 화면 공유 fallback.
+- **Remote Desktop** — 앱 안에서 네이티브 H.264/WebRTC 파이프라인(`host/rd`)으로 호스트 화면을 보고 조작; 활성 RD 세션에서 포인터·휠·키보드·텍스트 입력을 지원하며 `xpair desktop`이 macOS 화면 공유 fallback.
 - **첫 실행 온보딩** — 앱을 넘기기 전에 각 전제조건(CLI 설치·엔진·API 키·SSH)을 해결하는 안내형 hard-gate 흐름.
 - **에디터(code-server)** *(scaffold)* — `xpair editor` 위의 앱 내장 에디터, 아직 배선 중.
 
