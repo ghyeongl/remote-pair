@@ -303,7 +303,7 @@ let _win = null
  * @returns {import('electron').BrowserWindow}
  */
 function openOnboardingWindow({ electron, onComplete, startStep } = {}) {
-  const { app, BrowserWindow, ipcMain, shell } = electron
+  const { app, BrowserWindow, ipcMain, shell, Menu } = electron
   // Onboarding is actually opening now, so consume the one-shot force sentinel (if any). This
   // guarantees exactly one forced run — a later normal launch won't re-trigger onboarding.
   clearForceOnboardingSentinel()
@@ -311,6 +311,21 @@ function openOnboardingWindow({ electron, onComplete, startStep } = {}) {
   // Count the onboarding window as a connected client (fire-and-forget; never blocks/throws).
   try { if (heartbeat && heartbeat.startHeartbeat) heartbeat.startHeartbeat() } catch { /* */ }
   wireIpc(ipcMain, onComplete)
+  // Pre-workbench: VSCode has not yet installed its menubar, so no Edit-role application menu exists.
+  // On macOS the renderer's clipboard shortcuts (Cmd+C/V/X/A) are dispatched by the app menu's
+  // Edit-role accelerators — with no such menu they are dead in the onboarding text inputs. Install a
+  // minimal Edit-role menu so copy/paste/cut/select-all work. macOS-only: the gap is mac-specific
+  // (Windows/Linux route those keys straight to Chromium's default editing commands), and there the
+  // application menu renders as a visible per-window menu bar that would add unwanted chrome to the
+  // fixed-size wizard. No restore needed: onboarding:complete closes this window and onComplete()
+  // opens the workbench, which re-establishes VSCode's own menubar.
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { role: 'editMenu' },
+      { role: 'windowMenu' },
+    ]))
+  }
 
   const macWindowChrome = process.platform === 'darwin'
     ? {
