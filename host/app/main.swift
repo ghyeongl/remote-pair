@@ -16,6 +16,17 @@ if CommandLine.arguments.contains("--pairing-self-test") {
     }
 }
 
+if CommandLine.arguments.contains("--authorize-local-loopback") {
+    do {
+        _ = try XpairAuthorizedKeys.authorizeLocalLoopbackKey()
+        print("local loopback pairing key authorized")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("authorize-local-loopback failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 if CommandLine.arguments.contains("--sentry-self-test") {
     exit(SentryBridge.selfTest() ? 0 : 1)
 }

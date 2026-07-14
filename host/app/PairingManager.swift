@@ -259,6 +259,10 @@ enum XpairAuthorizedKeys {
     static var lockPath: String { "\(home)/.ssh/.xpair-authorized-keys.lock" }
     static var ledgerPath: String { "\(home)/.xpair/authorized_clients.json" }
 
+    /// Path to the local pairing key pair (the client on THIS machine authenticates with it over
+    /// loopback ssh). Same file the client's session.rs offers via `-i`.
+    static var localPairingKeyPath: String { "\(home)/.xpair/host/pairing_ed25519" }
+
     static func buildRestrictedLine(publicKey: String,
                                     clientID: String,
                                     fingerprint: String,
@@ -336,6 +340,49 @@ enum XpairAuthorizedKeys {
                 throw error
             }
         }
+    }
+
+    /// Self-authorize the LOCAL loopback pairing key so `xpair launch` can attach to this host over
+    /// loopback ssh through the same ForceCommand gate a normal paired client uses. Same-machine key
+    /// trust is inherent (no network handshake): we read the local pairing PUBLIC key and authorize it
+    /// via the SAME install() path — the exact hardened restricted line (paired:false; the gate promotes
+    /// it to paired on the first observed-fingerprint loopback login). Idempotent (install() dedups the
+    /// same-blob line). Generates the pairing keypair first if absent.
+    @discardableResult
+    static func authorizeLocalLoopbackKey() throws -> AuthorizedClientRecord {
+        let priv = localPairingKeyPath
+        let pub = priv + ".pub"
+        if !FileManager.default.fileExists(atPath: pub) {
+            // ponytail: reuse ssh-keygen; same ed25519 pairing key the client would generate.
+            try ensureSSHDir()
+            let dir = (priv as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let kg = Process()
+            kg.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+            kg.arguments = ["-t", "ed25519", "-N", "", "-f", priv, "-C", "xpair-local-loopback"]
+            try kg.run()
+            kg.waitUntilExit()
+            guard kg.terminationStatus == 0 else {
+                throw PairingSecurityError.malformedKey("ssh-keygen failed")
+            }
+        }
+        // ssh-keygen writes `ssh-ed25519 <base64> <comment>`; parseEd25519PublicKey wants exactly
+        // the 2-field `ssh-ed25519 <base64>` form, so drop the trailing comment.
+        let rawPub = try String(contentsOfFile: pub, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields = rawPub.split(separator: " ", omittingEmptySubsequences: true)
+        guard fields.count >= 2 else { throw PairingSecurityError.malformedKey("empty local pairing pubkey") }
+        let parsed = try PairingSecurity.parseEd25519PublicKey("\(fields[0]) \(fields[1])")
+        let now = Int64(Date().timeIntervalSince1970)
+        let req = VerifiedPairingRequest(id: PairingSecurity.clientID(forKeyBlob: parsed.keyBlob),
+                                         name: "local-loopback",
+                                         user: NSUserName(),
+                                         sourceIP: "127.0.0.1",
+                                         clientPubKey: parsed.publicKey,
+                                         keyBlob: parsed.keyBlob,
+                                         fingerprint: PairingSecurity.fingerprintForKeyBlob(parsed.wireBlob),
+                                         timestamp: now)
+        return try install(req)
     }
 
     static func revoke(clientID: String) throws {
@@ -1610,6 +1657,17 @@ enum PairingSecuritySelfTest {
         assertThrows { _ = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: "ssh-rsa AAAA", clientID: "abc",
                                                                        fingerprint: "SHA256:x", created: ts,
                                                                        name: "ok", paired: false) }
+        // Local loopback self-auth must produce the SAME hardened restricted line as a normal paired
+        // client (never a bare key that bypasses the gate).
+        let llParsed = try PairingSecurity.parseEd25519PublicKey(pubLine)
+        let llLine = try XpairAuthorizedKeys.buildRestrictedLine(
+            publicKey: llParsed.publicKey,
+            clientID: PairingSecurity.clientID(forKeyBlob: llParsed.keyBlob),
+            fingerprint: PairingSecurity.fingerprintForKeyBlob(llParsed.wireBlob),
+            created: 0, name: "local-loopback", paired: false)
+        precondition(llLine.hasPrefix("restrict,pty,"))
+        precondition(llLine.contains(#"command="#))
+        precondition(!llLine.hasSuffix(llParsed.publicKey))
         // Pending (accepted-pending-proof): bare restrict, NO forwarding — a forwarding-only ssh -N -L
         // cannot reach the RD port before proof completes.
         let pendingLine = try XpairAuthorizedKeys.buildRestrictedLine(publicKey: pubLine, clientID: "abc_DEF-123",
