@@ -47,7 +47,7 @@ Bring whichever subscription you have: `claude` (with its unique `--remote-contr
 First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, installs the engine via its official installer, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or a log.
 
 ### Attach from your laptop or your phone
-Enter a session with `xpair launch` — from a client Mac (Finder → right-click → *Launch Xpair*) or Xpair's Sessions sidebar. A bare SSH/mosh login (including from Claude Code on mobile) just drops you into a plain shell on the host; run `xpair launch` to attach. Same sessions, same state, wherever you are.
+Enter a session with `xpair launch` from a client that has a host configured — a client Mac (Finder → right-click → *Launch Xpair* or Xpair's Sessions sidebar), or the `xpair` CLI anywhere `REMOTE_HOST` is set. Raw-SSHing/moshing straight into the host (e.g. Claude Code on your phone) drops you into a plain shell on the host itself. Same sessions, same state, wherever you are.
 
 ### Remote Desktop, built in
 View and drive the host screen from Xpair's Remote Desktop tab over a native H.264/WebRTC stream with authenticated pointer, wheel, keyboard, and text input. `xpair desktop` falls back to macOS Screen Sharing.
@@ -182,7 +182,7 @@ Host-side / install helpers: `xpair install-host` (idempotent, integrity-verifie
 
 ### How a session is served
 
-Sessions live on the host in `tmux-aqua`, and you enter them folder-first with `xpair launch <dir>` (or Finder → *Launch Xpair*, or Xpair's Sessions sidebar), which maps the folder to your configured host and starts or attaches that session over SSH. A bare `ssh`/`mosh` login doesn't auto-attach — it drops to a plain shell, so you run `xpair launch` to attach. `xpair ls` lists what's running; `xpair attach <name>` re-enters a session by name.
+Sessions live on the host in `tmux-aqua`. You enter them folder-first with `xpair launch <dir>` (or Finder → *Launch Xpair*, or Xpair's Sessions sidebar) — a **client** command that maps the folder to your configured host and starts or attaches that session over SSH; `xpair ls` and `xpair attach <name>` (also client commands, needing a configured host) list and re-enter sessions. Logging straight into the host over `ssh`/`mosh` doesn't auto-attach — it drops to a plain shell on the host.
 
 ---
 

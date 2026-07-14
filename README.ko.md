@@ -47,7 +47,7 @@ Set up Xpair (https://github.com/x10lab/xpair) on this Mac. Fetch and read its R
 첫 실행 시 안내형 설정이 열리고, 각 단계는 막다른 골목 대신 **스스로 고치는 hard-gate**입니다: CLI를 깔고, 엔진을 공식 설치 프로그램으로 설치하고, API 키를 설정하고, SSH 키 인증을 검증합니다. 비밀값은 argv·로그가 아닌 stdin으로 전달됩니다.
 
 ### 노트북에서도 폰에서도 붙기
-`xpair launch`로 세션에 들어갑니다 — 클라이언트 Mac(Finder → 우클릭 → *Launch Xpair*)이나 Xpair의 Sessions 사이드바에서. 그냥 SSH/mosh로 로그인하면(폰의 Claude Code 포함) 호스트의 평범한 셸에 떨어지므로, `xpair launch`를 실행해 attach합니다. 어디서 붙든 같은 세션, 같은 상태입니다.
+호스트를 설정한 클라이언트에서 `xpair launch`로 세션에 들어갑니다 — 클라이언트 Mac(Finder → 우클릭 → *Launch Xpair* 또는 Xpair의 Sessions 사이드바), 혹은 `REMOTE_HOST`가 설정된 곳의 `xpair` CLI. 호스트로 곧장 SSH/mosh 접속하면(예: 폰의 Claude Code) 호스트의 평범한 셸에 떨어집니다. 어디서 붙든 같은 세션, 같은 상태입니다.
 
 ### 내장 Remote Desktop
 Xpair의 Remote Desktop 탭에서 네이티브 H.264/WebRTC 스트림으로 호스트 화면을 보고 조작합니다 — 인증된 포인터·휠·키보드·텍스트 입력을 지원합니다. `xpair desktop`은 macOS 화면 공유로 fallback합니다.
@@ -170,7 +170,7 @@ xpair config set engine codex
 
 ### 세션이 제공되는 방식
 
-세션은 호스트의 `tmux-aqua` 안에 살아 있고, `xpair launch <dir>`(또는 Finder → *Launch Xpair*, 또는 Xpair의 Sessions 사이드바)로 폴더 우선으로 들어갑니다 — 폴더를 설정한 호스트에 매핑하고 그 세션을 SSH로 시작하거나 attach합니다. 그냥 `ssh`/`mosh`로 로그인하면 자동 attach되지 않고 평범한 셸에 떨어지므로 `xpair launch`를 실행해 attach합니다. `xpair ls`로 실행 중인 세션을 보고, `xpair attach <name>`으로 이름으로 다시 들어갑니다.
+세션은 호스트의 `tmux-aqua` 안에 살아 있습니다. `xpair launch <dir>`(또는 Finder → *Launch Xpair*, 또는 Xpair의 Sessions 사이드바)로 폴더 우선으로 들어갑니다 — 폴더를 설정한 호스트에 매핑하고 그 세션을 SSH로 시작하거나 attach하는 **클라이언트** 명령입니다; `xpair ls`와 `xpair attach <name>`(역시 호스트 설정이 필요한 클라이언트 명령)으로 세션을 보고 다시 들어갑니다. 호스트로 곧장 `ssh`/`mosh` 로그인하면 자동 attach되지 않고 호스트의 평범한 셸에 떨어집니다.
 
 `xpair launch <dir>`(또는 Finder → 폴더 우클릭 → 빠른 동작 → *Launch Xpair*)는 폴더를 설정한 호스트에 매핑하고 그 폴더의 세션을 SSH로 시작/attach합니다. 세션마다 유일한 프롬프트는 에이전트의 "Allow for this session" — Enter 한 번이면 됩니다.
 
