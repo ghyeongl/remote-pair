@@ -559,7 +559,10 @@ fn run_local_macos(path: &Path, _host: &str, req: &LaunchReq) -> ExitCode {
     // that some tmux-aqua server answers on the socket: an orphaned/stray server (app dead) would pass a
     // bare has-session but runs OUTSIDE HostManager's granted AX/SR subtree (no computer-use). We also
     // never start the server from the CLI (a CLI-spawned one likewise escapes that subtree).
-    if !xpair_host_running() || !local_tmux_aqua_ready(&tmux_aqua_bin, &aqua_sock) {
+    let app_name = resolve_app_identity(path)
+        .map(|id| id.app_name)
+        .unwrap_or_else(|_| DEFAULT_APP_NAME.to_string());
+    if !xpair_host_running(&app_name) || !local_tmux_aqua_ready(&tmux_aqua_bin, &aqua_sock) {
         eprintln!(
             "XpairHost isn't running — start it from the menu bar, then run xpair launch again."
         );
@@ -2218,20 +2221,22 @@ fn local_host_role_expected(remote_host: &str) -> bool {
 /// True when the configured remote string actually points at THIS machine (loopback or same hostname) —
 /// used to prefer local-direct over ssh-to-self.
 fn remote_is_local(remote: &str) -> bool {
-    !remote.is_empty()
-        && (matches!(remote, "localhost" | "127.0.0.1" | "::1")
+    // Strip an optional `user@` prefix — a self-host remote may be `alice@localhost` / `alice@hostname`.
+    let host = remote.rsplit_once('@').map(|(_, h)| h).unwrap_or(remote);
+    !host.is_empty()
+        && (matches!(host, "localhost" | "127.0.0.1" | "::1")
             || short_hostname()
-                .map(|host| host.eq_ignore_ascii_case(remote))
+                .map(|h| h.eq_ignore_ascii_case(host))
                 .unwrap_or(false))
 }
 
 /// True when the XpairHost app process is running — then its tmux-aqua keeper is in the app's granted
 /// AX/SR subtree. Guards local-direct against attaching to an orphaned/stray server. macOS-only path.
-fn xpair_host_running() -> bool {
-    let app_name = non_empty_env("APP_NAME").unwrap_or_else(|| DEFAULT_APP_NAME.to_string());
+/// `app_name` comes from the config stack (a non-default APP_NAME is not exported into local shells).
+fn xpair_host_running(app_name: &str) -> bool {
     Command::new("pgrep")
         .arg("-x")
-        .arg(&app_name)
+        .arg(app_name)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2806,11 +2811,15 @@ mod tests {
         );
         assert!(select_host_choice(two, false, &mut Cursor::new(""), &mut out).is_err());
 
-        // self-host detection: loopback literals point at this machine; empty never does.
+        // self-host detection: loopback literals point at this machine; empty never does. A `user@`
+        // prefix is stripped before the comparison.
         assert!(remote_is_local("localhost"));
         assert!(remote_is_local("127.0.0.1"));
         assert!(remote_is_local("::1"));
+        assert!(remote_is_local("alice@localhost"));
+        assert!(remote_is_local("root@127.0.0.1"));
         assert!(!remote_is_local(""));
+        assert!(!remote_is_local("bob@"));
     }
 
     #[test]
