@@ -7,7 +7,7 @@
 //! session-selection core stays pure and tested.
 
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -377,6 +377,75 @@ fn ensure_remote_session_info(
     }
 }
 
+/// A launchable host: a configured remote (ssh) or THIS machine (local-direct tmux attach).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostChoice {
+    Remote(String),
+    Local,
+}
+
+/// Build the launchable host list: the configured REMOTE_HOST (if set) plus the local host when
+/// XpairHost is installed here. ponytail: at most two entries — no LAN discovery.
+fn build_host_choices(remote: &str, local_available: bool) -> Vec<HostChoice> {
+    let mut choices = Vec::new();
+    if !remote.trim().is_empty() {
+        choices.push(HostChoice::Remote(remote.trim().to_string()));
+    }
+    if local_available {
+        choices.push(HostChoice::Local);
+    }
+    choices
+}
+
+fn host_choice_label(choice: &HostChoice) -> String {
+    match choice {
+        HostChoice::Remote(host) => host.clone(),
+        HostChoice::Local => "this Mac (local)".to_string(),
+    }
+}
+
+/// Pick one host: 0 → error; 1 → auto-select (no prompt); >1 → numbered prompt on a tty, else error.
+fn select_host_choice<R: BufRead, W: Write>(
+    choices: Vec<HostChoice>,
+    is_tty: bool,
+    input: &mut R,
+    out: &mut W,
+) -> Result<HostChoice, (String, u8)> {
+    match choices.len() {
+        0 => Err((
+            "no host configured — set one in Xpair.app or: xpair config set host <ssh-host>"
+                .to_string(),
+            1,
+        )),
+        1 => Ok(choices.into_iter().next().expect("len==1")),
+        _ => {
+            if !is_tty {
+                return Err((
+                    "multiple hosts available; run in a terminal to choose, or set REMOTE_HOST"
+                        .to_string(),
+                    1,
+                ));
+            }
+            for (i, choice) in choices.iter().enumerate() {
+                let _ = writeln!(out, "  {}) {}", i + 1, host_choice_label(choice));
+            }
+            let _ = write!(out, "select host [1-{}]: ", choices.len());
+            let _ = out.flush();
+            let mut line = String::new();
+            input.read_line(&mut line).ok();
+            match line
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n >= 1 && *n <= choices.len())
+            {
+                Some(n) => Ok(choices.into_iter().nth(n - 1).expect("in range")),
+                None => Err(("invalid selection".to_string(), 1)),
+            }
+        }
+    }
+}
+
 /// Impure CLI entrypoint: resolve config, map the folder, ensure remote tmux, then attach.
 pub fn run(args: &[String]) -> ExitCode {
     let req = match parse_launch_args(args) {
@@ -409,9 +478,26 @@ pub fn run(args: &[String]) -> ExitCode {
         }
     };
 
-    match resolve_target(req.target_pref, local_mode, &host) {
-        Target::Local => run_local(&path, &host, &req),
-        Target::Remote => run_remote(&path, &host, local_mode, &req),
+    // Host-list picker: configured REMOTE_HOST + the local host (when XpairHost is installed here).
+    // Single entry auto-selects; >1 prompts on a tty. Folder-first is preserved — the chosen host's
+    // run_local/run_remote handles the dir/mapping exactly as before.
+    let local_available = local_host_role_expected(&path, &host);
+    let choices = build_host_choices(&host, local_available);
+    let is_tty = std::io::stdin().is_terminal();
+    let mut input = std::io::stdin().lock();
+    let mut err = std::io::stderr();
+    let choice = match select_host_choice(choices, is_tty, &mut input, &mut err) {
+        Ok(choice) => choice,
+        Err((msg, code)) => {
+            eprintln!("{msg}");
+            return ExitCode::from(code);
+        }
+    };
+    match choice {
+        // Local host → DIRECT tmux-aqua attach (no ssh, no auth). resolve_target stays as-is; we route
+        // here explicitly. run_local keeper-guards below.
+        HostChoice::Local => run_local(&path, &host, &req),
+        HostChoice::Remote(remote) => run_remote(&path, &remote, local_mode, &req),
     }
 }
 
@@ -423,7 +509,7 @@ fn run_local(path: &Path, host: &str, req: &LaunchReq) -> ExitCode {
     run_local_macos(path, host, req)
 }
 
-fn run_local_macos(path: &Path, host: &str, req: &LaunchReq) -> ExitCode {
+fn run_local_macos(path: &Path, _host: &str, req: &LaunchReq) -> ExitCode {
     let dir = match absolutize_existing_dir(&req.dir) {
         Ok(dir) => dir,
         Err(_) => {
@@ -461,10 +547,13 @@ fn run_local_macos(path: &Path, host: &str, req: &LaunchReq) -> ExitCode {
         }
     };
 
-    // macOS-only runtime boundary: the bash launcher starts XpairHost via `open -a`,
-    // waits for launchctl/tmux-aqua readiness, then performs the local tmux handoff.
-    if !ensure_local_host(path, host, &tmux_aqua_bin, &aqua_sock) {
-        eprintln!("XpairHost tmux-aqua server is not ready on {aqua_sock}");
+    // ponytail: keeper-alive guard ONLY — never start the server from the CLI. A tmux-aqua server
+    // spawned by the CLI escapes XpairHost's granted AX/SR subtree, so if the keeper is down we tell
+    // the user to start the app rather than launching it ourselves.
+    if !local_tmux_aqua_ready(&tmux_aqua_bin, &aqua_sock) {
+        eprintln!(
+            "XpairHost isn't running — start it from the menu bar, then run xpair launch again."
+        );
         return ExitCode::from(1);
     }
 
@@ -2096,32 +2185,6 @@ fn short_hostname() -> io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn ensure_local_host(path: &Path, remote_host: &str, tmux_aqua_bin: &str, aqua_sock: &str) -> bool {
-    if !local_host_role_expected(path, remote_host) || !program_present(Path::new(tmux_aqua_bin)) {
-        return false;
-    }
-
-    let app_name = non_empty_env("APP_NAME").unwrap_or_else(|| "XpairHost".to_string());
-    let _ = Command::new("open")
-        .arg("-a")
-        .arg(app_name)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    if local_tmux_aqua_ready(tmux_aqua_bin, aqua_sock) {
-        return true;
-    }
-    for _ in 0..8 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if local_tmux_aqua_ready(tmux_aqua_bin, aqua_sock) {
-            return true;
-        }
-    }
-    false
-}
-
 fn local_host_role_expected(path: &Path, remote_host: &str) -> bool {
     let Some(rp_dir) = path.parent() else {
         return false;
@@ -2667,6 +2730,44 @@ mod tests {
         assert_eq!(resolve_target(None, true, "mac"), Target::Remote);
         assert_eq!(resolve_target(None, false, "mac"), Target::Remote);
         assert_eq!(resolve_target(None, false, ""), Target::Remote);
+    }
+
+    #[test]
+    fn host_choices_list_and_autoselect() {
+        use std::io::Cursor;
+
+        assert_eq!(
+            build_host_choices("mac.local", false),
+            vec![HostChoice::Remote("mac.local".into())]
+        );
+        assert_eq!(build_host_choices("", true), vec![HostChoice::Local]);
+        assert_eq!(build_host_choices("  ", false), vec![]);
+        assert_eq!(
+            build_host_choices("mac.local", true),
+            vec![HostChoice::Remote("mac.local".into()), HostChoice::Local]
+        );
+
+        // 0 → error; 1 → auto-select (no prompt read)
+        let mut out = Vec::new();
+        assert!(select_host_choice(vec![], false, &mut Cursor::new(""), &mut out).is_err());
+        assert_eq!(
+            select_host_choice(
+                vec![HostChoice::Local],
+                false,
+                &mut Cursor::new(""),
+                &mut out
+            )
+            .unwrap(),
+            HostChoice::Local
+        );
+
+        // >1 on a tty: pick #2 (Local); non-tty >1 errors
+        let two = vec![HostChoice::Remote("mac.local".into()), HostChoice::Local];
+        assert_eq!(
+            select_host_choice(two.clone(), true, &mut Cursor::new("2\n"), &mut out).unwrap(),
+            HostChoice::Local
+        );
+        assert!(select_host_choice(two, false, &mut Cursor::new(""), &mut out).is_err());
     }
 
     #[test]

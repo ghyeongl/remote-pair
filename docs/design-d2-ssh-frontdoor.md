@@ -152,9 +152,16 @@ pairing-protocol refactor rides D2; the JS→Rust *move* is the separate CLI-pai
    `SSH_ORIGINAL_COMMAND` test breaks.
 4. **Interactive session entry is OPT-IN (0.6.0).** A bare interactive `ssh host` lands in a plain login
    shell (`exec "$SHELL" -l`) and prints a one-line `xpair launch` hint — it never auto-attaches tmux. The
-   tmux-aqua (computer-use) session is entered explicitly via `xpair launch`, whose attach command routes
-   through the exec arm (case 2). This also removes the old footgun of the SSH gate STARTING a tmux server
-   outside XpairHost's subtree (without its AX/SR grant; HostManager.spawn owns the keeper). Per-session
+   tmux-aqua (computer-use) session is entered explicitly via `xpair launch`, which presents a host picker
+   ({configured `REMOTE_HOST`} ∪ {this Mac, when XpairHost is installed here — `~/.xpair/host/role`}; a
+   single entry auto-selects). A **remote** host's attach routes through the exec arm (case 2, over ssh).
+   The **local** host attaches **directly** — `resolve_target → Target::Local` → `tmux-aqua -S
+   /tmp/aqua-tmux.sock attach`, guarded on the keeper being alive (never started from the CLI), with NO ssh
+   and NO `authorized_keys`. (Authorizing a local loopback key as a paired client was tried and dropped:
+   wrong abstraction — a same-user shell could copy the key and reuse it remotely over the tailnet, and it
+   polluted the host's paired-client onboarding state.) This also removes the old footgun of the SSH gate
+   STARTING a tmux server outside XpairHost's subtree (without its AX/SR grant; HostManager.spawn owns the
+   keeper). Per-session
    routing by cwd/agent and the **view-only / intervention-lock when a GUI operator is active** are **D3 +
    Leaf #3 follow-ups — explicitly NOT in the D2 front-door PRs.**
 5. **Rollout = behind a flag.** The gate is access-critical (a bad change locks out every client), so ship
