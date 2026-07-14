@@ -43,8 +43,10 @@ highest-leverage decision of 0.6.0.
   - **Remote exec / scp / rsync / VS Code Remote bootstrap** (`SSH_ORIGINAL_COMMAND` non-empty, incl.
     `ssh -tt host cmd` which has a pty *and* a command) → **pass through** under the account's login shell
     (`$SHELL -c`), never wrapped in tmux.
-  - **Interactive shell** (no command and no subsystem — the fall-through) → auto-attach the tmux-aqua
-    session **only if its keeper server is alive** (never spawn one from the SSH gate — see D2 design).
+  - **Interactive shell** (no command and no subsystem — the fall-through) → a **plain login shell**
+    (`$SHELL -l`). Session entry is **opt-in**: a bare interactive `ssh host` no longer auto-attaches
+    tmux-aqua; the computer-use session is entered explicitly via `xpair launch` (which arrives on the
+    exec arm above), and the plain shell prints a one-line hint pointing at it.
   - **Pure port-forwarding** (`ssh -N -L …` / `-R …`) runs **no** remote command, so the forced command
     never executes; forwarding is governed by the `authorized_keys` forwarding policy, not the branch.
 - **Payoff:** any standards-compliant SSH client — Orca, VS Code Remote, iTerm, phone clients

@@ -784,13 +784,13 @@ enum XpairAuthorizedKeys {
           if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
             exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND"
           fi
-          # interactive fall-through → attach the app-owned tmux-aqua server, but ONLY with a real pty
-          # (`ssh -T host` / a non-terminal stdin has no tty — tmux attach would fail "not a terminal")
-          # AND ONLY if the keeper is alive. Never let an SSH login START the server: one spawned under
-          # sshd is not a child of XpairHost and runs without its AX/SR grant (HostManager.spawn owns the
-          # keeper). Otherwise fall back to a plain login shell.
-          if [ -t 0 ] && "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock has-session -t _keeper 2>/dev/null; then
-            exec "$HOME/.local/bin/tmux-aqua" -S /tmp/aqua-tmux.sock new-session -A -s main
+          # interactive fall-through → a PLAIN login shell. Session entry is OPT-IN (0.6.0): a bare
+          # interactive `ssh host` no longer force-attaches the app-owned tmux-aqua (computer-use)
+          # session. That session is entered explicitly via `xpair launch`, which arrives as a forced
+          # command on the SSH_ORIGINAL_COMMAND arm above (so computer-use still works — it just is not
+          # triggered by merely logging in). On a real terminal, print a one-line hint pointing at it.
+          if [ -t 0 ]; then
+            printf 'xpair: plain shell. For a computer-use session, run: xpair launch\n' >&2
           fi
           exec "${SHELL:-/bin/zsh}" -l
         fi
@@ -1636,19 +1636,19 @@ enum PairingSecuritySelfTest {
         try installRemovesMarkedDuplicateAuthorizedKey(pubLine: pubLine)
         try installDoesNotLeaveAuthorizedKeyWhenLedgerWriteFails(pubLine: pubLine)
         try reconcileMigratesOldNarrowForwarding(pubLine: pubLine)
-        // D2 gate routing (behind the d2-frontdoor flag): command/subsystem-first, tmux fall-through,
-        // legacy path preserved. The SOCKET literal in the gate must match Config's SOCKET (drift guard,
-        // like the 8890 cross-check above — the gate is a raw string with no Swift interpolation).
+        // D2 gate routing (behind the d2-frontdoor flag): command/subsystem-first, then a PLAIN-shell
+        // opt-in interactive fall-through (session entry is via `xpair launch`, not a bare login), legacy
+        // path preserved. The gate is a raw string with no Swift interpolation.
         let gate = XpairAuthorizedKeys.gateHelperScript()
         precondition(gate.contains("d2-frontdoor.enabled"))                                   // flag-gated
         precondition(gate.contains(#"tolower($1)=="subsystem" && $2=="sftp""#))               // sftp: match the configured Subsystem value
         precondition(gate.contains("sftp|internal-sftp) exec /usr/libexec/sftp-server"))       // bare-token subsystem arm
         precondition(gate.contains("internal-sftp|sftp-server) exec /usr/libexec/sftp-server")) // configured-value subsystem arm
         precondition(gate.contains(#"exec "${SHELL:-/bin/zsh}" -c "$SSH_ORIGINAL_COMMAND""#))  // login-shell passthrough
-        precondition(gate.contains("[ -t 0 ] &&"))                                            // tmux only with a real pty
-        precondition(gate.contains("has-session -t _keeper"))                                 // never spawn a rogue tmux server
-        precondition(gate.contains("new-session -A -s main"))                                 // attach-or-create shared
-        precondition(gate.contains(SOCKET))                                                    // socket matches Config.SOCKET
+        precondition(gate.contains("run: xpair launch"))                                       // opt-in: interactive login hints at `xpair launch`
+        precondition(!gate.contains("new-session -A -s main"))                                 // interactive auto-attach removed (opt-in)
+        precondition(!gate.contains("has-session -t _keeper"))                                 // no tmux probe on the interactive path
+        precondition(gate.contains(#"exec "${SHELL:-/bin/zsh}" -l"#))                          // interactive fall-through is a plain login shell
         precondition(gate.contains(#"exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND""#))            // legacy fallback intact
         // D2 hardening: -R-denial drop-in + osascript admin-escaping + STATIC default-deny pf anchor
         // (block :22, pass only lo0 + tailnet utun/CGNAT — future NICs closed by default) + a boot

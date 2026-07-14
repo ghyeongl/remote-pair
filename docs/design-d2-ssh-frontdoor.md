@@ -3,8 +3,9 @@
 **Status: design confirmed. Decisions below are settled; implementation follows in PR1 (gate routing) then PR2 (pf bind + forwarding).**
 
 D2 (see [`roadmap-0.6.0.md`](roadmap-0.6.0.md)) makes the OS's own sshd the single SSH front door, bound
-to the tailnet only, with a ForceCommand that auto-attaches tmux-aqua for interactive sessions and passes
-everything else (exec, scp, sftp, tunnels) through untouched. The payoff: Orca, VS Code Remote, iTerm,
+to the tailnet only, with a ForceCommand that drops interactive logins into a plain shell (session entry
+is **opt-in** via `xpair launch`) and passes everything else (exec, scp, sftp, tunnels) through
+untouched. The payoff: Orca, VS Code Remote, iTerm,
 and phone clients become Xpair clients with zero per-tool integration.
 
 ## What already exists (reuse, don't rebuild)
@@ -32,13 +33,16 @@ D2 is **not greenfield** — most of the front door is already in place:
   This is exactly the D2 conditional-branch skeleton — it already runs on every SSH entry.
 - **tmux-aqua is the session substrate.** A bundled Helper `tmux-aqua` is symlinked by the installer
   (`Installer.swift:128`); sessions (including a `_keeper`) are tracked via `Sessions.liveSessionCount`
-  and a known socket path (`Updater.swift`). The interactive branch should attach to this server.
+  and a known socket path (`Updater.swift`). The computer-use session attaches to this server via
+  `xpair launch` (a forced command on the exec arm), not by a bare interactive login.
 
 So D2 is a **targeted change to an existing gate + a bind**, not a new subsystem.
 
 ## What D2 adds (the gaps)
 
-1. **Interactive arm → tmux-aqua attach** instead of `exec $SHELL -l`.
+1. **Interactive arm stays a plain login shell (opt-in, 0.6.0).** A bare interactive `ssh host` prints a
+   one-line hint and drops to `exec $SHELL -l`; the tmux-aqua (computer-use) session is entered explicitly
+   via `xpair launch`, which routes through the exec arm (a forced command), not this fall-through.
 2. **Harden the non-interactive arm** so scp, sftp (subsystem), rsync, and VS Code Remote bootstrap all
    pass through correctly — the current single `SSH_ORIGINAL_COMMAND` test is insufficient for the sftp
    **subsystem** case (see the decision table).
@@ -55,14 +59,14 @@ request **in this precedence order** — command/subsystem **first**, tmux only 
 |---|------|---------------------------|-------|
 | 1 | sftp subsystem | `SSH_ORIGINAL_COMMAND` equals the configured `Subsystem sftp <cmd>` value (read from sshd_config; incl. args) | `exec /usr/libexec/sftp-server` (real binary + configured args), **not** a shell — `internal-sftp` is an sshd sentinel |
 | 2 | Remote exec / scp / rsync (incl. VS Code Remote bootstrap, git, Orca, **and `ssh -tt host cmd`**) | `SSH_ORIGINAL_COMMAND` non-empty and ≠ the sftp value | `exec "$SHELL" -c "$SSH_ORIGINAL_COMMAND"` — the account's login shell, matching stock sshd |
-| 3 | Interactive shell | `SSH_ORIGINAL_COMMAND` **empty** (fall-through) | attach the tmux-aqua session **iff `has-session -t _keeper`** (server alive); else `exec "$SHELL" -l` — never START a server from the gate |
+| 3 | Interactive shell | `SSH_ORIGINAL_COMMAND` **empty** (fall-through) | **plain login shell** (`exec "$SHELL" -l`) after a one-line `xpair launch` hint — session entry is **opt-in**; a bare login never auto-attaches tmux (computer-use is entered via `xpair launch`, which routes through case 2) |
 | — | Pure port-forward (`ssh -N -L …`) | no session-exec channel opened → **the forced command never runs**; only the direct-tcpip channel opens | governed by the `authorized_keys` forwarding policy, not the gate |
 
 Key correctness points:
 - **Route on `SSH_ORIGINAL_COMMAND` / subsystem FIRST, not on the pty.** A pty is not a reliable
   "interactive" signal: `ssh -tt host cmd` allocates a pty **and** sends a command, so pty-based
-  detection would wrongly attach a remote exec to tmux. tmux-attach is the fall-through only when there
-  is no command and no subsystem.
+  detection would wrongly treat a remote exec (`ssh -tt host cmd`) as an interactive login. The plain-shell
+  fall-through applies only when there is no command and no subsystem.
 - **sftp must be special-cased.** With a forced command in `authorized_keys`, an sftp subsystem request
   still runs the gate, but `$SSH_ORIGINAL_COMMAND` is the subsystem token, not a shell command — piping
   it to `bash -lc` breaks sftp. The gate detects the subsystem token and `exec`s the platform
@@ -146,13 +150,13 @@ pairing-protocol refactor rides D2; the JS→Rust *move* is the separate CLI-pai
    read/write), so sftp/scp is the same trust level, not new exposure; path-restricting it while the shell
    is open is theater. Consistent with D4 (host = SSoT). Fix the sftp **subsystem** arm the current single
    `SSH_ORIGINAL_COMMAND` test breaks.
-4. **tmux-aqua attach (MVP) = attach-or-create the default session, shared read/write — but only if the
-   app's keeper server is alive.** Guard on `has-session -t _keeper`; if the host app is down (cold start
-   / post-reboot), fall back to a plain login shell rather than let the SSH gate START a tmux server,
-   which would run outside XpairHost's subtree and without its AX/SR grant (HostManager.spawn owns the
-   keeper). Standard tmux multi-attach; every SSH client lands in the one persistent shared session. Per-session routing by
-   cwd/agent and the **view-only / intervention-lock when a GUI operator is active** are **D3 + Leaf #3
-   follow-ups — explicitly NOT in the D2 front-door PRs.**
+4. **Interactive session entry is OPT-IN (0.6.0).** A bare interactive `ssh host` lands in a plain login
+   shell (`exec "$SHELL" -l`) and prints a one-line `xpair launch` hint — it never auto-attaches tmux. The
+   tmux-aqua (computer-use) session is entered explicitly via `xpair launch`, whose attach command routes
+   through the exec arm (case 2). This also removes the old footgun of the SSH gate STARTING a tmux server
+   outside XpairHost's subtree (without its AX/SR grant; HostManager.spawn owns the keeper). Per-session
+   routing by cwd/agent and the **view-only / intervention-lock when a GUI operator is active** are **D3 +
+   Leaf #3 follow-ups — explicitly NOT in the D2 front-door PRs.**
 5. **Rollout = behind a flag.** The gate is access-critical (a bad change locks out every client), so ship
    behind a flag with the current `exec $SHELL -l` + passthrough as the fallback; flip after validation.
    **Flag scope:** `d2-frontdoor.enabled` controls the gate **routing only**. The privileged host
@@ -165,7 +169,7 @@ pairing-protocol refactor rides D2; the JS→Rust *move* is the separate CLI-pai
 Implementation, incremental, each through the Codex gate:
 - **PR1 — gate routing table** (behind the flag): command/subsystem-first routing — sftp subsystem →
   sftp-server; exec/scp/rsync/VS Code bootstrap/Orca → `"$SHELL" -c` passthrough; interactive
-  fall-through → tmux-aqua attach.
+  fall-through → plain login shell + `xpair launch` hint (opt-in; the 0.6.0 session-entry redesign).
 - **PR2 — `pf` tailnet anchor + fail-closed reconcile**, plus the forwarding-policy change: paired
   `authorized_keys` line uses `permitopen="127.0.0.1:*",permitopen="[::1]:*",permitopen="localhost:*"` for
   `-L` (all loopback forms — `permitopen` does no name resolution), and a **global** sshd_config
