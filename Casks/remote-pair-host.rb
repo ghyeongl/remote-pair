@@ -1,6 +1,6 @@
 cask "remote-pair-host" do
-  version "0.4.12"
-  sha256 "b9b35fe4bd097d03569cd46d46e6def6a66ba15dd491ea31d4d1526364bd56d4"
+  version "0.4.13"
+  sha256 "dc8d85564d4eded4a17ff0be279971cc28d0f734d984bfa2efc3352078863394"
 
   url "https://github.com/ghyeongl/remote-pair/releases/download/v#{version}/RemotePairHost-#{version}.zip"
   name "RemotePairHost"
