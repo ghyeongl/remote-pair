@@ -44,10 +44,10 @@ Close the laptop or drop Wi-Fi and a normal agent session dies with the connecti
 Bring whichever subscription you have: `claude` (with its unique `--remote-control`), `codex`, or `opencode`. The agent runs on the host, so it must be installed there. The host's configured engine (its `host.env`) is used by default; `xpair config set engine <claude|codex|opencode|shell>` (`claudecode`/`claude-code` alias `claude`) is a client-side fallback for when the host hasn't pinned one, and `xpair launch --engine <e>` overrides per launch.
 
 ### Onboarding that resolves, not just blocks
-First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, installs the engine via its official installer, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or disk.
+First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, installs the engine via its official installer, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or a log.
 
 ### Attach from your laptop or your phone
-Enter a session with `xpair launch` from a client Mac (Finder → right-click → *Launch Xpair*) or Xpair's Sessions sidebar; or SSH/mosh in from any client — including Claude Code on mobile — to reach the same sessions directly. Same state, wherever you are.
+Enter a session with `xpair launch` from a client Mac (Finder → right-click → *Launch Xpair*) or Xpair's Sessions sidebar; or connect over SSH/mosh from any client, including Claude Code on mobile. Same sessions on the host, same state, wherever you are.
 
 ### Remote Desktop, built in
 View and drive the host screen from Xpair's Remote Desktop tab over a native H.264/WebRTC stream with authenticated pointer, wheel, keyboard, and text input. `xpair desktop` falls back to macOS Screen Sharing.
@@ -96,7 +96,7 @@ Open Xpair. First run opens onboarding (in-app, not a separate window) and walks
 
 - **CLI** — auto-installs the bundled `xpair` CLI if it's missing.
 - **Connection** — generates an SSH key, discovers hosts (LAN UDP beacon + Tailscale), and verifies passwordless reachability. You enable **Remote Login** on the host once (System Settings → General → Sharing); outside your LAN, a mesh VPN like [Tailscale](https://tailscale.com) gives the host a stable name.
-- **Engine** — probes the host for `claude` / `codex` / `opencode`, installs it if missing, and sets the API key. The key travels over SSH stdin — never argv, log, or disk.
+- **Engine** — probes the host for `claude` / `codex` / `opencode`, installs it if missing, and sets the API key. The key travels over SSH stdin — never argv or a log — and is stored in the host's login-shell rc (`~/.zshrc`/`~/.bashrc`) for the engine to read.
 - **Host app** — runs `xpair install-host`, copying the signed `XpairHost.app` to the host and installing its daemon (LaunchAgent, `~/.xpair/host`, tmux-aqua, watchdog). The app is self-signed but its grants stick to a stable signing identity.
 - **Permissions** — polls the host's grant status and stops at the one manual step below.
 
@@ -114,7 +114,7 @@ This is the one step onboarding can't do for you; it can't be done over SSH (TCC
 
 Then pick up the grants: `launchctl kickstart -k gui/$(id -u)/com.x10lab.xpair-host` (or menu bar → Restart tmux host).
 
-> **File Sharing** is a required gate too (`xpair status` lists it): turn it ON at System Settings → General → Sharing → File Sharing and share each project folder — the host won't reach the serving state without it.
+> **File Sharing** is a required gate too (`xpair status` lists it): turn it ON at System Settings → General → Sharing → File Sharing. (Each folder you'll mount must also be added to its Shared Folders list, or `xpair mount` / *Add Root* fails — that surfaces as an SMB mount error, not a gate.)
 
 > FDA is a required grant today, and it grants the agent subtree whole-disk read regardless of where your project lives. Keeping projects under a non-protected root (e.g. `~/Spaces`, not `~/Desktop`/`~/Documents`/`~/Downloads`) only avoids folder *prompts* — it does not narrow the grant.
 
