@@ -30,11 +30,12 @@ test("pre-workbench onboarding installs an Edit-role application menu so Cmd+C/V
     /Menu\.setApplicationMenu\(Menu\.buildFromTemplate\(\[[\s\S]*role: 'editMenu'[\s\S]*\]\)\)/,
     "must install an application menu whose template includes the editMenu role",
   );
-  // appMenu is macOS-only; editMenu stays cross-platform so the Windows onboarding build is unaffected.
+  // macOS-only: the whole setApplicationMenu must be guarded to darwin — the gap is mac-specific and
+  // on Windows/Linux the app menu renders as a visible per-window menu bar (unwanted wizard chrome).
   assert.match(
     onboardingMain,
-    /process\.platform === 'darwin' \? \[\{ role: 'appMenu' \}\] : \[\]/,
-    "appMenu role must be guarded to darwin only (cross-platform build safety)",
+    /if \(process\.platform === 'darwin'\) \{[\s\S]*Menu\.setApplicationMenu\(/,
+    "the onboarding menu install must be guarded to darwin only (no menu bar on non-mac clients)",
   );
 });
 
