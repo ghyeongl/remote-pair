@@ -120,4 +120,29 @@ else
 fi
 cleanup_sandbox
 
+# ── Part D: a manifest FILE row for settings.json must NOT delete the user's file ──
+# (older bash/Swift installs recorded `FILE settings.json` when it didn't pre-exist; on
+#  uninstall the sweep removes our hooks and the FILE row must be skipped, keeping user keys.)
+new_sandbox
+mkdir -p "$HOME/.claude/hooks" "$HOME/.xpair/host/bin"
+printf '{ "model": "sonnet", "hooks": { "Stop": [ { "hooks": [ { "type":"command","command":"%s/.xpair/host/bin/xpair-notify.sh Stop" } ] } ] } }\n' "$HOME" > "$HOME/.claude/settings.json"
+cp "$_REPO_ROOT/host/hooks/manage-claude-hooks.py" "$HOME/.xpair/host/bin/manage-claude-hooks.py"
+printf 'host\n' > "$HOME/.xpair/host/role"
+printf 'HOST_ONLY=1\n' > "$HOME/.xpair/host/host.env"
+# Manifest as an old install would record it: a whole-file rollback for settings.json.
+printf 'FILE\t%s/.claude/settings.json\t\n' "$HOME" > "$HOME/.xpair/host/.manifest-host"
+HOME="$HOME" bash "$_REPO_ROOT/shared/uninstall.sh" --role host </dev/null >/dev/null 2>"$RP_ERRFILE"; drc=$?
+it "file-guard/settings-survives-and-swept"
+if [ -f "$HOME/.claude/settings.json" ]; then
+  _pass "settings.json preserved (FILE row skipped, not deleted)"
+  body="$(cat "$HOME/.claude/settings.json")"
+  assert_contains "$body" "sonnet" "user key survives the uninstall"
+  assert_absent "$body" "xpair-notify.sh" "xpair hook was swept from the preserved file"
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$HOME/.claude/settings.json" 2>/dev/null
+  assert_rc "$?" 0 "preserved settings.json is valid JSON :: uninstall stderr=[$(cat "$RP_ERRFILE" 2>/dev/null)]"
+else
+  _fail "settings.json was deleted by the FILE row (data loss) :: uninstall rc=$drc stderr=[$(cat "$RP_ERRFILE" 2>/dev/null)]"
+fi
+cleanup_sandbox
+
 finish

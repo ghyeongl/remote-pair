@@ -194,7 +194,14 @@ revert_manifest_inline() {
     while IFS="$tab" read -r action a b _; do
       case "$action" in
         FILE)
-          [ -e "$a" ] && run rm -f "$a"
+          # Never delete the user's ~/.claude/settings.json via a FILE row (older bash/Swift
+          # installs recorded one when the file didn't pre-exist) — xpair hooks are removed
+          # surgically by the sweep above, so the file (and any user keys) must survive.
+          if [ "$a" = "$HOME/.claude/settings.json" ]; then
+            :
+          else
+            [ -e "$a" ] && run rm -f "$a"
+          fi
           ;;
         TREE)
           [ -e "$a" ] && run rm -rf "$a"

@@ -353,7 +353,7 @@ manifest_revert() {
   # awk reverses identically on both BSD and GNU.
   awk '{ lines[NR] = $0 } END { for (i = NR; i >= 1; i--) print lines[i] }' "$MANIFEST" | while IFS=$'\t' read -r action a b; do
     case "$action" in
-      FILE)      if _manifest_is_shared_cli "$a"; then echo "  keep shared CLI $a"; else [ -e "$a" ] && rm -f "$a" && echo "  rm   $a"; fi ;;
+      FILE)      if _manifest_is_shared_cli "$a"; then echo "  keep shared CLI $a"; elif [ "$a" = "${CLAUDE_DIR:-$HOME/.claude}/settings.json" ]; then echo "  keep user settings.json (xpair hooks swept surgically)"; else [ -e "$a" ] && rm -f "$a" && echo "  rm   $a"; fi ;;
       TREE)      [ -e "$a" ] && rm -rf "$a" && echo "  rm -rf $a" ;;
       BACKUP)    if _manifest_is_shared_cli "$a"; then echo "  keep shared CLI $a"; else [ -e "$b" ] && cp -p "$b" "$a" && rm -f "$b" && echo "  restore $a"; fi ;;
       MKDIR)     rmdir "$a" 2>/dev/null && echo "  rmdir $a" || true ;;
