@@ -270,16 +270,12 @@ if is_host; then
       install_file "$HOST_DIR/hooks/approve-reminder.sh"    "$CLAUDE_DIR/hooks/xpair-approve-reminder.sh" 755
       settings="$CLAUDE_DIR/settings.json"
       approve_cmd='$HOME/.claude/hooks/xpair-approve-reminder.sh'
-      existed=0; [ -f "$settings" ] && existed=1
       say "[host] approve+notify hook → $settings (idempotent merge)"
       python3 "$RP_DIR/bin/manage-claude-hooks.py" add "$settings" "$approve_cmd" "$notify_cmd" || warn "approve/notify hook merge failed — manual check required"
-      # HOOKS rollback must remove both the approve_cmd and notify_cmd identifiers separately → record two lines.
-      if [ "$existed" = 1 ]; then
-        record HOOKS "$settings" "$approve_cmd"   # pre-existing file → roll back via surgical removal (approve)
-        record HOOKS "$settings" "$notify_cmd"    # pre-existing file → roll back via surgical removal (notify)
-      else
-        record FILE "$settings"                   # file we newly created → roll back via full deletion
-      fi
+      # Always roll back via surgical removal — never delete the whole settings.json (the user may add
+      # their own hooks to it). One HOOKS line each for the approve and notify identifiers.
+      record HOOKS "$settings" "$approve_cmd"
+      record HOOKS "$settings" "$notify_cmd"
     else
       warn "python3 not found — skipping approve/notify hook install (skill is installed). After installing the CLT, re-running install.sh --role host is recommended"
     fi

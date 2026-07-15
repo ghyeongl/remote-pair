@@ -125,6 +125,13 @@ case "$ROLE" in
 esac
 found=0
 SELECTED_LOCAL_BINS="$(selected_local_bins)"
+# Belt-and-suspenders: purge xpair hook entries from settings.json independent of the manifest.
+_xpair_settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
+_xpair_hooks_mgr="$RP_HOST_DIR/bin/manage-claude-hooks.py"
+if [ -f "$_xpair_settings" ] && [ -f "$_xpair_hooks_mgr" ] && command -v python3 >/dev/null 2>&1; then
+  python3 "$_xpair_hooks_mgr" sweep "$_xpair_settings" >/dev/null 2>&1 || true
+fi
+
 for m in "${mans[@]}"; do
   [ -f "$m" ] || continue
   found=1

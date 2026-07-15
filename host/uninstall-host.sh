@@ -350,6 +350,15 @@ for L in \
   run rm -f "$HOME/Library/LaunchAgents/$L.plist"
 done
 
+# Belt-and-suspenders: surgically purge ALL xpair Claude Code hook entries from settings.json,
+# independent of the manifest (catches entries an older/stale manifest never recorded). Runs while
+# the installed manager still exists — the manifest revert deletes it afterward.
+_xpair_settings="$HOME/.claude/settings.json"
+_xpair_hooks_mgr="$HOME/.xpair/host/bin/manage-claude-hooks.py"
+if [ -f "$_xpair_settings" ] && [ -f "$_xpair_hooks_mgr" ] && command -v python3 >/dev/null 2>&1; then
+  run python3 "$_xpair_hooks_mgr" sweep "$_xpair_settings"
+fi
+
 UNINSTALLER="$(find_shared_uninstaller || true)"
 if [ -n "$UNINSTALLER" ]; then
   say "Reverting manifest-recorded install actions"
