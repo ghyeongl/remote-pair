@@ -2,8 +2,7 @@
 //
 // ZERO external npm deps: node stdlib (https/crypto/fs/os/path) only. This module is shared by
 // BOTH the VSCodium extension host (extension.js) and the Electron onboarding main process
-// (via onboarding-bridge.js → preload → webview). The Electron app additionally uses
-// @sentry/electron for renderer/main crash capture; this module is the PostHog transport and
+// (via onboarding-bridge.js → preload → webview). This module is the PostHog transport and
 // the extension-host Sentry path (raw HTTP envelope, no SDK, to preserve the zero-dep rule).
 //
 // HARD PRIVACY (OSS audit): NEVER transmit repo names, file paths, command contents, or IP
@@ -25,10 +24,13 @@ const { URL } = require("url");
 
 // --- paths / keys ----------------------------------------------------------
 
-const RP_DIR = path.join(os.homedir(), ".xpair/host");
-const CLIENT_ENV = path.join(RP_DIR, "client.env");
+const RP_CLIENT_DIR = path.join(os.homedir(), ".xpair/client");
+const CLIENT_ENV = path.join(RP_CLIENT_DIR, "client.env");
+const LEGACY_CLIENT_ENV = path.join(os.homedir(), ".xpair/host/client.env");
+const TELEMETRY_ENV = path.join(RP_CLIENT_DIR, "telemetry.env");
+const FIRST_LAUNCH_CLAIM = path.join(RP_CLIENT_DIR, "first-launch.claim"); // O_EXCL token: cross-process winner of the pending emission
 
-// client.env keys (FROZEN — see spec "Telemetry Setup").
+// telemetry.env keys (FROZEN — see spec "Telemetry Setup").
 const K_ANON_ID = "TELEMETRY_ANON_ID"; // distinct_id = install_id (UUID v4, disk-persisted)
 const K_TELEMETRY_CONSENT = "TELEMETRY_CONSENT"; // gates PostHog
 const K_CRASH_CONSENT = "CRASH_REPORT_CONSENT"; // gates Sentry
@@ -42,8 +44,20 @@ const K_SENTRY_DSN = "SENTRY_DSN"; // Sentry DSN; absent => Sentry no-op
 // fires at most once for the lifetime of the install regardless of how many times either lane
 // observes reachability.
 const K_HOST_CONNECTED_STAMP = "TELEMETRY_HOST_CONNECTED_AT"; // epoch ms of first host_connected
+const K_FIRST_LAUNCH_STAMP = "TELEMETRY_FIRST_LAUNCH_AT"; // "pending" until emitted, then epoch ms; "backfilled:<ms>" for upgraded installs (never emitted)
+const TELEMETRY_KEYS = Object.freeze([
+  K_ANON_ID,
+  K_TELEMETRY_CONSENT,
+  K_CRASH_CONSENT,
+  K_INSTALL_TS,
+  K_POSTHOG_KEY,
+  K_POSTHOG_HOST,
+  K_SENTRY_DSN,
+  K_HOST_CONNECTED_STAMP,
+]);
+const TELEMETRY_KEY_SET = new Set(TELEMETRY_KEYS);
 
-// Cloud EU default (endpoint-agnostic: swappable to self-host via POSTHOG_HOST in client.env).
+// Cloud EU default (endpoint-agnostic: swappable to self-host via POSTHOG_HOST in telemetry.env).
 const DEFAULT_POSTHOG_HOST = "https://eu.i.posthog.com";
 const CAPTURE_PATH = "/capture/";
 
@@ -101,12 +115,12 @@ const PATH_SET = new Set(Object.values(PATHS));
 
 // --- env file I/O ----------------------------------------------------------
 
-/** Parse client.env (KEY=VALUE, optional quotes) into a flat object. Never throws. */
-function readEnv() {
+/** Parse KEY=VALUE env files into a flat object. Never throws. */
+function readEnvFile(file) {
   const env = {};
   let raw;
   try {
-    raw = fs.readFileSync(CLIENT_ENV, "utf8");
+    raw = fs.readFileSync(file, "utf8");
   } catch (_e) {
     return env;
   }
@@ -128,11 +142,83 @@ function readEnv() {
   return env;
 }
 
-/** Upsert KEY="value" in client.env (creates the file/dir if missing). Never throws. */
+function stripTelemetryKeysFromEnvFile(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch (_e) {
+    return;
+  }
+  const kept = [];
+  let changed = false;
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    const eq = t.indexOf("=");
+    const key = eq >= 0 ? t.slice(0, eq).trim() : "";
+    if (key && TELEMETRY_KEY_SET.has(key)) {
+      changed = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  if (!changed) return;
+  try {
+    fs.writeFileSync(file, kept.join("\n").replace(/\n+$/, "\n"));
+  } catch (_e) {
+    /* best effort */
+  }
+}
+
+let legacyTelemetryMigrationAttempted = false;
+function migrateLegacyTelemetryEnv(currentEnv) {
+  const additions = {};
+  for (const file of [CLIENT_ENV, LEGACY_CLIENT_ENV]) {
+    const legacy = readEnvFile(file);
+    for (const key of TELEMETRY_KEYS) {
+      if (currentEnv[key] === undefined && additions[key] === undefined && legacy[key] !== undefined) {
+        additions[key] = legacy[key];
+      }
+    }
+    stripTelemetryKeysFromEnvFile(file);
+  }
+  const entries = Object.entries(additions);
+  if (!entries.length) return;
+  let lines = [];
+  try {
+    lines = fs.readFileSync(TELEMETRY_ENV, "utf8").split("\n");
+  } catch (_e) {
+    /* file may not exist yet */
+  }
+  for (const [key, val] of entries) {
+    lines.push(`${key}="${val}"`);
+  }
+  try {
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(RP_CLIENT_DIR, 0o700);
+    } catch (_e) {}
+    fs.writeFileSync(TELEMETRY_ENV, lines.join("\n").replace(/\n+$/, "\n"));
+  } catch (_e) {
+    /* best effort */
+  }
+}
+
+/** Parse telemetry.env (KEY=VALUE, optional quotes) into a flat object. Never throws. */
+function readEnv() {
+  let env = readEnvFile(TELEMETRY_ENV);
+  if (!legacyTelemetryMigrationAttempted && TELEMETRY_KEYS.some((key) => env[key] === undefined)) {
+    legacyTelemetryMigrationAttempted = true;
+    migrateLegacyTelemetryEnv(env);
+    env = readEnvFile(TELEMETRY_ENV);
+  }
+  return env;
+}
+
+/** Upsert KEY="value" in telemetry.env (creates the file/dir if missing). Never throws. */
 function upsertEnv(key, val) {
   let lines = [];
   try {
-    lines = fs.readFileSync(CLIENT_ENV, "utf8").split("\n");
+    lines = fs.readFileSync(TELEMETRY_ENV, "utf8").split("\n");
   } catch (_e) {
     /* file may not exist yet */
   }
@@ -147,10 +233,31 @@ function upsertEnv(key, val) {
   });
   if (!found) lines.push(`${key}="${val}"`);
   try {
-    fs.mkdirSync(RP_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(CLIENT_ENV, lines.join("\n").replace(/\n+$/, "\n"));
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(RP_CLIENT_DIR, 0o700);
+    } catch (_e) {}
+    fs.writeFileSync(TELEMETRY_ENV, lines.join("\n").replace(/\n+$/, "\n"));
   } catch (_e) {
     /* best effort */
+  }
+}
+
+// Seed build-baked, publishable telemetry keys (PostHog project key / Sentry DSN) into
+// telemetry.env from a world-readable file shipped inside the extension bundle. Called at
+// activation so it covers fresh installs AND app upgrades that skip the CLI installer. Seeds
+// only when a key is absent (never clobbers a user/older value); never throws; leaves the
+// consent gate untouched (keys stay dormant until opt-in). No bundled file (local dev) => no-op.
+function seedBakedKeys(src = path.join(__dirname, "telemetry.build.env")) {
+  try {
+    const baked = readEnvFile(src);
+    const cur = readEnv();
+    for (const key of [K_POSTHOG_KEY, K_SENTRY_DSN]) {
+      const v = (baked[key] || "").trim();
+      if (v && !(cur[key] || "").trim()) upsertEnv(key, v);
+    }
+  } catch (_e) {
+    /* best effort — telemetry must never break the app */
   }
 }
 
@@ -163,7 +270,8 @@ function defaultRedact(msg) {
   try {
     const home = os.homedir();
     if (home && home.length > 1) s = s.split(home).join("~");
-    const host = (readEnv().REMOTE_HOST || "").trim();
+    const clientEnvFile = fs.existsSync(CLIENT_ENV) ? CLIENT_ENV : LEGACY_CLIENT_ENV;
+    const host = (readEnvFile(clientEnvFile).REMOTE_HOST || "").trim();
     if (host && host.length > 1) s = s.split(host).join("<host>");
   } catch (_e) {
     /* fall through with whatever masking succeeded */
@@ -263,16 +371,27 @@ function installId() {
  * A bare epoch-ms with no id is not PII, so this is safe to write before the consent prompt —
  * it gives time_to_wow_ms a real elapsed base (first launch → first session) instead of ~0
  * (which is what happens if the base is only set lazily at the moment the WOW event fires).
- * Idempotent: only the first call writes; later calls are a no-op. Never throws.
+ * Idempotent: only the first call writes and returns created=true; later calls are a no-op.
+ * Never throws.
  * Call this on the very first run of BOTH the extension host and the Electron onboarding.
  */
 function firstRunStamp() {
   try {
-    if (!readEnv()[K_INSTALL_TS]) upsertEnv(K_INSTALL_TS, String(Date.now()));
+    const existing = installTs();
+    if (existing) return { ts: existing, created: false };
+    const now = Date.now();
+    upsertEnv(K_INSTALL_TS, String(now));
+    const stamped = installTs();
+    const created = stamped === now;
+    // Mark the app_first_launch emission as OWED right where freshness is known:
+    // only a genuinely-fresh install gets "pending". Upgraded installs (stamp from an
+    // old build, no marker) must never emit - see claimFirstLaunchOnce().
+    if (created) upsertEnv(K_FIRST_LAUNCH_STAMP, "pending");
+    return { ts: stamped, created };
   } catch (_e) {
     /* telemetry must never break the app */
   }
-  return installTs();
+  return { ts: installTs(), created: false };
 }
 
 /** install_id creation epoch (ms). 0 if unknown (caller treats as "no wow timing"). */
@@ -299,6 +418,39 @@ function claimHostConnectedOnce() {
   }
 }
 
+/**
+ * Once-per-install claim for app_first_launch. Claims ONLY when telemetry consent is on —
+ * a pre-consent claim would mark the event emitted while capture() drops it, losing it for
+ * the abandon-and-resume onboarding case. Same shape as claimHostConnectedOnce(); never throws.
+ */
+function claimFirstLaunchOnce() {
+  try {
+    if (!telemetryConsent()) return false; // not consented yet — leave unclaimed for a consented launch/completion.
+    const marker = readEnv()[K_FIRST_LAUNCH_STAMP];
+    if (marker === "pending") {
+      // Fresh install whose emission is still owed (incl. abandon-and-resume onboarding).
+      // The env upsert is read-then-write: two windows (different service-lock scopes by
+      // design) can both see "pending" — an O_EXCL token file arbitrates atomically.
+      try {
+        fs.closeSync(fs.openSync(FIRST_LAUNCH_CLAIM, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600));
+      } catch (_raceLoser) {
+        return false; // another process won the claim (or FS refused — prefer under-emitting).
+      }
+      upsertEnv(K_FIRST_LAUNCH_STAMP, String(Date.now()));
+      return true;
+    }
+    if (marker) return false; // already emitted, or backfilled upgrade.
+    // No marker at all: an install upgraded from a pre-claim build (its first launch
+    // happened long ago, and old builds emitted app_first_launch themselves) — or a
+    // stamp write that raced. Backfill WITHOUT emitting: is_fresh_install=true from an
+    // old install would corrupt the fresh-install funnel; prefer under-emitting.
+    upsertEnv(K_FIRST_LAUNCH_STAMP, `backfilled:${Date.now()}`);
+    return false;
+  } catch (_e) {
+    return false; // on any I/O failure, prefer NOT emitting (de-dup is the priority).
+  }
+}
+
 function envTrue(v) {
   const s = String(v || "").trim().toLowerCase();
   return s === "1" || s === "true" || s === "yes" || s === "on";
@@ -311,16 +463,6 @@ function telemetryConsent() {
 /** Sentry gate. */
 function crashReportConsent() {
   return envTrue(readEnv()[K_CRASH_CONSENT]);
-}
-
-/** Sentry config for SDK-based runtimes (Electron @sentry/electron). null DSN => do not init. */
-function sentryConfig() {
-  const env = readEnv();
-  return {
-    dsn: (env[K_SENTRY_DSN] || process.env.RP_SENTRY_DSN || "").trim() || null,
-    release: APP_VERSION,
-    consent: crashReportConsent(),
-  };
 }
 
 /** Read both consent flags (for the consent UI). */
@@ -337,6 +479,11 @@ function setConsent(telemetry, crashReport) {
   upsertEnv(K_TELEMETRY_CONSENT, telemetry ? "true" : "false");
   upsertEnv(K_CRASH_CONSENT, crashReport ? "true" : "false");
   return getConsent();
+}
+
+function setTelemetryConsent(enabled) {
+  upsertEnv(K_TELEMETRY_CONSENT, enabled ? "true" : "false");
+  return telemetryConsent();
 }
 
 // --- super properties ------------------------------------------------------
@@ -573,13 +720,15 @@ module.exports = {
   strictScrubDeep, // recursive strictScrub for a whole event tree (Electron beforeSend).
   installId,
   installTs,
+  seedBakedKeys, // materialize build-baked PostHog/Sentry keys into telemetry.env at activation (idempotent, consent-independent).
   firstRunStamp, // stamp install creation time at first run, INDEPENDENT of consent (time_to_wow base).
   claimHostConnectedOnce, // once-per-install host_connected gate (activation-funnel cardinality).
+  claimFirstLaunchOnce, // once-per-install app_first_launch gate (consent-aware; survives abandoned onboarding).
   getConsent,
   setConsent,
+  setTelemetryConsent,
   telemetryConsent,
   crashReportConsent,
-  sentryConfig,
   superProps,
   normalizeReason,
   normalizePath,

@@ -16,7 +16,7 @@ Run the agent you already subscribe to — **Claude**, **Codex**, or **OpenCode*
 
 - **Host Mac** — runs your agent inside persistent tmux sessions, 24/7, with computer-use working.
 - **Client** — **Xpair**, the desktop app (a VSCodium-based fork), or the `xpair` CLI; attach with a Finder right-click.
-- **Mobile** — reach the same sessions from any SSH/mosh client, including Claude Code on your phone.
+- **Mobile** — SSH/mosh into the host from any client, including Claude Code on your phone.
 
 ---
 
@@ -43,13 +43,13 @@ Run your agent over SSH and macOS strips its Accessibility (AX) and Screen Recor
 Close the laptop or drop Wi-Fi and a normal agent session dies with the connection. A patched tmux (`tmux-aqua`) keeps every session alive on the host — `Attached` while you're there, `Detached` while you're gone, running 24/7 either way.
 
 ### Pick your engine
-Bring whichever subscription you have: `claude` (with its unique `--remote-control`), `codex`, or `opencode`. The agent runs on the host, so it must be installed there. Switch with `xpair config set engine <claude|codex|opencode>`, or override per launch with `xpair launch --engine <e>`.
+Bring whichever subscription you have: `claude` (with its unique `--remote-control`), `codex`, or `opencode`. The agent runs on the host, so it must be installed there. The host's configured engine (its `host.env`) is used by default; `xpair config set engine <claude|codex|opencode|shell>` (`claudecode`/`claude-code` alias `claude`) is a client-side fallback for when the host hasn't pinned one, and `xpair launch --engine <e>` overrides per launch.
 
 ### Onboarding that resolves, not just blocks
-First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, `brew install`s the engine, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or disk.
+First run opens a guided setup where each step is a **hard gate that fixes itself** instead of dead-ending: it installs the CLI, installs the engine via its official installer, sets the API key, and verifies SSH key-auth. Secrets go over stdin, never argv or a log.
 
 ### Attach from your laptop or your phone
-Attach from a client Mac (Finder → right-click → *Launch Remote Pair*), Xpair's Sessions sidebar, or any SSH/mosh client including Claude Code on mobile. Same sessions, same state, wherever you are.
+Enter a session with `xpair launch` from a client that has a host configured — a client Mac (Finder → right-click → *Launch Xpair* or Xpair's Sessions sidebar), or the `xpair` CLI anywhere `REMOTE_HOST` is set. Raw-SSHing/moshing straight into the host (e.g. Claude Code on your phone) drops you into a plain shell on the host itself. Same sessions, same state, wherever you are.
 
 ### Remote Desktop, built in
 View and drive the host screen from Xpair's Remote Desktop tab over a native H.264/WebRTC stream with authenticated pointer, wheel, keyboard, and text input. `xpair desktop` falls back to macOS Screen Sharing.
@@ -62,10 +62,11 @@ A blocking "Allow?" dialog (or a 1Password unlock prompt) on a headless host sta
 ## Requirements
 
 - Apple Silicon Mac (host and client)
-- macOS Sequoia or later recommended
+- macOS Ventura (13) or later
 - **Remote Login** enabled on the host (onboarding generates the SSH key and wires the rest)
-- `mosh` on both machines — onboarding installs it via Homebrew; without it, attach falls back to plain SSH (which dies on disconnect)
-- **Host:** Homebrew. The engine CLI (`claude` / `codex` / `opencode`) and the host app are installed by onboarding.
+- **File Sharing** enabled on the host, with each mapped project folder added to its Shared Folders list — Xpair serves those folders over SMB (`xpair mount` / Browser *Add Root*); onboarding surfaces it (System Settings → General → Sharing → File Sharing).
+- `mosh` on both machines — shipped as a bundled static binary (the client's is inside Xpair.app → `~/.local/bin`; the host `mosh-server` inside XpairHost.app), no Homebrew required. Without it, attach falls back to plain SSH (which dies on disconnect).
+- **Host:** no Homebrew needed for app-driven onboarding — the client pushes the signed XpairHost.app over SSH (`xpair install-host`) and installs the engine via its official installer. (Only the manual CLI bootstrap uses brew, for the cask + cliclick.)
 
 ---
 
@@ -79,7 +80,7 @@ Setup runs from **Xpair**, the client app: install it, launch it, and its first-
 curl -fsSL https://raw.githubusercontent.com/x10lab/xpair/main/shared/install-client.sh | bash
 ```
 
-This installs the latest **stable** release that actually includes the `Xpair.zip` client asset. Xpair currently has no stable release on the renamed Xpair asset line, so the installer falls back to the newest `0.5.0aN` **pre-release** with a notice. To choose that channel explicitly, pass `--prerelease`:
+This installs the latest **stable** release that actually includes the `Xpair.zip` client asset. Xpair currently has no stable release on the renamed Xpair asset line, so the installer falls back to the newest `0.5.1a1` **pre-release** with a notice. To choose that channel explicitly, pass `--prerelease`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/x10lab/xpair/main/shared/install-client.sh | bash -s -- --prerelease
@@ -87,7 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/x10lab/xpair/main/shared/install-cl
 
 It downloads the chosen `Xpair.app` and strips its Gatekeeper quarantine with `xattr` — exactly what the cask does in its postflight (Homebrew's `--no-quarantine`), so the self-signed app opens without the "unidentified developer" block.
 
-Prefer Homebrew? The cask follows the **stable** line — the same channel as the default `curl` install above (alpha builds come from the `--prerelease` one-liner, not the cask). No stable Xpair release exists on the renamed asset line yet, so the cask is interim-pinned to the latest `0.5.0aN` pre-release; `brew upgrade` moves you onto stable the moment it ships:
+Prefer Homebrew? The cask follows the **stable** line — the same channel as the default `curl` install above (alpha builds come from the `--prerelease` one-liner, not the cask). No stable Xpair release exists on the renamed asset line yet, so the cask is interim-pinned to the latest `0.5.1a1` pre-release; `brew upgrade` moves you onto stable the moment it ships:
 
 ```bash
 brew tap x10lab/xpair https://github.com/x10lab/xpair && brew install --cask xpair
@@ -96,8 +97,8 @@ brew tap x10lab/xpair https://github.com/x10lab/xpair && brew install --cask xpa
 Open Xpair. First run opens onboarding (in-app, not a separate window) and walks:
 
 - **CLI** — auto-installs the bundled `xpair` CLI if it's missing.
-- **Connection** — generates an SSH key, discovers hosts (LAN Bonjour + Tailscale), and verifies passwordless reachability. You enable **Remote Login** on the host once (System Settings → General → Sharing); outside your LAN, a mesh VPN like [Tailscale](https://tailscale.com) gives the host a stable name.
-- **Engine** — probes the host for `claude` / `codex` / `opencode`, installs it if missing, and sets the API key. The key travels over SSH stdin — never argv, log, or disk.
+- **Connection** — generates an SSH key, discovers hosts (LAN UDP beacon + Tailscale), and verifies passwordless reachability. You enable **Remote Login** on the host once (System Settings → General → Sharing); outside your LAN, a mesh VPN like [Tailscale](https://tailscale.com) gives the host a stable name.
+- **Engine** — checks whether the host has your engine (`claude` / `codex` / `opencode`) installed and authenticated. Installing it and setting its API key happen in the **host** onboarding, on the host itself (`XpairHost.app` → EngineGuard). The key is passed over stdin (never argv or a log); Claude/OpenCode store it in the host's login-shell rc (`~/.zshrc`/`~/.bashrc`), while Codex hands it to `codex login` (`~/.codex/auth.json`).
 - **Host app** — runs `xpair install-host`, copying the signed `XpairHost.app` to the host and installing its daemon (LaunchAgent, `~/.xpair/host`, tmux-aqua, watchdog). The app is self-signed but its grants stick to a stable signing identity.
 - **Permissions** — polls the host's grant status and stops at the one manual step below.
 
@@ -111,18 +112,20 @@ This is the one step onboarding can't do for you; it can't be done over SSH (TCC
 |---|---|---|
 | **Accessibility** | Synthetic input (click/type) for computer-use | **Required** |
 | **Screen Recording** | Screenshots for computer-use | **Required** |
-| **Full Disk Access** | Prevents macOS folder prompts a headless host can't answer (an unanswered prompt stalls the session). The grant is exercised by the agent session running inside the app, which can then read the whole disk — prefer a non-protected project root instead if you can. | **Recommended** |
+| **Full Disk Access** | Prevents macOS folder prompts a headless host can't answer (an unanswered prompt stalls the session). The grant is exercised by the agent session running inside the app, which can then read the whole disk — the grant is whole-disk and is not scoped by where your project folder lives. | **Required** |
 
 Then pick up the grants: `launchctl kickstart -k gui/$(id -u)/com.x10lab.xpair-host` (or menu bar → Restart tmux host).
 
-> Prefer not to grant Full Disk Access? Keep project folders under a non-protected root (e.g. `~/Spaces`, not `~/Desktop`/`~/Documents`/`~/Downloads`) — then sessions never hit a protected folder and never prompt.
+> **File Sharing** is a required gate too (`xpair status` lists it): turn it ON at System Settings → General → Sharing → File Sharing. (Each folder you'll mount must also be added to its Shared Folders list, or `xpair mount` / *Add Root* fails — that surfaces as an SMB mount error, not a gate.)
+
+> FDA is a required grant today, and it grants the agent subtree whole-disk read regardless of where your project lives. Keeping projects under a non-protected root (e.g. `~/Spaces`, not `~/Desktop`/`~/Documents`/`~/Downloads`) only avoids folder *prompts* — it does not narrow the grant.
 
 ### Doing it by hand (CLI only)
 
 Prefer the CLI to the app? The bootstrap script and `xpair install-host` do the same work (the bootstrap script needs `git` — it clones the repo for its source):
 
 ```bash
-# Client: CLI + Finder Quick Action (auto-runs `xpair onboard`):
+# Client: CLI + Finder "Launch Xpair" Quick Action (run `xpair onboard` to set up SSH/mappings; `xpair doctor` to verify):
 curl -fsSL https://raw.githubusercontent.com/x10lab/xpair/main/shared/bootstrap.sh | ROLE=client bash
 
 # Host: install the CLI + approve glue on the host itself:
@@ -146,7 +149,7 @@ To browse and edit those files from the client, **mount the host folder**. In Xp
 
 ```bash
 xpair launch <host-folder>   # start / attach a session for a folder on the host
-xpair mount                  # mount a host folder locally (smb/sshfs) to browse + edit it
+xpair mount                  # mount a host folder locally over SMB to browse + edit it
 ```
 
 ---
@@ -159,12 +162,12 @@ xpair attach <name>    # attach an existing tmux-aqua session by exact name
 xpair ls               # host sessions + folder mappings
 xpair map add|rm|list  # client path ↔ host path mappings
 xpair onboard          # re-runnable client setup (host, terminal, mappings, doctor)
-xpair discover         # find Xpair/SSH hosts (LAN Bonjour + Tailscale)
+xpair discover         # find Xpair/SSH hosts (LAN UDP beacon + Tailscale)
 xpair status           # app PID, host server, heartbeat age
 xpair doctor           # check SSH auth, host app, tmux-aqua on host
 xpair desktop open     # open the host screen via macOS Screen Sharing (vnc://)
 xpair editor start     # launch the in-app code-server editor (loopback)
-xpair mount            # mount a host folder directly (smb/sshfs)
+xpair mount            # mount a host folder directly over SMB
 xpair notify           # pull recent host notifications (Stop / approve / …)
 xpair logs [--host -f] # tail launcher/app logs (or host logs over ssh)
 xpair config set host my-mac-mini
@@ -173,11 +176,15 @@ xpair config set engine codex
 
 Host-side / install helpers: `xpair install-host` (idempotent, integrity-verified remote install), `xpair update` / `xpair self-update` (hot-swap the glue layer without touching the signed `.app`), `xpair approve` (handle a blocked dialog), `xpair host` (ensure the tmux-aqua server is up).
 
-`xpair launch <dir>` (or Finder → right-click → Quick Actions → *Launch Remote Pair*) starts/attaches the session; the only per-session prompt is the agent's own "Allow for this session" — press Enter once.
+`xpair launch <dir>` (or Finder → right-click → Quick Actions → *Launch Xpair*) maps the folder to your configured host and starts/attaches that folder's session over SSH; the only per-session prompt is the agent's "Allow for this session" — press Enter once.
 
 <p align="center">
-  <img src="assets/usage-finder-launch.png" alt="Finder right-click → Services → Launch Remote Claude" width="380">
+  <img src="assets/usage-finder-launch.png" alt="Finder right-click → Quick Actions → Launch Xpair" width="380">
 </p>
+
+### How a session is served
+
+Sessions live on the host in `tmux-aqua`. You enter them folder-first with `xpair launch <dir>` (or Finder → *Launch Xpair*, or Xpair's Sessions sidebar) — a **client** command that maps the folder to your configured host and starts or attaches that session over SSH; `xpair ls` and `xpair attach <name>` (also client commands, needing a configured host) list and re-enter sessions. Logging straight into the host over `ssh`/`mosh` doesn't auto-attach — it drops to a plain shell on the host.
 
 ---
 
@@ -199,7 +206,7 @@ Stock VSCodium stays inviolable — Xpair changes live only in `client/ide/remot
 
 ## Security & responsibility
 
-> ⚠️ Xpair deliberately lowers macOS's safety guardrails on the host: it holds Accessibility + Screen Recording (and optionally Full Disk Access) and keeps an autonomous agent running inside that privileged subtree, reachable remotely 24/7. That agent can see the screen, synthesize input, and — with Full Disk Access — read and write your entire disk. That is the point of the tool, and a trade-off you opt into. **You are solely responsible for what runs on the host.** Run it only on a personal machine you own, grant the minimum permissions you need, and don't point it at anything you can't afford to lose. Provided as-is, without warranty (see [LICENSE](LICENSE)).
+> ⚠️ Xpair deliberately lowers macOS's safety guardrails on the host: it holds Accessibility + Screen Recording (and Full Disk Access) and keeps an autonomous agent running inside that privileged subtree, reachable remotely 24/7. That agent can see the screen, synthesize input, and — with Full Disk Access — read and write your entire disk. That is the point of the tool, and a trade-off you opt into. **You are solely responsible for what runs on the host.** Run it only on a personal machine you own, grant the minimum permissions you need, and don't point it at anything you can't afford to lose. Provided as-is, without warranty (see [LICENSE](LICENSE)).
 
 **Telemetry is off by default.** Two independent opt-in switches (PostHog product analytics, Sentry crash reports) stay silent unless you turn them on, and never carry repo names, paths, command contents, or personal data. See [docs/logging.md §11](docs/logging.md) for the full event catalog.
 
@@ -218,7 +225,7 @@ Still stuck? [Open an issue](https://github.com/x10lab/xpair/issues) with your v
 
 ## For maintainers
 
-Single monorepo (`host/` + `client/` + `shared/`), built in lockstep. Versions are declared once in `shared/identity/versions.json` (host **0.5.0**, client **0.1.0**, screen-engine **0.1.0**) and verified across consumers; everything is signed with one stable cert (the in-app Updater verifies the leaf CN). The host app is built first — **published to the release and bundled into the client**, which delivers it to the host via `xpair install-host`. `.github/workflows/release.yml` ships both; users install the client cask and let it push the host.
+Single monorepo (`host/` + `client/` + `shared/`), built in lockstep. Versions are declared once in `shared/identity/versions.json` (host **0.5.1a1**, ide **0.1.0**, cli **0.1.0**, screen-engine **0.1.0**) and verified across consumers; everything is signed with one stable cert (the in-app Updater verifies the leaf CN). The host app is built first — **published to the release and bundled into the client**, which delivers it to the host via `xpair install-host`. `.github/workflows/release.yml` ships both; users install the client cask and let it push the host.
 
 ```bash
 ./host/build-host.sh                   # → build/XpairHost.app (signed + verified)

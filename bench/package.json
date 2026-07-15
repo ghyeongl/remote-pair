@@ -1,0 +1,19 @@
+{
+  "name": "xpair-rd-bench",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Standalone Remote Desktop WebRTC baseline benchmark harness",
+  "scripts": {
+    "parse-check": "node client/parse-check.js",
+    "relay-check": "node proxy/relay.test.js",
+    "score-check": "node score/score.test.js",
+    "baseline": "./run-baseline.sh",
+    "impaired": "./run-impaired.sh",
+    "evaluate": "./evaluate.sh",
+    "baseline-score": "./baseline-score.sh",
+    "variance": "./baseline-variance.sh"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0"
+  }
+}

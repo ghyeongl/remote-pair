@@ -19,6 +19,21 @@ let nextLocalPort = 31000;
 let failTokenRead = false;
 let transientTokenReadFailuresRemaining = 0;
 const tokenReadResponses = [];
+let gatewayMacResponse = { allowed: true, state: "same", current: "aa:bb:cc:dd:ee:ff", stored: "aa:bb:cc:dd:ee:ff", err: "" };
+let gatewayMacError = null;
+// Delegate to the REAL bridge so ssh-failure classification (host-key taxonomy, key-auth,
+// etc.) stays faithful; only gatewayMacStatus is overridden so tests can drive the roaming
+// guard. Loaded before the Module._load patch below — onboarding-bridge.js has no load-time
+// side effects, so the real child_process/net are harmless at require time.
+const realBridge = require("./onboarding-bridge.js");
+const fakeBridge = {
+  ...realBridge,
+  gatewayMacStatus() {
+    if (gatewayMacError) throw gatewayMacError;
+    return gatewayMacResponse;
+  },
+};
+
 function fakeSpawn(cmd, args, opts) {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
@@ -161,6 +176,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
   if (request === "vscode") return fakeVscode;
   if (request === "child_process") return { spawn: fakeSpawn };
   if (request === "net") return fakeNet;
+  if (request === "./onboarding-bridge.js") return fakeBridge;
   return realLoad.call(this, request, parent, isMain);
 };
 
@@ -207,6 +223,8 @@ function resetHarness() {
   failTokenRead = false;
   transientTokenReadFailuresRemaining = 0;
   tokenReadResponses.length = 0;
+  gatewayMacResponse = { allowed: true, state: "same", current: "aa:bb:cc:dd:ee:ff", stored: "aa:bb:cc:dd:ee:ff", err: "" };
+  gatewayMacError = null;
 }
 
 function makePanel() {
@@ -237,6 +255,12 @@ function latestIntervalByDelay(intervals, delay) {
   return null;
 }
 
+function ackNegotiatedInput(harness, socketIndex = 0) {
+  harness.sockets[socketIndex].emit("message", {
+    data: JSON.stringify({ type: "hello-ack", negotiatedInput: true }),
+  });
+}
+
 function runRemoteDesktopWebview() {
   const script = fs.readFileSync(path.join(__dirname, "media", "remote-desktop.js"), "utf8");
   const posted = [];
@@ -245,6 +269,24 @@ function runRemoteDesktopWebview() {
   const windowListeners = [];
   const documentListeners = new Map();
   const elements = new Map();
+  function fakeDataChannel(label, options) {
+    return {
+      label,
+      options,
+      readyState: "connecting",
+      bufferedAmount: 0,
+      sent: [],
+      listeners: new Map(),
+      addEventListener(type, fn) {
+        const existing = this.listeners.get(type) || [];
+        existing.push(fn);
+        this.listeners.set(type, existing);
+      },
+      send(message) {
+        this.sent.push(message);
+      },
+    };
+  }
   function element(id) {
     if (!elements.has(id)) {
       const listeners = new Map();
@@ -320,22 +362,8 @@ function runRemoteDesktopWebview() {
       FakeRTCPeerConnection.instances.push(this);
     }
     addTransceiver() {}
-    createDataChannel(label) {
-      const channel = {
-        label,
-        readyState: "connecting",
-        bufferedAmount: 0,
-        sent: [],
-        listeners: new Map(),
-        addEventListener(type, fn) {
-          const existing = this.listeners.get(type) || [];
-          existing.push(fn);
-          this.listeners.set(type, existing);
-        },
-        send(message) {
-          this.sent.push(message);
-        },
-      };
+    createDataChannel(label, options) {
+      const channel = fakeDataChannel(label, options);
       this.dataChannels.push(channel);
       return channel;
     }
@@ -426,6 +454,7 @@ function runRemoteDesktopWebview() {
     timers,
     intervals,
     elements,
+    makeDataChannel: fakeDataChannel,
     sendWindowMessage(message) {
       for (const listener of windowListeners) {
         listener({ data: message });
@@ -654,6 +683,29 @@ function runRemoteDesktopWebview() {
     assert.strictEqual(spawnedChildren.length, 2, "second reveal should start a fresh ssh tunnel");
   });
 
+  await check("RD start respects the gateway MAC roaming guard before ssh", async () => {
+    resetHarness();
+    process.env.REMOTE_HOST = "test-host";
+    gatewayMacResponse = {
+      allowed: false,
+      state: "changed",
+      current: "11:22:33:44:55:66",
+      stored: "aa:bb:cc:dd:ee:ff",
+      err: "default gateway MAC changed",
+    };
+    const panel = makePanel();
+    panel.visible = true;
+
+    await panel._startStream();
+    await waitForAsync();
+
+    assert.strictEqual(tokenReadCommands.length, 0, "blocked roaming guard must not read the RD token");
+    assert.strictEqual(spawnedChildren.length, 0, "blocked roaming guard must not open an ssh tunnel");
+    const errors = errorPosts();
+    assert.strictEqual(errors.length, 1, "blocked roaming guard should surface one RD error");
+    assert.match(errors[0].detail, /default gateway MAC changed/);
+  });
+
   await check("stale settle timer cannot post obsolete v2Connect", async () => {
     resetHarness();
     const panel = makePanel();
@@ -799,9 +851,80 @@ function runRemoteDesktopWebview() {
     assert.strictEqual(errors[0].failureKind, "capture-failed");
   });
 
+  await check("webview sends hello as the first signaling message after open", () => {
+    const harness = runRemoteDesktopWebview();
+    harness.sendWindowMessage({ type: "v2Connect", signalUrl: "ws://127.0.0.1:11/?token=bbbbbbbbbbbbbbbbbbbbbbbb" });
+
+    assert.deepStrictEqual(harness.sockets[0].sent, [], "no signaling messages should be sent before open");
+    harness.sockets[0].emit("open");
+
+    assert.strictEqual(harness.sockets[0].sent.length, 1, "open should send exactly the hello");
+    assert.deepStrictEqual(JSON.parse(harness.sockets[0].sent[0]), {
+      type: "hello",
+      proto: 1,
+      caps: { negotiatedInput: true },
+    });
+  });
+
+  await check("webview creates negotiated input channels on hello-ack and sends input", () => {
+    const harness = runRemoteDesktopWebview();
+    harness.sendWindowMessage({ type: "v2Connect", signalUrl: "ws://127.0.0.1:12/?token=cccccccccccccccccccccccc" });
+
+    assert.strictEqual(harness.peers[0].dataChannels.length, 0, "client must wait for hello-ack before creating input channels");
+    ackNegotiatedInput(harness);
+
+    const ctl = harness.peers[0].dataChannels.find((channel) => channel.label === "rp-ctl");
+    const move = harness.peers[0].dataChannels.find((channel) => channel.label === "rp-move");
+    assert.deepStrictEqual({ ...ctl.options }, { negotiated: true, id: 0 });
+    assert.deepStrictEqual({ ...move.options }, { negotiated: true, id: 1, ordered: false, maxRetransmits: 0 });
+    ctl.readyState = "open";
+    harness.sockets[0].emit("message", {
+      data: JSON.stringify({ type: "status", kind: "input-ready" }),
+    });
+
+    harness.elements.get("screen-video").emit("wheel", {
+      deltaX: 3,
+      deltaY: 4,
+      deltaMode: 0,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      preventDefault() {},
+    });
+    assert.strictEqual(JSON.parse(ctl.sent[0]).t, "w", "control input should flow on the negotiated channel");
+  });
+
+  await check("webview keeps legacy ondatachannel fallback when hello-ack never arrives", () => {
+    const harness = runRemoteDesktopWebview();
+    harness.sendWindowMessage({ type: "v2Connect", signalUrl: "ws://127.0.0.1:13/?token=dddddddddddddddddddddddd" });
+
+    assert.strictEqual(harness.peers[0].dataChannels.length, 0, "old-host path must not create client channels without an ack");
+    const ctl = harness.makeDataChannel("rp-ctl");
+    harness.peers[0].ondatachannel({ channel: ctl });
+    ctl.readyState = "open";
+    harness.sockets[0].emit("message", {
+      data: JSON.stringify({ type: "status", kind: "input-ready" }),
+    });
+
+    harness.elements.get("screen-video").emit("wheel", {
+      deltaX: 5,
+      deltaY: 6,
+      deltaMode: 0,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      preventDefault() {},
+    });
+    assert.strictEqual(JSON.parse(ctl.sent[0]).t, "w", "legacy host-created channel should still be wired");
+    assert.strictEqual(harness.peers[0].dataChannels.length, 0, "ondatachannel delivery must not count as a client-created channel");
+  });
+
   await check("webview always sends pointerup and keyup releases under control-channel backpressure", () => {
     const harness = runRemoteDesktopWebview();
     harness.sendWindowMessage({ type: "v2Connect", signalUrl: "ws://127.0.0.1:8/?token=888888888888888888888888" });
+    ackNegotiatedInput(harness);
     const ctl = harness.peers[0].dataChannels.find((channel) => channel.label === "rp-ctl");
     assert.ok(ctl, "webview should create the reliable control DataChannel");
     ctl.readyState = "open";
@@ -854,6 +977,7 @@ function runRemoteDesktopWebview() {
   await check("webview forwards per-event modifier flags on pointer and wheel input", () => {
     const harness = runRemoteDesktopWebview();
     harness.sendWindowMessage({ type: "v2Connect", signalUrl: "ws://127.0.0.1:10/?token=aaaaaaaaaaaaaaaaaaaaaaaa" });
+    ackNegotiatedInput(harness);
     const ctl = harness.peers[0].dataChannels.find((channel) => channel.label === "rp-ctl");
     const move = harness.peers[0].dataChannels.find((channel) => channel.label === "rp-move");
     assert.ok(ctl, "webview should create the reliable control DataChannel");
@@ -904,6 +1028,7 @@ function runRemoteDesktopWebview() {
   await check("webview ignores unsupported mouse buttons instead of mapping them to primary", () => {
     const harness = runRemoteDesktopWebview();
     harness.sendWindowMessage({ type: "v2Connect", signalUrl: "ws://127.0.0.1:9/?token=777777777777777777777777" });
+    ackNegotiatedInput(harness);
     const ctl = harness.peers[0].dataChannels.find((channel) => channel.label === "rp-ctl");
     assert.ok(ctl, "webview should create the reliable control DataChannel");
     ctl.readyState = "open";

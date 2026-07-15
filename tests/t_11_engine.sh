@@ -20,17 +20,22 @@ extract_respawn() {
     }'
 }
 
+extract_remote_respawn_body() {
+  local b64
+  b64="$(grep "^RESPAWN_B64='" "$SSH_CAPTURE" | sed "s/^RESPAWN_B64='//;s/'$//")"
+  printf '%s' "$b64" | base64 -d 2>/dev/null
+}
+
 # ────────────────────────────────────────────────────────────
 # Scenario 1: --engine codex writes a Codex respawn body.
 # ────────────────────────────────────────────────────────────
-SBX_ROLE=both SBX_REMOTE_HOST="" new_sandbox
+new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
-MOCK_HASSESSION=0 run_launcher --local --engine codex "$SBX"
-RESP1="$(extract_respawn)"
-BODY1="$(cat "$RESP1" 2>/dev/null)"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --engine codex "$SBX"
+BODY1="$(extract_remote_respawn_body)"
 
 it "engine/codex-respawn"
-assert_rc "$RP_RC" 0 "codex local launch succeeds"
+assert_rc "$RP_RC" 0 "codex remote launch succeeds"
 assert_contains "$BODY1" "command -v codex" "codex availability check is injected"
 assert_contains "$BODY1" "codex --dangerously-bypass-approvals-and-sandbox" "codex command is injected"
 assert_absent "$BODY1" "claude --dangerously-skip-permissions" "claude command is not injected"
@@ -39,14 +44,13 @@ cleanup_sandbox
 # ────────────────────────────────────────────────────────────
 # Scenario 2: --engine opencode writes an OpenCode respawn body.
 # ────────────────────────────────────────────────────────────
-SBX_ROLE=both SBX_REMOTE_HOST="" new_sandbox
+new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
-MOCK_HASSESSION=0 run_launcher --local --engine opencode "$SBX"
-RESP2="$(extract_respawn)"
-BODY2="$(cat "$RESP2" 2>/dev/null)"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --engine opencode "$SBX"
+BODY2="$(extract_remote_respawn_body)"
 
 it "engine/opencode-respawn"
-assert_rc "$RP_RC" 0 "opencode local launch succeeds"
+assert_rc "$RP_RC" 0 "opencode remote launch succeeds"
 assert_contains "$BODY2" "command -v opencode" "opencode availability check is injected"
 assert_contains "$BODY2" "OPENCODE_CONFIG_CONTENT" "opencode auto-approve config is injected"
 assert_contains "$BODY2" "opencode --continue" "opencode continue command is injected"
@@ -56,14 +60,13 @@ cleanup_sandbox
 # ────────────────────────────────────────────────────────────
 # Scenario 3: claudecode alias canonicalizes to Claude Code.
 # ────────────────────────────────────────────────────────────
-SBX_ROLE=both SBX_REMOTE_HOST="" new_sandbox
+new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
-MOCK_HASSESSION=0 run_launcher --local --engine claudecode "$SBX"
-RESP3="$(extract_respawn)"
-BODY3="$(cat "$RESP3" 2>/dev/null)"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --engine claudecode "$SBX"
+BODY3="$(extract_remote_respawn_body)"
 
 it "engine/claudecode-alias"
-assert_rc "$RP_RC" 0 "claudecode alias launch succeeds"
+assert_rc "$RP_RC" 0 "claudecode alias remote launch succeeds"
 assert_contains "$BODY3" "claude --dangerously-skip-permissions" "claudecode alias dispatches to claude"
 cleanup_sandbox
 
@@ -72,7 +75,7 @@ cleanup_sandbox
 # ────────────────────────────────────────────────────────────
 new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
-MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --remote --engine opencode "$SBX"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --engine opencode "$SBX"
 SSH_SCRIPT="$(cat "$SSH_CAPTURE" 2>/dev/null)"
 
 it "engine/remote-opencode-check"
@@ -84,19 +87,23 @@ cleanup_sandbox
 # ────────────────────────────────────────────────────────────
 # Scenario 5: xpair launch canonicalizes claudecode and passes explicit engine env.
 # ────────────────────────────────────────────────────────────
-SBX_REMOTE_HOST="" new_sandbox
+new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
-cat > "$RP_DIR/bin/xpair-launch" <<'EOF'
+cat > "$RP_CLIENT_DIR/bin/xpair-launch" <<'EOF'
 #!/bin/bash
 printf 'engine=%s explicit=%s args=%s\n' "${RP_ENGINE:-}" "${RP_ENGINE_EXPLICIT:-}" "$*" >> "$MOCKLOG"
 EOF
-chmod +x "$RP_DIR/bin/xpair-launch"
-run_cli launch --engine claudecode --local --yes "$SBX"
+chmod +x "$RP_CLIENT_DIR/bin/xpair-launch"
+# Unmapped dir + --yes on the uniform host path must still reach the launcher (regression:
+# mapping_for_dir returns non-zero for an unmapped dir; under set -e that used to abort rc 1).
+run_cli launch --engine claudecode --yes "$SBX"
 
 it "engine/xpair-launch-claudecode-alias"
+assert_rc "$RP_RC" 0 "unmapped --yes launch reaches the launcher (no silent set -e abort)"
 assert_rc "$RP_RC" 0 "xpair launch claudecode alias succeeds"
 assert_contains "$MLOG" "engine=claude explicit=1" "xpair passes canonical claude engine explicitly"
-assert_contains "$MLOG" "--local --yes" "xpair preserves launch flags"
+assert_contains "$MLOG" "--yes" "xpair preserves supported launch flags"
+assert_absent "$MLOG" "--local" "xpair does not pass removed local flag"
 cleanup_sandbox
 
 # ────────────────────────────────────────────────────────────
@@ -105,7 +112,7 @@ cleanup_sandbox
 new_sandbox
 make_all_mocks ssh mosh tmux tmux-aqua claude codex opencode tailscale hangul-romanize launchctl open tput
 run_cli config set engine claudecode
-CFG6="$(cat "$RP_DIR/client.env" 2>/dev/null)"
+CFG6="$(cat "$RP_CLIENT_DIR/client.env" 2>/dev/null)"
 run_cli config get engine
 
 it "engine/xpair-config-claudecode-alias"

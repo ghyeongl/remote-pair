@@ -1,0 +1,66 @@
+name: package-windows (.msi)
+
+# Builds the native client `.msi` (WiX) on a GitHub-hosted Windows runner and uploads it as
+# a build artifact. Kept in its own workflow so a packaging hiccup never reddens the cli-rs
+# test matrix. Unsigned POC (v1 ships unsigned per the plan).
+
+on:
+  push:
+    branches: [develop, feat/rust-cli]
+    paths:
+      - "client/cli-rs/**"
+      - ".github/workflows/package-windows.yml"
+  pull_request:
+    paths:
+      - "client/cli-rs/**"
+      - ".github/workflows/package-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: client/cli-rs
+
+jobs:
+  msi:
+    name: build .msi
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Toolchain pinned by client/cli-rs/rust-toolchain.toml.
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Install WiX
+        # Pin WiX v5 — the last major before v6/v7's Open Source Maintenance Fee (OSMF)
+        # EULA gate (WIX7015), which otherwise fails the build. v5 uses the same v4 schema
+        # namespace as xpair.wxs.
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+        shell: pwsh
+
+      - name: Resolve version from Cargo.toml
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$v"
+
+      - name: Build .msi
+        run: >
+          wix build packaging/windows/xpair.wxs
+          -b target/release
+          -arch x64
+          -d Version=${{ steps.ver.outputs.version }}
+          -o xpair-${{ steps.ver.outputs.version }}-x64.msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xpair-msi
+          path: client/cli-rs/xpair-*.msi
+          if-no-files-found: error

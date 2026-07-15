@@ -6,7 +6,7 @@
 //   2) with consent OFF (default), capture()/sentryCapture() perform ZERO https.request.
 //
 // HOME is redirected to a throwaway dir BEFORE telemetry.js loads so the test never touches the
-// real ~/.xpair/host/client.env (module computes RP_DIR/CLIENT_ENV at load time).
+// real ~/.xpair/client/telemetry.env (module computes RP_CLIENT_DIR/TELEMETRY_ENV at load time).
 
 const assert = require("node:assert");
 const fs = require("node:fs");
@@ -15,17 +15,18 @@ const path = require("node:path");
 const https = require("node:https");
 const http = require("node:http");
 
-// --- isolate HOME so we own client.env --------------------------------------
+// --- isolate HOME so we own telemetry.env -----------------------------------
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "rp-telemetry-test-"));
 process.env.HOME = TMP_HOME;
 process.env.USERPROFILE = TMP_HOME; // win parity (harmless on posix)
-const RP_DIR = path.join(TMP_HOME, ".xpair/host");
+const RP_DIR = path.join(TMP_HOME, ".xpair/client");
 const CLIENT_ENV = path.join(RP_DIR, "client.env");
+const TELEMETRY_ENV = path.join(RP_DIR, "telemetry.env");
 fs.mkdirSync(RP_DIR, { recursive: true });
 
 function writeEnv(obj) {
   fs.writeFileSync(
-    CLIENT_ENV,
+    TELEMETRY_ENV,
     Object.entries(obj)
       .map(([k, v]) => `${k}="${v}"`)
       .join("\n") + "\n",
@@ -87,6 +88,38 @@ function assertNoSecrets(blob, label) {
     );
   }
 }
+
+console.log("legacy telemetry env migration:");
+
+check("legacy telemetry keys migrate out of client.env on first read", () => {
+  const legacyHostDir = path.join(TMP_HOME, ".xpair/host");
+  fs.mkdirSync(legacyHostDir, { recursive: true });
+  fs.rmSync(TELEMETRY_ENV, { force: true });
+  fs.writeFileSync(
+    CLIENT_ENV,
+    "REMOTE_HOST=client-host\nTELEMETRY_INSTALL_TS=12345\nTELEMETRY_CONSENT=true\n",
+  );
+  fs.writeFileSync(
+    path.join(legacyHostDir, "client.env"),
+    "POSTHOG_HOST=https://ph.example\nFOLDER_MAPS=/c::/h\n",
+  );
+  assert.deepStrictEqual(t.getConsent(), { telemetry: true, crashReport: false });
+  assert.strictEqual(t.installTs(), 12345);
+  const telemetryRaw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(telemetryRaw.includes('TELEMETRY_INSTALL_TS="12345"'));
+  assert.ok(telemetryRaw.includes('TELEMETRY_CONSENT="true"'));
+  assert.ok(telemetryRaw.includes('POSTHOG_HOST="https://ph.example"'));
+  const clientRaw = fs.readFileSync(CLIENT_ENV, "utf8");
+  const legacyRaw = fs.readFileSync(path.join(legacyHostDir, "client.env"), "utf8");
+  assert.ok(!clientRaw.includes("TELEMETRY_INSTALL_TS="), "client.env should lose install stamp");
+  assert.ok(!clientRaw.includes("TELEMETRY_CONSENT="), "client.env should lose consent");
+  assert.ok(!legacyRaw.includes("POSTHOG_HOST="), "legacy host/client.env should lose PostHog host");
+  assert.ok(clientRaw.includes("REMOTE_HOST=client-host"), "non-telemetry client config remains");
+  assert.ok(legacyRaw.includes("FOLDER_MAPS=/c::/h"), "non-telemetry legacy config remains");
+  fs.rmSync(TELEMETRY_ENV, { force: true });
+  fs.rmSync(CLIENT_ENV, { force: true });
+  fs.rmSync(legacyHostDir, { recursive: true, force: true });
+});
 
 console.log("strictScrub — masks IP/path/tailnet:");
 
@@ -188,10 +221,44 @@ console.log("firstRunStamp — stamps once, independent of consent:");
 check("firstRunStamp is idempotent and consent-independent", () => {
   // Fresh env, no consent flags.
   writeEnv({ TELEMETRY_ANON_ID: "00000000-0000-4000-8000-000000000000" });
-  const ts1 = t.firstRunStamp();
+  const first = t.firstRunStamp();
+  assert.strictEqual(first.created, true, "first firstRunStamp should report stamp creation");
+  const ts1 = first.ts;
   assert.ok(ts1 > 0, "firstRunStamp should produce a positive epoch");
-  const ts2 = t.firstRunStamp();
+  const second = t.firstRunStamp();
+  assert.strictEqual(second.created, false, "second firstRunStamp should not report creation");
+  const ts2 = second.ts;
   assert.strictEqual(ts1, ts2, "second firstRunStamp must not overwrite the base");
+  assert.ok(fs.existsSync(TELEMETRY_ENV), "firstRunStamp should create telemetry.env");
+  assert.ok(!fs.existsSync(CLIENT_ENV), "firstRunStamp must not create client.env");
+});
+
+check("setTelemetryConsent writes only TELEMETRY_CONSENT", () => {
+  writeEnv({
+    TELEMETRY_ANON_ID: "00000000-0000-4000-8000-000000000000",
+    CRASH_REPORT_CONSENT: "true",
+  });
+  assert.strictEqual(t.setTelemetryConsent(false), false);
+  let raw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(raw.includes('TELEMETRY_CONSENT="false"'), "telemetry consent should be updated");
+  assert.ok(raw.includes('CRASH_REPORT_CONSENT="true"'), "crash consent should be preserved");
+  assert.strictEqual(t.setTelemetryConsent(true), true);
+  raw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(raw.includes('TELEMETRY_CONSENT="true"'), "telemetry consent should be re-toggleable");
+  assert.ok(raw.includes('CRASH_REPORT_CONSENT="true"'), "crash consent should still be preserved");
+});
+
+check("setConsent persists telemetry flags without creating client.env", () => {
+  try {
+    fs.rmSync(TELEMETRY_ENV, { force: true });
+    fs.rmSync(CLIENT_ENV, { force: true });
+  } catch (_e) {}
+  const consent = t.setConsent(true, false);
+  assert.deepStrictEqual(consent, { telemetry: true, crashReport: false });
+  const raw = fs.readFileSync(TELEMETRY_ENV, "utf8");
+  assert.ok(raw.includes('TELEMETRY_CONSENT="true"'), "telemetry consent should land in telemetry.env");
+  assert.ok(raw.includes('CRASH_REPORT_CONSENT="false"'), "crash consent should land in telemetry.env");
+  assert.ok(!fs.existsSync(CLIENT_ENV), "setConsent must not create client.env");
 });
 
 // --- teardown ---------------------------------------------------------------

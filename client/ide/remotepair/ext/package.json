@@ -20,7 +20,8 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:remotepair.sessions.listJson",
-    "onCommand:remotepair.sessions.checkAttach"
+    "onCommand:remotepair.sessions.checkAttach",
+    "onCommand:remotepair.sessions.writeOpened"
   ],
   "contributes": {
     "commands": [
@@ -33,6 +34,10 @@
         "command": "remotepair.connectHost",
         "title": "Xpair: Connect to Host",
         "icon": "$(remote)"
+      },
+      {
+        "command": "remotepair.confirmGatewayBaseline",
+        "title": "Xpair: Reconnect After Network Change (adopt new gateway)"
       },
       {
         "command": "remotepair.remoteDesktop.refresh",
@@ -135,7 +140,7 @@
           "tags": [
             "usesOnlineServices"
           ],
-          "description": "Opt in to Xpair product analytics and crash reports for this client."
+          "description": "Opt in to Xpair product analytics for this client."
         },
         "xpair.remoteDesktop.fps": {
           "type": "number",
@@ -175,7 +180,7 @@
           {
             "id": "remotepair.setup.connect",
             "title": "Connect to your host",
-            "description": "Xpair drives a remote macOS host (default REMOTE_HOST from ~/.xpair/host/client.env). Click below to open the host filesystem over SSH.\n[Connect to Host](command:remotepair.connectHost)",
+            "description": "Xpair drives a remote macOS host (default REMOTE_HOST from ~/.xpair/client/client.env). Click below to open the host filesystem over SSH.\n[Connect to Host](command:remotepair.connectHost)",
             "media": {
               "markdown": "media/walkthrough-connect.md"
             }

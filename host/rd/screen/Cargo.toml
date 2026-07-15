@@ -97,11 +97,6 @@ crash-report = ["dep:sentry", "dep:regex", "dep:serde_json"]
 # on any lost packet. Enabling this pulls webrtc + a tokio runtime (the v1a
 # `serve` path stays sync and unaffected).
 webrtc = ["dep:webrtc", "dep:tokio", "dep:tokio-util", "dep:tokio-tungstenite", "dep:futures-util", "dep:bytes", "dep:serde", "dep:serde_json", "dep:thiserror"]
-tokio-tungstenite = ["dep:tokio-tungstenite"]
-futures-util = ["dep:futures-util"]
-bytes = ["dep:bytes"]
-serde = ["dep:serde"]
-serde_json = ["dep:serde_json"]
 
 [profile.release]
 opt-level = 3

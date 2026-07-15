@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RD deterministic pattern</title>
+  <style>
+    html,
+    body,
+    canvas {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+    }
+
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="pattern"></canvas>
+  <script>
+    "use strict";
+
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get("mode") === "static" ? "static" : "motion";
+    const canvas = document.getElementById("pattern");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    let frame = 0;
+
+    const staticLines = [
+      "XPAIR RD BENCH STATIC PROFILE",
+      "Deterministic canvas source; no Date.now and no Math.random.",
+      "This profile is mostly fixed monospace text.",
+      "Only the small frame counter changes each animation frame.",
+      "",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789",
+      "abcdefghijklmnopqrstuvwxyz !@#$%^&*()",
+      "The host captures the whole display via ScreenCaptureKit.",
+      "Keep this window fullscreen and frontmost on the captured display.",
+      "Park the cursor in a corner because the host currently captures it.",
+      "",
+      "line 12: repeated glyphs /////// ======= +++++++",
+      "line 13: high contrast text holds stable encoder content",
+      "line 14: idle-skip behavior should be visible here",
+      "line 15: baseline variance depends on deterministic pixels",
+      "line 16: static static static static static static",
+      "line 17: capture fps, bitrate, scale are pinned by the harness",
+      "line 18: receiver stats provide freezes, loss, and decoded frames",
+      "line 19: cooldown between runs protects thermal comparability",
+      "line 20: end of fixed text block",
+    ];
+
+    function resize() {
+      const ratio = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.floor(window.innerWidth * ratio));
+      const height = Math.max(1, Math.floor(window.innerHeight * ratio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    }
+
+    function fillBackground(width, height) {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, width, height);
+    }
+
+    function drawLabel(width) {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
+      ctx.fillRect(18, 16, Math.min(width - 36, 470), 54);
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(18, 16, Math.min(width - 36, 470), 54);
+      ctx.fillStyle = "#fff";
+      ctx.font = "24px monospace";
+      ctx.textBaseline = "top";
+      ctx.fillText(`mode=${mode} frame=${String(frame).padStart(8, "0")}`, 32, 30);
+    }
+
+    function drawStatic(width, height) {
+      fillBackground(width, height);
+      ctx.fillStyle = "#050505";
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = "#e8e8e8";
+      ctx.font = "22px monospace";
+      ctx.textBaseline = "top";
+
+      const left = Math.max(24, Math.floor(width * 0.08));
+      let y = Math.max(96, Math.floor(height * 0.1));
+      for (const line of staticLines) {
+        ctx.fillText(line, left, y);
+        y += 30;
+      }
+
+      ctx.fillStyle = "#161616";
+      ctx.fillRect(left, y + 22, Math.min(760, width - left - 24), 110);
+      ctx.fillStyle = "#dadada";
+      ctx.font = "18px monospace";
+      ctx.fillText("stable block: 000000000000000000000000000000000000000000", left + 18, y + 42);
+      ctx.fillText("stable block: 111111111111111111111111111111111111111111", left + 18, y + 72);
+      ctx.fillText("stable block: 222222222222222222222222222222222222222222", left + 18, y + 102);
+      drawLabel(width);
+    }
+
+    function wave(frameNumber, period, amplitude, offset) {
+      return offset + Math.sin((frameNumber % period) * Math.PI * 2 / period) * amplitude;
+    }
+
+    function drawMotion(width, height) {
+      fillBackground(width, height);
+
+      const bandY = ((frame * 13) % (height + 180)) - 180;
+      ctx.fillStyle = "#0b4f6c";
+      ctx.fillRect(0, bandY, width, 180);
+      ctx.fillStyle = "#01baef";
+      ctx.fillRect(0, bandY + 52, width, 28);
+      ctx.fillStyle = "#f7d002";
+      ctx.fillRect(0, bandY + 118, width, 34);
+
+      const solidX = (frame * 17) % Math.max(1, width + 320) - 320;
+      ctx.fillStyle = "#d7263d";
+      ctx.fillRect(solidX, Math.floor(height * 0.58), 320, Math.max(150, Math.floor(height * 0.24)));
+
+      const colors = ["#35ff69", "#ff7f11", "#9b5de5", "#00f5d4", "#f15bb5", "#ffffff"];
+      for (let i = 0; i < 10; i += 1) {
+        const rectW = 90 + i * 18;
+        const rectH = 64 + (i % 4) * 22;
+        const x = Math.floor((width / 2) + wave(frame + i * 19, 150 + i * 7, width * 0.42, 0) - rectW / 2);
+        const y = Math.floor((height / 2) + wave(frame + i * 31, 110 + i * 11, height * 0.36, 0) - rectH / 2);
+        ctx.fillStyle = colors[i % colors.length];
+        ctx.fillRect(x, y, rectW, rectH);
+      }
+
+      const stripeWidth = 44;
+      for (let x = -stripeWidth; x < width + stripeWidth; x += stripeWidth) {
+        const shifted = x + ((frame * 9) % stripeWidth);
+        ctx.fillStyle = ((x / stripeWidth) & 1) === 0 ? "#222" : "#555";
+        ctx.fillRect(shifted, Math.floor(height * 0.82), stripeWidth, Math.ceil(height * 0.18));
+      }
+
+      drawLabel(width);
+    }
+
+    function draw() {
+      resize();
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      if (mode === "static") drawStatic(width, height);
+      else drawMotion(width, height);
+      frame += 1;
+      requestAnimationFrame(draw);
+    }
+
+    window.addEventListener("resize", resize);
+    requestAnimationFrame(draw);
+  </script>
+</body>
+</html>

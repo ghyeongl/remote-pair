@@ -34,8 +34,12 @@ fi
 
 # ide version lives in the committed Xpair extension (product.json has none;
 # the app version is injected at build from RELEASE_VERSION).
-EXT_PKG="$ROOT/client/ide/remotepair-ext/package.json"
-[[ -f "$EXT_PKG" ]] && check "ide version (remotepair-ext)" "$(jq -r .ide "$VER")" "$(jq -r '.version // empty' "$EXT_PKG")"
+EXT_PKG="$ROOT/client/ide/remotepair/ext/package.json"
+if [[ -f "$EXT_PKG" ]]; then
+  check "ide version (remotepair/ext)" "$(jq -r .ide "$VER")" "$(jq -r '.version // empty' "$EXT_PKG")"
+else
+  printf 'MISSING: %s\n' "$EXT_PKG"; fail=1
+fi
 
 # --- Casks/xpair-host.rb version ---
 CASK="$ROOT/Casks/xpair-host.rb"
@@ -46,6 +50,11 @@ CASK="$ROOT/Casks/xpair-host.rb"
 CARGO="$ROOT/host/rd/screen/Cargo.toml"
 [[ -f "$CARGO" ]] && check "rs screen-engine version" "$(jq -r '."screen-engine"' "$VER")" \
   "$(awk -F'"' '/^\[package\]/{p=1} p&&/^version[[:space:]]*=/{print $2; exit}' "$CARGO")"
+
+# --- client/cli-rs Cargo.toml version ---
+CLI_CARGO="$ROOT/client/cli-rs/Cargo.toml"
+[[ -f "$CLI_CARGO" ]] && check "cli-rs Cargo.toml version" "$(jq -r .cli "$VER")" \
+  "$(awk -F'"' '/^\[package\]/{p=1} p&&/^version[[:space:]]*=/{print $2; exit}' "$CLI_CARGO")"
 
 # --- host bundle id present in Config.swift ---
 CFG="$ROOT/host/app/Config.swift"

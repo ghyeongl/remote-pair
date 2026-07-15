@@ -37,13 +37,18 @@ test("client launches and reattaches persistent host sessions by stable IDs, not
   assert.match(frontendPatch, /export const REMOTEPAIR_SESSIONS_ATTACHED_ID = 'remotepair\.sessions\.attached'/);
   assert.match(frontendPatch, /export const REMOTEPAIR_SESSIONS_DETACHED_ID = 'remotepair\.sessions\.detached'/);
   assert.match(frontendPatch, /export const REMOTEPAIR_SESSIONS_HISTORY_ID = 'remotepair\.sessions\.history'/);
-  assert.match(frontendPatch, /setSessionReattacher\(\(name\) => this\.launchReattach\(name\)\)/);
+  assert.match(frontendPatch, /setSessionReattacher\(\(name\) => this\.reattachSession\(name\)\)/);
   assert.match(frontendPatch, /instance\.sendText\('xpair attach ' \+ shellSingleQuote\(name\), true\)/);
   assert.match(frontendPatch, /v\.group\.openEditor\(v\.input, \{ pinned: true \}\)/);
 
   assert.match(xpair, /case "\$session" in \*\[!A-Za-z0-9_\.-\]\*\|''\) echo "invalid session name:/);
   // Attach runs mosh non-exec (trapped) so an orphaned client is detached server-side on close (Q-attach-close).
-  assert.match(xpair, /mosh --server="\$\{MOSH_SERVER:-\$HOME\/\.local\/bin\/mosh-server\}"/);
+  // --client pins our bundled mosh-client ONLY when the mosh being invoked is our own $LOCAL_BIN/mosh
+  // (a system/Homebrew mosh resolves its own helper via PATH); --server is the host side.
+  assert.match(xpair, /elif \[ ! -L "\$LOCAL_BIN\/mosh" \] && \[ "\$\(command -v mosh\)" = "\$LOCAL_BIN\/mosh" \] && \[ -x "\$LOCAL_BIN\/mosh-client" \]; then/);
+  // --ssh threads the pairing identity into mosh's own ssh handshake (mosh doesn't use the ssh() wrapper),
+  // so a host paired only with the dedicated pairing key can still reattach over mosh.
+  assert.match(xpair, /mosh --ssh="ssh \$SSH_ID" \$\{_clientarg\[@\]\+"\$\{_clientarg\[@\]\}"\} --server="\$\{MOSH_SERVER:-\$HOME\/\.local\/bin\/mosh-server\}"/);
   assert.match(xpair, /attach -d -t "=\$session"/);
 
   assert.match(launcher, /Session name base = <readable-name>-<full-path-hash5>/);

@@ -252,7 +252,7 @@ impl Visit for MessageVisitor {
     }
 }
 
-/// §6 REMOTE_HOST for redaction — env wins, else parsed once from ~/.xpair/host/client.env.
+/// §6 REMOTE_HOST for redaction — env wins, else parsed once from ~/.xpair/client/client.env.
 static REMOTE_HOST: OnceLock<Option<String>> = OnceLock::new();
 fn remote_host() -> Option<String> {
     REMOTE_HOST
@@ -263,7 +263,7 @@ fn remote_host() -> Option<String> {
                 }
             }
             let home = std::env::var_os("HOME")?;
-            let path = std::path::Path::new(&home).join(".xpair/host/client.env");
+            let path = std::path::Path::new(&home).join(".xpair/client/client.env");
             let raw = std::fs::read_to_string(path).ok()?;
             for line in raw.lines() {
                 if let Some(v) = line.trim().strip_prefix("REMOTE_HOST=") {
@@ -374,7 +374,7 @@ fn scrub_outbound(s: &str) -> String {
     r.into_owned()
 }
 
-/// Read a single `KEY=value` line from `~/.xpair/host/client.env` (the same
+/// Read a single `KEY=value` line from `~/.xpair/client/client.env` (the same
 /// file [`remote_host`] parses), honoring quotes. `None` if absent/empty. Used
 /// for the telemetry consent + DSN settings, mirroring the env>file>default
 /// precedent of `REMOTEPAIR_LOG`/`REMOTE_HOST`. Only the crash reporter consumes
@@ -382,7 +382,7 @@ fn scrub_outbound(s: &str) -> String {
 #[cfg(feature = "crash-report")]
 fn client_env_value(key: &str) -> Option<String> {
     let home = std::env::var_os("HOME")?;
-    let path = std::path::Path::new(&home).join(".xpair/host/client.env");
+    let path = std::path::Path::new(&home).join(".xpair/client/client.env");
     let raw = std::fs::read_to_string(path).ok()?;
     let prefix = format!("{key}=");
     for line in raw.lines() {
@@ -410,7 +410,7 @@ fn telemetry_setting(key: &str) -> Option<String> {
 }
 
 /// `crash_report_consent` (spec: gates Sentry; **default false / opt-in**).
-/// Read from `CRASH_REPORT_CONSENT` (env > `~/.xpair/host/client.env`). Truthy
+/// Read from `CRASH_REPORT_CONSENT` (env > `~/.xpair/client/client.env`). Truthy
 /// = `1`/`true`/`yes`/`on` (case-insensitive). Anything else (including absent)
 /// => `false` => Sentry is never initialized => ZERO network calls.
 #[cfg(feature = "crash-report")]

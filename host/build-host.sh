@@ -29,10 +29,24 @@ EXEC="$APP_NAME"
 DEPLOY_HOST="${REMOTE_HOST:-gh-mac-m1}"
 
 # ── signing identity ──
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_CN"; then
-  SIGN_ID="$SIGN_CN"; echo "signing: stable cert '$SIGN_CN' (grant survives rebuilds/updates)"
+# Functional probe, not a trust/presence check: an imported-but-untrusted cert matches
+# find-identity yet may still fail to codesign, and a `-v` (trusted) check is wrong the other way
+# (CI's cert signs even though `find-identity -v` won't list it). So actually attempt to sign a
+# throwaway binary with the cert and adopt it only if that succeeds; else fall back to ad-hoc.
+# Signing only needs the private key, not a trust anchor, and the downstream
+# `codesign --verify --strict` validates the signature seal (not cert trust), so it still passes.
+_can_codesign_with() {
+  local cn="$1" probe rc
+  probe="$(mktemp -t rp-signprobe)" || return 1
+  cp /usr/bin/true "$probe" 2>/dev/null || { rm -f "$probe"; return 1; }
+  codesign --force --sign "$cn" "$probe" >/dev/null 2>&1; rc=$?
+  rm -f "$probe"
+  return $rc
+}
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_CN" && _can_codesign_with "$SIGN_CN"; then
+  SIGN_ID="$SIGN_CN"; echo "signing: stable cert '$SIGN_CN' (functional codesign probe passed; grant survives rebuilds/updates)"
 else
-  SIGN_ID="-"; echo "⚠ signing: ad-hoc (cert '$SIGN_CN' missing → re-toggle on every rebuild). ./host/make-signing-cert.sh recommended"
+  SIGN_ID="-"; echo "⚠ signing: ad-hoc (cert '$SIGN_CN' cannot codesign → re-toggle on every rebuild). ./host/make-signing-cert.sh recommended"
 fi
 
 # ── build the in-process onboarding (React) — bundled into Contents/Resources/onboarding ──
@@ -78,8 +92,7 @@ cat > "$APP/Contents/Info.plist" <<P
 <key>RPGitHubRepo</key><string>${GH_REPO}</string>
 <key>LSUIElement</key><true/>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
-<key>NSBonjourServices</key><array><string>_xpair._tcp</string><string>_remotepair._tcp</string></array>
-<key>NSLocalNetworkUsageDescription</key><string>Xpair advertises this Mac on your local network so your Xpair client can discover and pair with it.</string>
+<key>NSLocalNetworkUsageDescription</key><string>Xpair broadcasts this Mac on your local network so your Xpair client can discover and pair with it.</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleIconName</key><string>AppIcon</string>
 </dict></plist>
@@ -176,9 +189,26 @@ compile_helper host/rd/rpmedia/rp-input-inject.swift "$HELP/rp-input-inject"; ch
 echo "  embedded: screen ($("$HELP/screen" --version 2>/dev/null || echo '?')) + rp-screencap + rp-input-inject"
 
 RES="$APP/Contents/Resources"; mkdir -p "$RES"   # (for the icon; populated below)
-# NOTE: keep coupling low — the app bundle holds only what the app uses directly at runtime (Helpers: tmux-aqua·router·ocr-find).
-#   skills (the claude harness), rules.txt (approve config), and the CLI are not embedded/self-installed here.
-#   That is handled by the single CLI/README install (shared/install.sh).
+
+# Release install support: the app self-installs its daemon/helpers, but Installer.swift
+# deliberately does not install the Claude approve skill or rules. Embed those as inert
+# resources so the Rust release installer can copy them from the already codesign-verified
+# bundle path without fetching bootstrap.sh or any network script.
+echo "=== embed release approve glue → Contents/Resources/host-glue ==="
+GLUE="$RES/host-glue"; rm -rf "$GLUE"; mkdir -p "$GLUE"
+cp host/rules.txt "$GLUE/rules.txt"
+cp -R host/skills "$GLUE/skills"
+cp host/release-install-approve-glue.sh "$GLUE/install-approve-glue.sh"; chmod +x "$GLUE/install-approve-glue.sh"
+[ -f "$GLUE/skills/approve/SKILL.md" ] \
+  || { echo "✗ release approve glue embed verification failed: $GLUE/skills/approve/SKILL.md" >&2; exit 1; }
+echo "  embedded: rules.txt + approve skill + install-approve-glue.sh"
+
+# Installer.swift mirrors the approve/notify hook registration from bundle Helpers/hooks.
+HOOKS="$HELP/hooks"; rm -rf "$HOOKS"; mkdir -p "$HOOKS"
+cp host/hooks/xpair-notify.sh host/hooks/manage-claude-hooks.py "$HOOKS/"
+[ -f host/hooks/approve-reminder.sh ] && cp host/hooks/approve-reminder.sh "$HOOKS/"
+chmod +x "$HOOKS"/*
+echo "  embedded: hook sources for app self-install"
 
 # ── embed the onboarding React build → Contents/Resources/onboarding ──
 # OnboardingWindow.swift loads Contents/Resources/onboarding/index.html in a WKWebView (vite base './').
@@ -215,8 +245,10 @@ done
 # Done this way, the Authority of the screenshare binaries (screen·rp-screencap·rp-input-inject) is baked in with the stable cert
 # so the Screen Recording grant survives .app updates (designated requirement = cert leaf).
 # The shell script (approve-router.sh) must also be signed individually so that --verify --strict passes after the outer non-deep signing.
-for bin in "$HELP"/*; do
-  [ -f "$bin" ] || continue
+# find -type f (not "$HELP"/*) so nested subdirs are signed too: Helpers/hooks/*.sh are nested
+# code objects that codesign --verify --strict rejects if unsigned. Process substitution keeps
+# the loop in this shell so a failing exit aborts the build (a `find | while` subshell wouldn't).
+while IFS= read -r bin; do
   if file -b "$bin" | grep -q 'Mach-O'; then
     codesign -s "$SIGN_ID" --force --options runtime --timestamp=none "$bin" \
       || { echo "✗ Helpers individual signing failed (Mach-O): $bin" >&2; exit 1; }
@@ -225,7 +257,7 @@ for bin in "$HELP"/*; do
     codesign -s "$SIGN_ID" --force --timestamp=none "$bin" \
       || { echo "✗ Helpers individual signing failed (script): $bin" >&2; exit 1; }
   fi
-done
+done < <(find "$HELP" -type f)
 codesign -s "$SIGN_ID" --force "$APP"
 echo "built + signed (inside-out): $APP (v$VERSION, $BUNDLE_PREFIX)"
 codesign -dv "$APP" 2>&1 | grep -iE 'Authority|^Identifier' || true

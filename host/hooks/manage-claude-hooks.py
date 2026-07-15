@@ -9,6 +9,7 @@
 # Usage:
 #   manage-claude-hooks.py add    <settings_path> <approve_cmd> <notify_cmd>
 #   manage-claude-hooks.py remove <settings_path> <approve_cmd> <notify_cmd>
+#   manage-claude-hooks.py sweep  <settings_path>
 #
 # Identification: an entry whose command string contains cmd_path (the file path)
 # is treated as 'ours'.
@@ -32,6 +33,7 @@ APPROVE_MATCHER = r"mcp__claude-in-chrome__.*|mcp__computer-use__.*|Bash"
 NOTIFY_EVENTS_NO_MATCHER = ["Stop", "Notification", "SubagentStop"]
 # For the approve family, attach notify with the same matcher as approve-reminder.
 NOTIFY_EVENTS_WITH_MATCHER = ["PermissionRequest", "PermissionDenied", "PostToolUseFailure"]
+XPAIR_HOOK_MARKERS = ("xpair-notify.sh", "xpair-approve-reminder.sh")
 
 
 def load(path):
@@ -99,14 +101,66 @@ def remove_entry(hooks, event, cmd_path):
     return True
 
 
+def _is_ours_cmd(cmd):
+    return any(m in cmd for m in XPAIR_HOOK_MARKERS)
+
+
+def sweep_event(hooks, event):
+    arr = hooks.get(event, [])
+    if not isinstance(arr, list):
+        return False
+    changed = False
+    new_arr = []
+    for e in arr:
+        hlist = e.get("hooks")
+        if isinstance(hlist, list) and any(_is_ours_cmd(h.get("command", "")) for h in hlist):
+            # Mixed entry: drop only our hook objects, keep any non-xpair ones (and the entry).
+            kept = [h for h in hlist if not _is_ours_cmd(h.get("command", ""))]
+            changed = True
+            if kept:
+                e = dict(e)
+                e["hooks"] = kept
+                new_arr.append(e)
+            # else: every hook was ours → drop the whole entry
+        else:
+            new_arr.append(e)
+    if not changed:
+        return False
+    if new_arr:
+        hooks[event] = new_arr
+    else:
+        hooks.pop(event, None)
+    return True
+
+
 def main():
-    if len(sys.argv) != 5:
+    if len(sys.argv) < 2:
         sys.stderr.write(
             "usage: manage-claude-hooks.py add|remove <settings> <approve_cmd> <notify_cmd>\n"
+            "       manage-claude-hooks.py sweep <settings>\n"
         )
         sys.exit(2)
 
-    mode, path, approve_cmd, notify_cmd = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    mode = sys.argv[1]
+    if mode == "sweep":
+        if len(sys.argv) != 3:
+            sys.stderr.write(
+                "usage: manage-claude-hooks.py add|remove <settings> <approve_cmd> <notify_cmd>\n"
+                "       manage-claude-hooks.py sweep <settings>\n"
+            )
+            sys.exit(2)
+        path = sys.argv[2]
+    elif mode in ("add", "remove"):
+        if len(sys.argv) != 5:
+            sys.stderr.write(
+                "usage: manage-claude-hooks.py add|remove <settings> <approve_cmd> <notify_cmd>\n"
+                "       manage-claude-hooks.py sweep <settings>\n"
+            )
+            sys.exit(2)
+        path, approve_cmd, notify_cmd = sys.argv[2], sys.argv[3], sys.argv[4]
+    else:
+        sys.stderr.write(f"unknown mode: {mode}\n")
+        sys.exit(2)
 
     data = load(path)
     hooks = data.setdefault("hooks", {}) if isinstance(data, dict) else None
@@ -116,7 +170,16 @@ def main():
 
     changed = False
 
-    if mode == "add":
+    if mode == "sweep":
+        # Purge every entry whose command contains an xpair marker (unique script basenames;
+        # does not match legacy remote-pair-* hooks), preserving non-xpair hooks and other
+        # top-level keys. Empty event arrays and an empty "hooks" key are cleaned idempotently.
+        for event in list(hooks.keys()):
+            changed |= sweep_event(hooks, event)
+        if not hooks:
+            data.pop("hooks", None)
+
+    elif mode == "add":
         # 1) approve-reminder: PermissionDenied + PostToolUseFailure (with matcher)
         for ev in APPROVE_EVENTS:
             changed |= add_entry(hooks, ev, approve_cmd, APPROVE_MATCHER)
@@ -137,10 +200,6 @@ def main():
         # remove notify (all events)
         for ev in NOTIFY_EVENTS_NO_MATCHER + NOTIFY_EVENTS_WITH_MATCHER:
             changed |= remove_entry(hooks, ev, notify_cmd)
-
-    else:
-        sys.stderr.write(f"unknown mode: {mode}\n")
-        sys.exit(2)
 
     if mode == "remove" and not hooks:
         data.pop("hooks", None)

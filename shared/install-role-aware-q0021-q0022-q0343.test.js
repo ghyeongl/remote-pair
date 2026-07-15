@@ -56,8 +56,8 @@ test("Q0021/Q0022/Q0343 installer roles keep Host running and leave client conne
     /host handshake poll[\s\S]*warn "handshake timed out[\s\S]*host may not be running XpairHost\.app yet \(install succeeded; start the app on the host\)"/,
     "client install may verify the host, but connecting/starting the host remains a separate action",
   );
-  assert.match(installer, /if role == "client" \{[\s\S]*skipping host self-install[\s\S]*return true/);
-  assert.match(installer, /client\.env present \+ no host\.env[\s\S]*skipping host self-install[\s\S]*return true/);
+  assert.match(installer, /if roleFileIsClientOnly\(ROLE_FILE\) \|\| roleFileIsClientOnly\(CLIENT_ROLE_FILE\) \{[\s\S]*client role marker[\s\S]*skipping host self-install[\s\S]*return true/);
+  assert.match(installer, /if clientEnvHasRemoteHost\(\) && !fm\.fileExists\(atPath: HOST_ENV\) \{[\s\S]*client\.env REMOTE_HOST \+ no host\.env[\s\S]*skipping host self-install[\s\S]*return true/);
 });
 
 console.log(`REDGREEN ${passed} ${failed}`);

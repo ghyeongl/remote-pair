@@ -24,26 +24,26 @@ make_all_mocks
 run_cli ls --json
 
 it "security/configured-invalid-host-ignored"
-assert_rc "$RP_RC" 0 "invalid configured host falls back to local list"
+assert_rc "$RP_RC" 0 "invalid configured host is ignored (treated as no host configured)"
 assert_contains "$RP_ERR" "invalid REMOTE_HOST ignored" "invalid configured host warning is emitted"
-assert_contains "$MLOG" "tmux-aqua|-S|/tmp/aqua-tmux.sock|list-sessions" "local tmux path is used"
+assert_absent "$MLOG" "touch-pwn" "poisoned host string never reaches any command"
 assert_absent "$MLOG" "ssh|" "invalid configured host is not passed to ssh"
 cleanup_sandbox
 
 SBX_REMOTE_HOST="-oProxyCommand=touch-pwn" new_sandbox
 make_all_mocks
-run_launcher --remote --yes "$PWD"
+run_launcher --yes "$PWD"
 
-it "security/forced-remote-invalid-host-does-not-ssh-empty-host"
-assert_rc "$RP_RC" 1 "forced remote with invalid configured host fails before ssh"
-assert_contains "$RP_ERR" "no valid REMOTE_HOST configured" "missing valid host is reported"
-assert_absent "$MLOG" "ssh|" "forced remote invalid host is not passed to ssh"
+it "security/invalid-host-does-not-ssh-empty-host"
+assert_rc "$RP_RC" 1 "invalid configured host fails before ssh"
+assert_contains "$RP_ERR" "no host configured" "missing valid host is reported"
+assert_absent "$MLOG" "ssh|" "invalid configured host is not passed to ssh"
 cleanup_sandbox
 
 new_sandbox
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$PWD::/tmp/xpair path'quote" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$PWD::/tmp/xpair path'quote" > "$RP_CLIENT_DIR/client.env"
 make_all_mocks
-MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --remote --yes "$PWD"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --yes "$PWD"
 
 it "security/remote-host-path-is-posix-quoted"
 assert_rc "$RP_RC" 0 "remote launch with quoted host path succeeds in mock harness"
@@ -56,9 +56,9 @@ cleanup_sandbox
 new_sandbox
 unsafe_dir="$SBX/bad'quote\"name"
 mkdir -p "$unsafe_dir"
-printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$unsafe_dir::$unsafe_dir" > "$RP_DIR/client.env"
+printf 'REMOTE_HOST=test-host\nFOLDER_MAPS=%q\n' "$unsafe_dir::$unsafe_dir" > "$RP_CLIENT_DIR/client.env"
 make_all_mocks ssh mosh tmux tmux-aqua tailscale open launchctl tput
-MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --remote --yes "$unsafe_dir"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ run_launcher --yes "$unsafe_dir"
 
 it "security/raw-folder-name-cannot-break-remote-session-script"
 assert_rc "$RP_RC" 0 "remote launch with unsafe raw folder basename succeeds in mock harness"

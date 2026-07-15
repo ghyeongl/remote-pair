@@ -1846,7 +1846,7 @@ index 0000000..ba861e2
 +/**
 + * Wire the shared workbench logger (remotePairLog.ts) from the per-call ServicesAccessor so every
 + * router line is emitted in the unified docs/logging.md §3 format and best-effort mirrored to
-+ * ~/.xpair/host/logs/workbench.log. Best-effort and never-throw: ILogService is required (resolve
++ * ~/.xpair/client/logs/workbench.log. Best-effort and never-throw: ILogService is required (resolve
 + * defensively), the file-mirror sinks are optional and degrade to ILogService-only when absent.
 + * configureRemotePairLog() is idempotent (last call wins, same renderer singletons), so calling it
 + * on each route is a cheap re-bind — it never changes control flow.
@@ -2336,7 +2336,7 @@ index 0000000..515cbd0
 +	order: 100,
 +	canToggleVisibility: true,
 +	canMoveView: true,
-+	collapsed: true,
++	collapsed: false,
 +};
 +
 +viewsRegistry.registerViews([favoritesViewDescriptor], VIEW_CONTAINER);
@@ -2364,7 +2364,7 @@ index 0000000..f57f54f
 + *  and routes it to ILogService.{trace,debug,info,warn,error} (the same DI service used by
 + *  remotePairBrowserRouter.ts), which persists to the workbench's user-data-dir/logs/.
 + *
-+ *  ~/.xpair/host/logs/workbench.log MIRROR — FEASIBLE (and implemented here).
++ *  ~/.xpair/client/logs/workbench.log MIRROR — FEASIBLE (and implemented here).
 + *  ---------------------------------------------------------------------------
 + *  The renderer is sandboxed and has NO direct Node `fs` (and this file deliberately imports
 + *  none). HOWEVER, the desktop workbench renderer registers an IPC-backed DiskFileSystemProvider
@@ -2372,9 +2372,9 @@ index 0000000..f57f54f
 + *  workbench/services/files/electron-browser/diskFileSystemProvider.ts, which proxies disk ops to
 + *  the main/utility process). That means IFileService can write ARBITRARY `file://` paths from the
 + *  renderer WITHOUT Node fs in this layer. So we mirror the exact same formatted line to
-+ *  ~/.xpair/host/logs/workbench.log via IFileService:
++ *  ~/.xpair/client/logs/workbench.log via IFileService:
 + *    - home dir resolved from IPathService.userHome({ preferLocal: true }) (a local file:// URI on
-+ *      desktop), then joined to .xpair/host/logs/workbench.log;
++ *      desktop), then joined to .xpair/client/logs/workbench.log;
 + *    - the logs dir is created with IFileService.createFolder (idempotent `mkdir -p`);
 + *    - each record is appended with writeFile(uri, buf, { append: true }) when the provider has the
 + *      FileAppend capability, else falls back to read+concat+write.
@@ -2387,7 +2387,7 @@ index 0000000..f57f54f
 + *  capabilities, or any write fails; failures are reported once to ILogService. We do NOT implement
 + *  §7 rotation/flock here: ILogService owns rotation for its own sink, and the renderer cannot take
 + *  the cross-process advisory lock that §7 requires for the multi-writer files — the
-+ *  ~/.xpair/host/workbench.log mirror is single-writer (one renderer per window) and unbounded
++ *  ~/.xpair/client/workbench.log mirror is single-writer (one renderer per window) and unbounded
 + *  growth is bounded in practice by INFO-default volume; hardening (size-check rotate) is a
 + *  follow-up if this file proves hot.
 + *--------------------------------------------------------------------------------------------*/
@@ -2405,7 +2405,7 @@ index 0000000..f57f54f
 +
 +/**
 + * Optional sinks for the workbench logger. `logService` is required for any output. The mirror to
-+ * ~/.xpair/host/logs/workbench.log only runs when BOTH `fileService` and `pathService` are
++ * ~/.xpair/client/logs/workbench.log only runs when BOTH `fileService` and `pathService` are
 + * supplied AND a local file:// disk provider is available (desktop). Wire these from a consumer's
 + * DI constructor, e.g.:
 + *
@@ -2423,7 +2423,7 @@ index 0000000..f57f54f
 +
 +let sinks: IRemotePairLogSinks | undefined;
 +
-+/** Memoized ~/.xpair/host/logs/workbench.log file URI + its parent dir (resolved on first use). */
++/** Memoized ~/.xpair/client/logs/workbench.log file URI + its parent dir (resolved on first use). */
 +let mirrorFileUri: URI | undefined;
 +let mirrorDirUri: URI | undefined;
 +/** Serialize mirror writes so concurrent rpLog() calls append in order and don't race create/write. */
@@ -2467,7 +2467,7 @@ index 0000000..f57f54f
 + *   rpLog('info', 'session attached', 'proj-main@1718430000')
 + *
 + * Routes the unified-format line to ILogService at the matching level, and best-effort mirrors the
-+ * identical line to ~/.xpair/host/logs/workbench.log when the file sinks are wired. Safe no-op if
++ * identical line to ~/.xpair/client/logs/workbench.log when the file sinks are wired. Safe no-op if
 + * configureRemotePairLog() has not been called. Never throws.
 + */
 +export function rpLog(level: RemotePairLogLevel, msg: string, session?: string): void {
@@ -2490,13 +2490,13 @@ index 0000000..f57f54f
 +		// ILogService should never throw; swallow to protect caller UI code regardless.
 +	}
 +
-+	// 2) Best-effort ~/.xpair/host/logs/workbench.log mirror (desktop only; opt-in via sinks).
++	// 2) Best-effort ~/.xpair/client/logs/workbench.log mirror (desktop only; opt-in via sinks).
 +	if (s.fileService && s.pathService) {
 +		void mirrorAppend(s.logService, s.fileService, s.pathService, line);
 +	}
 +}
 +
-+/** Resolve (and memoize) the ~/.xpair/host/logs dir + workbench.log file URIs from userHome. */
++/** Resolve (and memoize) the ~/.xpair/client/logs dir + workbench.log file URIs from userHome. */
 +function resolveMirrorUris(pathService: IPathService): { dir: URI; file: URI } | undefined {
 +	if (mirrorFileUri && mirrorDirUri) {
 +		return { dir: mirrorDirUri, file: mirrorFileUri };
@@ -2506,7 +2506,7 @@ index 0000000..f57f54f
 +	if (!home || home.scheme !== 'file') {
 +		return undefined; // No local file home (e.g. web/remote) -> mirror not applicable.
 +	}
-+	mirrorDirUri = URI.joinPath(home, '.xpair/host', 'logs');
++	mirrorDirUri = URI.joinPath(home, '.xpair/client', 'logs');
 +	mirrorFileUri = URI.joinPath(mirrorDirUri, 'workbench.log');
 +	return { dir: mirrorDirUri, file: mirrorFileUri };
 +}
@@ -2529,7 +2529,7 @@ index 0000000..f57f54f
 +		if (!fileService.hasProvider(file)) {
 +			if (!mirrorReportedUnavailable) {
 +				mirrorReportedUnavailable = true;
-+				logService.info(`[${COMP}] ~/.xpair/host/logs/workbench.log mirror unavailable (no file:// provider); ILogService-only`);
++				logService.info(`[${COMP}] ~/.xpair/client/logs/workbench.log mirror unavailable (no file:// provider); ILogService-only`);
 +			}
 +			return;
 +		}
@@ -2561,7 +2561,7 @@ index 0000000..f57f54f
 +			mirrorDirEnsured = false;
 +			if (!mirrorReportedWriteError) {
 +				mirrorReportedWriteError = true;
-+				logService.warn(`[${COMP}] ~/.xpair/host/logs/workbench.log mirror write failed; ILogService-only`, err);
++				logService.warn(`[${COMP}] ~/.xpair/client/logs/workbench.log mirror write failed; ILogService-only`, err);
 +			}
 +		}
 +	}).catch(() => {
@@ -2574,7 +2574,7 @@ new file mode 100644
 index 0000000..6e5d586
 --- /dev/null
 +++ b/src/vs/workbench/contrib/terminal/browser/remotePairSessionManager.ts
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,785 @@
 +/*---------------------------------------------------------------------------------------------
 + *  RemotePair: bottom-panel session tabs. Three Panel view containers — Attached / Detached /
 + *  History — each surfaced as a horizontal TAB in the bottom-panel composite bar (exactly like
@@ -2586,9 +2586,10 @@ index 0000000..6e5d586
 + *    created through the low-level ITerminalInstanceService path (S0 reverse-leak isolation)
 + *    and therefore never appear in ITerminalService.instances. ITerminalService.instances is
 + *    kept as a fallback when no provider is registered (dev reload, future uses).
-+ *  - Detached / History cards come from a pluggable `SessionDataProvider` (default empty),
-+ *    so the renderer never has to child_process. Click a card → reattach the session into
-+ *    the Sessions sidebar via the `setSessionReattacher` module hook.
++ *  - Detached / History cards come from the extension-host command cache
++ *    (`remotepair.sessions.listJson`), so the renderer never has to child_process.
++ *    Click a card → reattach the session into the Sessions sidebar via the
++ *    `setSessionReattacher` module hook.
 + *
 + *  Hosting-layer only — it never touches core terminal behavior.
 + *--------------------------------------------------------------------------------------------*/
@@ -2598,7 +2599,7 @@ index 0000000..6e5d586
 +import { StandardKeyboardEvent } from '../../../../base/browser/keyboardEvent.js';
 +import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 +import { Emitter, Event } from '../../../../base/common/event.js';
-+import { ICommandService } from '../../../../platform/commands/common/commands.js';
++import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
 +import { KeybindingsRegistry, KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 +import { DisposableStore } from '../../../../base/common/lifecycle.js';
 +import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
@@ -2606,6 +2607,7 @@ index 0000000..6e5d586
 +import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 +import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 +import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
++import { ILifecycleService } from '../../../services/lifecycle/common/lifecycle.js';
 +import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 +import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 +import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
@@ -2637,6 +2639,8 @@ index 0000000..6e5d586
 +export interface AttachedSessionInfo {
 +	id: string;
 +	title: string;
++	sessionName?: string;
++	createdAt: number;
 +}
 +
 +/**
@@ -2666,22 +2670,11 @@ index 0000000..6e5d586
 +/** Called by the sidebar whenever its attached set changes; triggers an Attached-tab refresh. */
 +export function notifyAttachedSessionsChanged(): void { attachedChangeEmitter.fire(); }
 +
-+/**
-+ * Provides the Detached/History session-name lists for the manager. The core renderer
-+ * cannot child_process (`xpair ls`), so the extension-host command path owns CLI access.
-+ * Defaults to empty (dev: no host) → tabs render an empty state.
-+ */
-+export interface SessionDataProvider {
-+	/** Host/local sessions that exist but are NOT currently attached. */
-+	getDetached(): readonly string[];
-+	/** Previously-seen session names that are no longer live. */
-+	getHistory(): readonly string[];
-+}
++/** Number of attached sessions the sidebar is currently tracking (0 when no provider yet). */
++export function attachedSessionCount(): number { return attachedProvider?.getAttached().length ?? 0; }
 +
-+let dataProvider: SessionDataProvider | undefined;
 +const sessionDataChangeEmitter = new Emitter<void>();
 +export const onDidChangeSessionData: Event<void> = sessionDataChangeEmitter.event;
-+export function setSessionDataProvider(provider: SessionDataProvider): void { dataProvider = provider; sessionDataChangeEmitter.fire(); }
 +
 +interface SessionListEntry {
 +	readonly name: string;
@@ -2691,11 +2684,28 @@ index 0000000..6e5d586
 +let liveSessionCache: readonly SessionListEntry[] = [];
 +let sessionRefreshInFlight = false;
 +let sessionRefreshTimer: ReturnType<typeof setTimeout> | undefined;
++let openedSessionsWriteRetryTimer: ReturnType<typeof setTimeout> | undefined;
 +let sessionListUnavailable = false;
 +let sessionCardCause: string | undefined;
++let shuttingDown = false;
++let shutdownGuardRegistered = false;
 +const SESSION_REFRESH_RETRY_MS = 1000;
 +const SESSION_REFRESH_INTERVAL_MS = 10000;
-+const SESSION_NAME_RE = /^[A-Za-z0-9_.-]+$/;
++const ATTACHED_SESSION_NAME_FREEZE_GRACE_MS = 30000;
++export const SESSION_NAME_RE = /^[A-Za-z0-9_.-]+$/;
++
++function registerOpenedSessionsShutdownGuard(lifecycleService: ILifecycleService): void {
++	if (shutdownGuardRegistered) {
++		return;
++	}
++	shutdownGuardRegistered = true;
++	lifecycleService.onWillShutdown(() => {
++		// onWillShutdown fires after veto handling but before workbench contributions and
++		// terminal instances are disposed, so disposal-driven attached changes cannot drain
++		// the snapshot; extension deactivate flushes the last pre-shutdown pending set.
++		shuttingDown = true;
++	});
++}
 +
 +function isRecord(value: unknown): value is Record<string, unknown> {
 +	return typeof value === 'object' && value !== null;
@@ -2736,6 +2746,41 @@ index 0000000..6e5d586
 +	return cause || undefined;
 +}
 +
++function normalizedSessionName(value: string | undefined): string | undefined {
++	const name = (value ?? '').trim();
++	return SESSION_NAME_RE.test(name) ? name : undefined;
++}
++
++function localAttachedSessionNames(): ReadonlySet<string> {
++	const names = new Set<string>();
++	for (const session of attachedProvider?.getAttached() ?? []) {
++		const name = normalizedSessionName(session.sessionName);
++		if (name) {
++			names.add(name);
++		}
++	}
++	return names;
++}
++
++function openedSessionsYoungUnfrozenRetryDelayMs(now = Date.now()): number | undefined {
++	// Defer only briefly for terminals whose tmux name has not yet frozen. Some shells
++	// or failed launches never produce an xpair session name; after the grace window
++	// they are excluded by localAttachedSessionNames() because a name we never learned
++	// is not restorable anyway.
++	let retryDelayMs: number | undefined;
++	for (const session of attachedProvider?.getAttached() ?? []) {
++		const remainingMs = session.createdAt + ATTACHED_SESSION_NAME_FREEZE_GRACE_MS - now;
++		if (!normalizedSessionName(session.sessionName) && remainingMs > 0) {
++			retryDelayMs = retryDelayMs === undefined ? remainingMs : Math.min(retryDelayMs, remainingMs);
++		}
++	}
++	return retryDelayMs;
++}
++
++function localAttachedSessionNameList(): readonly string[] {
++	return [...localAttachedSessionNames()];
++}
++
 +export function setSessionCardCause(cause: string | undefined): void {
 +	if (sessionCardCause === cause) {
 +		return;
@@ -2745,15 +2790,25 @@ index 0000000..6e5d586
 +}
 +
 +function cachedDetachedSessions(): readonly string[] {
-+	return liveSessionCache.filter(s => s.attached === 0).map(s => s.name);
++	const local = localAttachedSessionNames();
++	return liveSessionCache.filter(s => s.attached === 0 && !local.has(s.name)).map(s => s.name);
 +}
 +
-+function cachedHistorySessions(): readonly string[] {
-+	return liveSessionCache.filter(s => s.attached > 0).map(s => s.name);
++function cachedRemoteAttachedSessions(): readonly string[] {
++	const local = localAttachedSessionNames();
++	return liveSessionCache.filter(s => s.attached > 0 && !local.has(s.name)).map(s => s.name);
 +}
 +
 +function cachedSessionNames(): readonly string[] {
 +	return liveSessionCache.map(s => s.name);
++}
++
++export function liveSessionNameFromTitle(value: string | undefined): string | undefined {
++	const name = (value ?? '').trim();
++	if (!SESSION_NAME_RE.test(name)) {
++		return undefined;
++	}
++	return liveSessionCache.some(s => s.name === name) ? name : undefined;
 +}
 +
 +function sameSessionCache(a: readonly SessionListEntry[], b: readonly SessionListEntry[]): boolean {
@@ -2785,6 +2840,9 @@ index 0000000..6e5d586
 +		const unavailableChanged = sessionListUnavailable !== nextUnavailable;
 +		sessionListUnavailable = nextUnavailable;
 +		const next = normalizeSessionCommandResult(value);
++		if (!nextUnavailable) {
++			recordHistoryNames(next.map(s => s.name));
++		}
 +		if (unavailableChanged || !sameSessionCache(liveSessionCache, next)) {
 +			liveSessionCache = next;
 +			sessionDataChangeEmitter.fire();
@@ -2799,6 +2857,43 @@ index 0000000..6e5d586
 +		scheduleSessionRefresh(commandService, SESSION_REFRESH_RETRY_MS);
 +	});
 +}
++
++function scheduleDeferredOpenedSessionsWrite(commandService: ICommandService, delayMs: number): void {
++	if (openedSessionsWriteRetryTimer !== undefined) {
++		return;
++	}
++	openedSessionsWriteRetryTimer = setTimeout(() => {
++		openedSessionsWriteRetryTimer = undefined;
++		writeOpenedSessions(commandService);
++	}, Math.max(0, delayMs));
++}
++
++function writeOpenedSessions(commandService: ICommandService): void {
++	if (shuttingDown) {
++		rpLog('debug', 'opened sessions write skipped during workbench shutdown');
++		return;
++	}
++	const retryDelayMs = openedSessionsYoungUnfrozenRetryDelayMs();
++	if (retryDelayMs !== undefined) {
++		rpLog('debug', 'opened sessions write deferred until young attached session names freeze');
++		scheduleDeferredOpenedSessionsWrite(commandService, retryDelayMs);
++		return;
++	}
++	if (openedSessionsWriteRetryTimer !== undefined) {
++		clearTimeout(openedSessionsWriteRetryTimer);
++		openedSessionsWriteRetryTimer = undefined;
++	}
++	commandService.executeCommand('remotepair.sessions.writeOpened', localAttachedSessionNameList()).then(undefined, (error) => {
++		rpLog('debug', `opened sessions write command failed: ${error instanceof Error ? error.message : String(error)}`);
++	});
++}
++
++CommandsRegistry.registerCommand({
++	id: 'remotepair.terminalSidebar.syncOpenedSessions',
++	handler(accessor: ServicesAccessor): void {
++		writeOpenedSessions(accessor.get(ICommandService));
++	}
++});
 +
 +/** Reattach a session by name into the Sessions sidebar (wired by the sidebar view). */
 +export type SessionReattacher = (name: string) => void;
@@ -2851,12 +2946,14 @@ index 0000000..6e5d586
 +	}
 +	commandService.executeCommand('remotepair.sessions.checkAttach', name).then((value) => {
 +		const cause = applySessionCheckResult(value);
-+		if (isRecord(value) && value.ok === true) {
++		const checkedSession = isRecord(value) && isRecord(value.session) ? value.session : undefined;
++		const attached = checkedSession ? normalizedAttached(checkedSession.attached) : -1;
++		if (isRecord(value) && value.ok === true && attached === 0) {
 +			setSessionCardCause(undefined);
 +			reattach(name);
 +			return;
 +		}
-+		setSessionCardCause(cause ?? localize('remotepairSessionAttachCheckFailed', "Session is no longer available. The list was refreshed; choose another session or start a new one."));
++		setSessionCardCause(cause ?? (attached > 0 ? localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device.") : localize('remotepairSessionAttachCheckFailed', "Session no longer exists. The list was refreshed; choose another session or start a new one.")));
 +		scheduleSessionRefresh(commandService, SESSION_REFRESH_RETRY_MS);
 +	}, (error) => {
 +		rpLog('warn', `session attach check failed for ${name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -2868,6 +2965,38 @@ index 0000000..6e5d586
 +// --- view -------------------------------------------------------------------
 +
 +const HISTORY_STORAGE_KEY = 'remotepair.sessionManager.history.v2';
++let historyStorageService: IStorageService | undefined;
++
++function readHistoryFromStore(storageService: IStorageService): string[] {
++	const raw = storageService.get(HISTORY_STORAGE_KEY, StorageScope.WORKSPACE);
++	if (!raw) {
++		return [];
++	}
++	try {
++		const parsed = JSON.parse(raw);
++		return Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string' && SESSION_NAME_RE.test(n)) : [];
++	} catch (e) {
++		rpLog('warn', `history storage parse failed; resetting to empty: ${e instanceof Error ? e.message : String(e)}`);
++		return [];
++	}
++}
++
++function recordHistoryNames(names: readonly string[]): void {
++	const storageService = historyStorageService;
++	if (!storageService) {
++		return;
++	}
++	const meaningful = names.filter(n => SESSION_NAME_RE.test(n));
++	if (meaningful.length === 0) {
++		return;
++	}
++	const existing = readHistoryFromStore(storageService);
++	const merged = Array.from(new Set([...existing, ...meaningful]));
++	if (merged.length === existing.length) {
++		return;
++	}
++	storageService.store(HISTORY_STORAGE_KEY, JSON.stringify(merged), StorageScope.WORKSPACE, StorageTarget.MACHINE);
++}
 +
 +/**
 + * Shared Panel ViewPane rendering ONE session category (attached / detached / history) as a
@@ -2898,9 +3027,11 @@ index 0000000..6e5d586
 +		@IHoverService hoverService: IHoverService,
 +		@ITerminalService private readonly terminalService: ITerminalService,
 +		@IStorageService private readonly storageService: IStorageService,
-+		@ICommandService private readonly commandService: ICommandService
++		@ICommandService private readonly commandService: ICommandService,
++		@ILifecycleService lifecycleService: ILifecycleService
 +	) {
 +		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
++		registerOpenedSessionsShutdownGuard(lifecycleService);
 +	}
 +
 +	protected override renderBody(container: HTMLElement): void {
@@ -2908,6 +3039,7 @@ index 0000000..6e5d586
 +
 +		container.classList.add('remotepair-session-manager');
 +		this.row = append(container, $('.remotepair-session-row'));
++		historyStorageService = this.storageService;
 +
 +		if (this.category === 'attached') {
 +			// Primary: refresh when the Sessions sidebar's attached-sessions set changes.
@@ -2916,6 +3048,7 @@ index 0000000..6e5d586
 +			this._register(this.terminalService.onDidChangeInstances(() => this.refresh()));
 +			this._register(onDidChangeSessionData(() => this.refresh()));
 +			this._register(onDidChangeAttachedSessions(() => refreshSessionData(this.commandService)));
++			this._register(onDidChangeAttachedSessions(() => writeOpenedSessions(this.commandService)));
 +			refreshSessionData(this.commandService);
 +		} else {
 +			this._register(onDidChangeSessionData(() => this.refresh()));
@@ -2999,7 +3132,6 @@ index 0000000..6e5d586
 +			// those instances never appear in ITerminalService.instances).
 +			const provider = attachedProvider;
 +			const sessions = provider.getAttached();
-+			this.recordHistory(this.reattachableHistoryNames());
 +			if (sessions.length === 0) {
 +				this.addEmpty(cause ?? localize('remotepairNoAttached', "No attached sessions"));
 +				return;
@@ -3023,7 +3155,6 @@ index 0000000..6e5d586
 +		} else {
 +			// Fallback: read from ITerminalService for any other terminal sources.
 +			const instances = this.terminalService.instances;
-+			this.recordHistory(this.reattachableHistoryNames());
 +			if (instances.length === 0) {
 +				this.addEmpty(cause ?? localize('remotepairNoAttached', "No attached sessions"));
 +				return;
@@ -3052,17 +3183,22 @@ index 0000000..6e5d586
 +			this.addEmpty(sessionCardCause ?? localize('remotepairSessionListUnavailable', "Session list unavailable; retrying..."));
 +			return;
 +		}
-+		const names = dataProvider?.getDetached() ?? cachedDetachedSessions();
-+		this.recordHistory(names);
++		const names = cachedDetachedSessions();
++		const remoteAttached = cachedRemoteAttachedSessions();
 +		if (names.length === 0) {
-+			this.addEmpty(sessionCardCause ?? localize('remotepairNoDetached', "No detached sessions"));
++			this.addEmpty(sessionCardCause ?? (remoteAttached.length > 0 ? localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device.") : localize('remotepairNoDetached', "No detached sessions")));
 +			return;
 +		}
 +		if (sessionCardCause) {
 +			this.addEmpty(sessionCardCause);
 +		}
++		if (remoteAttached.length > 0) {
++			this.addEmpty(localize('remotepairAttachedElsewhere', "Some sessions are attached in another window or device."));
++		}
 +		for (const name of names) {
-+			this.addCard(name, () => validateAndReattach(name, this.commandService));
++			this.addCard(name, () => {
++				validateAndReattach(name, this.commandService);
++			});
 +		}
 +	}
 +
@@ -3077,25 +3213,17 @@ index 0000000..6e5d586
 +			this.addEmpty(sessionCardCause ?? localize('remotepairSessionListUnavailable', "Session list unavailable; retrying..."));
 +			return;
 +		}
-+		// Live provider names are real, reattachable session names → clickable.
-+		const providerNames = dataProvider?.getHistory() ?? cachedHistorySessions();
-+		this.recordHistory(providerNames);
-+		if (providerNames && providerNames.length > 0) {
-+			if (sessionCardCause) {
-+				this.addEmpty(sessionCardCause);
-+			}
-+			for (const name of providerNames) {
-+				this.addCard(name, () => validateAndReattach(name, this.commandService));
-+			}
-+			return;
-+		}
-+		const persisted = this.readHistory();
++		const liveNames = new Set(cachedSessionNames());
++		const persisted = this.readHistory().filter(name => !liveNames.has(name));
 +		if (persisted.length === 0) {
 +			this.addEmpty(sessionCardCause ?? localize('remotepairNoHistory', "No history"));
 +			return;
 +		}
++		if (sessionCardCause) {
++			this.addEmpty(sessionCardCause);
++		}
 +		for (const name of persisted) {
-+			this.addCard(name, () => reattach(name));
++			this.addCard(name, () => validateAndReattach(name, this.commandService));
 +		}
 +	}
 +
@@ -3112,40 +3240,8 @@ index 0000000..6e5d586
 +
 +	// --- history persistence (workspace scope) -----------------------------
 +
-+	private reattachableHistoryNames(): readonly string[] {
-+		return dataProvider ? [...dataProvider.getDetached(), ...dataProvider.getHistory()] : cachedSessionNames();
-+	}
-+
 +	private readHistory(): string[] {
-+		const raw = this.storageService.get(HISTORY_STORAGE_KEY, StorageScope.WORKSPACE);
-+		if (!raw) {
-+			return [];
-+		}
-+		try {
-+			const parsed = JSON.parse(raw);
-+			return Array.isArray(parsed) ? parsed.filter((n): n is string => typeof n === 'string' && SESSION_NAME_RE.test(n)) : [];
-+		} catch (e) {
-+			rpLog('warn', `history storage parse failed; resetting to empty: ${e instanceof Error ? e.message : String(e)}`);
-+			return [];
-+		}
-+	}
-+
-+	/** Merge newly-seen real tmux session names into the persisted last-seen set. */
-+	private recordHistory(names: readonly string[]): void {
-+		const meaningful = names.filter(n => SESSION_NAME_RE.test(n));
-+		if (meaningful.length === 0) {
-+			return;
-+		}
-+		const existing = this.readHistory();
-+		const merged = Array.from(new Set([...existing, ...meaningful]));
-+		if (merged.length === existing.length) {
-+			return; // nothing new
-+		}
-+		this.storageService.store(HISTORY_STORAGE_KEY, JSON.stringify(merged), StorageScope.WORKSPACE, StorageTarget.MACHINE);
-+		// Only the History view owns the History row; re-render it if that's us.
-+		if (this.category === 'history') {
-+			this.renderHistory();
-+		}
++		return readHistoryFromStore(this.storageService);
 +	}
 +
 +}
@@ -3412,7 +3508,7 @@ new file mode 100644
 index 00000000..820a8de4
 --- /dev/null
 +++ b/src/vs/workbench/contrib/terminal/browser/remotePairTerminalSidebar.ts
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,840 @@
 +/*---------------------------------------------------------------------------------------------
 + *  RemotePair: "Terminal" sidebar container that embeds a real EditorPart so its
 + *  content is editor-tab-based (horizontal tabs), terminal-specialized.
@@ -3428,7 +3524,8 @@ index 00000000..820a8de4
 +import { URI } from '../../../../base/common/uri.js';
 +import { mainWindow } from '../../../../base/browser/window.js';
 +import { getWindow, scheduleAtNextAnimationFrame, addDisposableListener, EventType } from '../../../../base/browser/dom.js';
-+import { DisposableStore, MutableDisposable, IDisposable } from '../../../../base/common/lifecycle.js';
++import { DisposableStore, MutableDisposable, IDisposable, Disposable } from '../../../../base/common/lifecycle.js';
++import { registerWorkbenchContribution2, WorkbenchPhase, IWorkbenchContribution } from '../../../common/contributions.js';
 +import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 +import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 +import { IThemeService } from '../../../../platform/theme/common/themeService.js';
@@ -3459,7 +3556,7 @@ index 00000000..820a8de4
 +import { EditorInput } from '../../../common/editor/editorInput.js';
 +import { SessionPickerInput, SessionKind } from './remotePairSessionPicker.js';
 +import { VIEWLET_ID as BROWSER_VIEWLET_ID } from '../../files/common/files.js';
-+import { setSessionReattacher, setAttachedSessionsProvider, setSessionCardCause, notifyAttachedSessionsChanged } from './remotePairSessionManager.js';
++import { setSessionReattacher, setAttachedSessionsProvider, setSessionCardCause, notifyAttachedSessionsChanged, attachedSessionCount, onDidChangeAttachedSessions, onDidChangeSessionData, liveSessionNameFromTitle, SESSION_NAME_RE } from './remotePairSessionManager.js';
 +import { rpLog } from './remotePairLog.js';
 +
 +export const REMOTEPAIR_TERMINAL_SIDEBAR_ID = 'remotepair.terminalSidebar';
@@ -3515,7 +3612,7 @@ index 00000000..820a8de4
 +	 * Used to populate the Session Manager's Attached row (S0 isolation means these instances
 +	 * never appear in ITerminalService.instances, so we source the Attached row from here).
 +	 */
-+	private readonly attached = new Map<string, { instance: ITerminalInstance; input: EditorInput; group: IEditorGroup }>();
++	private readonly attached = new Map<string, { instance: ITerminalInstance; input: EditorInput; group: IEditorGroup; sessionName?: string; createdAt: number }>();
 +
 +	/** Last body layout size, so we can re-layout the part once an editor mounts. */
 +	private lastWidth = 0;
@@ -3532,6 +3629,14 @@ index 00000000..820a8de4
 +	private static readonly INPUT_RECOVERY_GUIDANCE_COOLDOWN_MS = 30000;
 +
 +	private lastInputRecoveryGuidanceAt = 0;
++	private readonly pendingReattachSessions: string[] = [];
++
++	// Resolves once the embedded EditorPart has been created. The part is built on the animation
++	// frame AFTER the view first renders (see renderBody — it cannot be built synchronously), so
++	// per-folder Browser actions fired right after openView must wait on this instead of dropping
++	// the request when `editorPart` is still unset (Browser-first launch never warms the part).
++	private resolveEmbeddedPartReady!: () => void;
++	private readonly embeddedPartReady = new Promise<void>(resolve => { this.resolveEmbeddedPartReady = resolve; });
 +
 +	constructor(
 +		options: IViewPaneOptions,
@@ -3553,14 +3658,16 @@ index 00000000..820a8de4
 +
 +		// G004: route the bottom Session Manager's reattach requests into this sidebar's
 +		// embedded EditorPart group, reusing the same terminal-open path.
-+		setSessionReattacher((name) => this.launchReattach(name));
++		setSessionReattacher((name) => this.reattachSession(name));
 +
 +		// G004: supply the Session Manager's Attached row with the sidebar's own terminal
 +		// set. These instances bypass ITerminalService (S0 isolation), so we source them here.
 +		setAttachedSessionsProvider({
 +			getAttached: () => [...this.attached.values()].map(v => ({
 +				id: v.instance.resource.toString(),
-+				title: v.instance.title || 'Session',
++				title: v.sessionName || v.instance.title || 'Session',
++				sessionName: v.sessionName,
++				createdAt: v.createdAt,
 +			})),
 +			reveal: (id) => {
 +				const v = this.attached.get(id);
@@ -3595,6 +3702,7 @@ index 00000000..820a8de4
 +				return instance?.resource.toString();
 +			},
 +		});
++		this._register(onDidChangeSessionData(() => this.freezePendingSessionNamesFromLiveCache()));
 +	}
 +
 +	/**
@@ -3602,6 +3710,33 @@ index 00000000..820a8de4
 +	 * terminal-open path as launchSession and sends a quoted `xpair attach <name>` via the
 +	 * terminal's public sendText API. Hosting-layer only — core terminal behavior untouched.
 +	 */
++	reattachSession(name: string): void {
++		const sessionName = name.trim();
++		if (!SESSION_NAME_RE.test(sessionName)) {
++			rpLog('warn', `reattachSession rejected invalid session name: ${name}`);
++			return;
++		}
++		if (!this.editorPart) {
++			this.queueReattach(sessionName);
++			return;
++		}
++		this.launchReattach(sessionName);
++	}
++
++	private queueReattach(name: string): void {
++		if (this.pendingReattachSessions.includes(name)) {
++			return;
++		}
++		this.pendingReattachSessions.push(name);
++	}
++
++	private flushPendingReattachSessions(): void {
++		const names = this.pendingReattachSessions.splice(0);
++		for (const name of names) {
++			this.launchReattach(name);
++		}
++	}
++
 +	private launchReattach(name: string): void {
 +		const part = this.editorPart;
 +		if (!part) {
@@ -3616,7 +3751,7 @@ index 00000000..820a8de4
 +				return;
 +			}
 +			try {
-+				const { instance, opened } = this.openTerminalInGroup(group);
++				const { instance, opened } = this.openTerminalInGroup(group, undefined, name);
 +				opened.then(() => {
 +					instance.sendText('xpair attach ' + shellSingleQuote(name), true);
 +				}, (e) => { rpLog('warn', `launchReattach(${name}): terminal open rejected: ${e}`); /* best-effort */ });
@@ -3626,15 +3761,46 @@ index 00000000..820a8de4
 +		}, () => { /* part disposed */ });
 +	}
 +
++	private sessionNameFromTitle(title: string | undefined): string | undefined {
++		return liveSessionNameFromTitle(title);
++	}
++
++	private freezeSessionNameFromTitle(key: string, instance: ITerminalInstance): boolean {
++		const entry = this.attached.get(key);
++		if (!entry || entry.sessionName) {
++			return false;
++		}
++		const name = this.sessionNameFromTitle(instance.title);
++		if (!name) {
++			return false;
++		}
++		entry.sessionName = name;
++		return true;
++	}
++
++	private freezePendingSessionNamesFromLiveCache(): void {
++		let changed = false;
++		for (const [key, entry] of this.attached) {
++			if (!entry.sessionName && this.freezeSessionNameFromTitle(key, entry.instance)) {
++				changed = true;
++			}
++		}
++		if (changed) {
++			notifyAttachedSessionsChanged();
++		}
++	}
++
 +	/**
 +	 * Shared terminal-open path: create a terminal editor in `group`, record it in the
 +	 * `attached` map, and notify the Session Manager's Attached row. Both launchSession and
 +	 * launchReattach use this so terminal-creation logic is not duplicated. Public services only.
 +	 */
-+	private openTerminalInGroup(group: IEditorGroup, cwd?: URI): { instance: ITerminalInstance; opened: Promise<void> } {
++	private openTerminalInGroup(group: IEditorGroup, cwd?: URI, sessionName?: string): { instance: ITerminalInstance; opened: Promise<void> } {
 +		const instance = this.terminalInstanceService.createInstance(cwd ? { cwd } : {}, TerminalLocation.Editor);
 +		const input = this.instantiationService.createInstance(TerminalEditorInput, instance.resource, instance);
 +		const key = instance.resource.toString();
++		const createdAt = Date.now();
++		let frozenSessionName = sessionName && SESSION_NAME_RE.test(sessionName) ? sessionName : this.sessionNameFromTitle(instance.title);
 +
 +		// Per-instance lifecycle store so these listeners live only as long as the terminal,
 +		// not the whole Sessions view (otherwise opening/closing N sessions leaks 2*N listeners
@@ -3647,11 +3813,17 @@ index 00000000..820a8de4
 +			notifyAttachedSessionsChanged();
 +			this.partDisposables.delete(store); // removes from set + disposes this store's listeners
 +		}));
-+		store.add(instance.onTitleChanged(() => notifyAttachedSessionsChanged()));
++		store.add(instance.onTitleChanged(() => {
++			if (!frozenSessionName) {
++				frozenSessionName = this.sessionNameFromTitle(instance.title);
++			}
++			this.freezeSessionNameFromTitle(key, instance);
++			notifyAttachedSessionsChanged();
++		}));
 +
 +		const opened = group.openEditor(input, { pinned: true }).then(() => {
 +			// Record only after the editor is open so `group` is live.
-+			this.attached.set(key, { instance, input, group });
++			this.attached.set(key, { instance, input, group, sessionName: frozenSessionName, createdAt });
 +			notifyAttachedSessionsChanged();
 +		}, (e) => {
 +			// Open failed: tear down the orphaned instance + its listeners (don't strand it).
@@ -3701,6 +3873,13 @@ index 00000000..820a8de4
 +	 * sendText API. Hosting-layer only — core terminal behavior untouched.
 +	 */
 +	openSessionInFolder(cwd: URI | undefined, kind?: SessionKind): void {
++		if (!this.editorPart) {
++			// Browser-first launch: the embedded part is built on the frame after the Sessions view
++			// first renders, so this action (fired right after openView) would otherwise silently
++			// no-op. Re-dispatch once the part exists rather than dropping the request.
++			this.embeddedPartReady.then(() => { if (this.editorPart) { this.openSessionInFolder(cwd, kind); } });
++			return;
++		}
 +		const part = this.editorPart;
 +		if (!part) {
 +			return;
@@ -3749,6 +3928,12 @@ index 00000000..820a8de4
 +	 * staged `xpair map add ` prefix). Hosting-layer only — core terminal untouched.
 +	 */
 +	stageBrowserCommand(text: string): void {
++		if (!this.editorPart) {
++			// Browser-first launch: mirror openSessionInFolder — wait for the embedded part rather
++			// than dropping the "Add Mapping" staging when it fires before the part is built.
++			this.embeddedPartReady.then(() => { if (this.editorPart) { this.stageBrowserCommand(text); } });
++			return;
++		}
 +		const part = this.editorPart;
 +		if (!part) {
 +			return;
@@ -3863,6 +4048,17 @@ index 00000000..820a8de4
 +		part.create(container);
 +
 +		this.editorPart = part;
++
++		// S0: register the embedded part for GROUP LOOKUP ONLY (NOT via registerPart — see the long
++		// note above). This adds it to `getGroup()`'s lookup set without joining `_parts`/MRU, so the
++		// editor-tab commands that carry a group id (close X, middle-click, context-menu Close/Others,
++		// Pin) can resolve this part's groups — without it those are all no-ops. (The context-less
++		// `closeActiveEditor` keybinding still targets the main part's activeGroup; out of scope here.)
++		this.partDisposables.add(editorPartsView.registerLookupPart(part));
++
++		// Unblock any per-folder Browser action or restore reattach queued while the part was still building.
++		this.resolveEmbeddedPartReady();
++		this.flushPendingReattachSessions();
 +
 +		// Blank-fix: drive the embedded part's visibility from the ViewPane body.
 +		// Editor panes (including TerminalEditor/xterm) only attach and size when their
@@ -4078,6 +4274,30 @@ index 00000000..820a8de4
 +	}
 +});
 +
++// WS17: restore/opened-set reattach command. This is the command the extension-host startup restore
++// executes; it deliberately routes into RemotePairTerminalSidebarView.reattachSession so it shares the
++// same launchReattach implementation used by Detached card clicks.
++registerAction2(class extends Action2 {
++	constructor() {
++		super({
++			id: 'remotepair.terminalSidebar.reattachSession',
++			title: localize2('remotepairReattachSession', "Reattach Session"),
++			f1: false
++		});
++	}
++	async run(accessor: ServicesAccessor, name?: string): Promise<void> {
++		if (typeof name !== 'string' || !SESSION_NAME_RE.test(name.trim())) {
++			rpLog('warn', `reattachSession command rejected invalid session name: ${String(name)}`);
++			return;
++		}
++		const viewsService = accessor.get(IViewsService);
++		const view = await viewsService.openView(REMOTEPAIR_TERMINAL_SIDEBAR_ID + '.view', false);
++		if (view instanceof RemotePairTerminalSidebarView) {
++			view.reattachSession(name.trim());
++		}
++	}
++});
++
 +// G005: stage the `xpair map add ` command in a Sessions terminal (from the Browser's
 +// "Add Mapping" action). Ensures the Sessions sidebar is visible first, then stages the text.
 +registerAction2(class extends Action2 {
@@ -4102,6 +4322,33 @@ index 00000000..820a8de4
 +function shellSingleQuote(value: string): string {
 +	return `'${value.replace(/'/g, `'\\''`)}'`;
 +}
++
++// RemotePair (S0): when the LAST attached terminal tab is closed, fall back to the Browser. We only
++// fire on a nonzero → 0 transition. The launch default is owned by the extension host (it reveals the
++// Browser on every activation — a fresh launch never has attached tabs), and reacting to every
++// count==0 here would also bounce an in-progress EXPLICIT Sessions open: opening the Sessions view
++// registers the attached provider and fires this at count 0 before the terminal is created, so a
++// blanket reveal would abort "New Session Here" / Favorites opens back to the Browser.
++class RemotePairEmptySessionsBrowserFallback extends Disposable implements IWorkbenchContribution {
++	static readonly ID = 'workbench.contrib.remotePairEmptySessionsBrowser';
++
++	private lastCount = attachedSessionCount();
++
++	constructor(@IViewsService private readonly viewsService: IViewsService) {
++		super();
++		this._register(onDidChangeAttachedSessions(() => this.onAttachedChanged()));
++	}
++
++	private onAttachedChanged(): void {
++		const count = attachedSessionCount();
++		const wasNonzero = this.lastCount > 0;
++		this.lastCount = count;
++		if (wasNonzero && count === 0) {
++			this.viewsService.openViewContainer(BROWSER_VIEWLET_ID, false);
++		}
++	}
++}
++registerWorkbenchContribution2(RemotePairEmptySessionsBrowserFallback.ID, RemotePairEmptySessionsBrowserFallback, WorkbenchPhase.AfterRestored);
 diff --git a/extensions/git/package.json b/extensions/git/package.json
 index 483589b3..d4310749 100644
 --- a/extensions/git/package.json
@@ -4247,3 +4494,83 @@ index 3c7242ab..d29f74fd 100644
  				'markdownDescription': isWeb ?
  					localize('layoutControlEnabledWeb', "Controls whether the layout control in the title bar is shown.") :
  					localize({ key: 'layoutControlEnabled', comment: ['{0}, {1} is a placeholder for a setting identifier.'] }, "Controls whether the layout control is shown in the custom title bar. This setting only has an effect when {0} is not set to {1}.", '`#window.customTitleBarVisibility#`', '`never`'),
+diff --git a/src/vs/workbench/browser/parts/editor/editor.ts b/src/vs/workbench/browser/parts/editor/editor.ts
+index 28d0480..d81bb81 100644
+--- a/src/vs/workbench/browser/parts/editor/editor.ts
++++ b/src/vs/workbench/browser/parts/editor/editor.ts
+@@ -189,6 +189,15 @@ export interface IEditorPartsView {
+ 	readonly mainPart: IEditorGroupsView;
+ 	registerPart(part: IEditorPart): IDisposable;
+ 
++	/**
++	 * RemotePair (S0): register a part for GROUP LOOKUP ONLY. Unlike `registerPart`, this does NOT
++	 * add the part to `_parts`, the MRU, or any focus/group-change listeners, so it never affects
++	 * `activeGroup`/`getGroups()` and cannot trigger the reverse-leak. It only lets `getGroup(id)`
++	 * resolve the part's groups, so global title/tab commands (close, close others, pin, ...) reach
++	 * editors hosted in the embedded Sessions EditorPart.
++	 */
++	registerLookupPart(part: IEditorPart): IDisposable;
++
+ 	readonly activeGroup: IEditorGroupView;
+ 	readonly groups: IEditorGroupView[];
+ 	getGroup(identifier: GroupIdentifier): IEditorGroupView | undefined;
+diff --git a/src/vs/workbench/browser/parts/editor/editorParts.ts b/src/vs/workbench/browser/parts/editor/editorParts.ts
+index 3b6b374..8012189 100644
+--- a/src/vs/workbench/browser/parts/editor/editorParts.ts
++++ b/src/vs/workbench/browser/parts/editor/editorParts.ts
+@@ -244,6 +244,19 @@ export class EditorParts extends MultiWindowParts<EditorPart, IEditorPartsMement
+ 		return disposables;
+ 	}
+ 
++	// RemotePair (S0): parts registered for GROUP LOOKUP ONLY (see IEditorPartsView.registerLookupPart).
++	// Deliberately kept out of `_parts`, the MRU, and every part listener, so these parts stay invisible
++	// to `getGroups()`/`activeGroup` and never fire focus/group-change events (no reverse-leak). Only
++	// `getGroup()` and `getPart()`'s id branch consult this set, which is all the global tab/title
++	// commands (close, split, move, ...) need.
++	private readonly lookupParts = new Set<EditorPart>();
++
++	registerLookupPart(part: EditorPart): IDisposable {
++		this.lookupParts.add(part);
++
++		return toDisposable(() => this.lookupParts.delete(part));
++	}
++
+ 	protected override unregisterPart(part: EditorPart): void {
+ 		super.unregisterPart(part);
+ 
+@@ -375,6 +388,19 @@ export class EditorParts extends MultiWindowParts<EditorPart, IEditorPartsMement
+ 			}
+ 		}
+ 
++		// RemotePair (S0): symmetric with getGroup — resolve lookup-only parts (the embedded Sessions
++		// EditorPart) for group mutators (addGroup/moveGroup/copyGroup/activateGroup…) that dispatch
++		// via getPart(location). Id-branch ONLY: never consults getPartByDocument, so activePart/
++		// activeGroup/MRU stay untouched and the S0 reverse-leak cannot return.
++		if (!isHTMLElement(groupOrElement)) {
++			const id = typeof groupOrElement === 'number' ? groupOrElement : groupOrElement.id;
++			for (const part of this.lookupParts) {
++				if (part.hasGroup(id)) {
++					return part;
++				}
++			}
++		}
++
+ 		return this.mainPart;
+ 	}
+ 
+@@ -718,6 +744,15 @@ export class EditorParts extends MultiWindowParts<EditorPart, IEditorPartsMement
+ 			}
+ 		}
+ 
++		// RemotePair (S0): lookup-only parts (e.g. the embedded Sessions EditorPart) are not in
++		// `_parts`, so consult them here so global tab/title commands can resolve their groups.
++		for (const part of this.lookupParts) {
++			const group = part.getGroup(identifier);
++			if (group) {
++				return group;
++			}
++		}
++
+ 		return this.mainPart.getGroup(identifier);
+ 	}
+ 

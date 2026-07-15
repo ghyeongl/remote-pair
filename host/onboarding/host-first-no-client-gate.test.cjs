@@ -4,12 +4,9 @@ const path = require("node:path");
 
 const root = __dirname;
 const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
-const stepWaiting = fs.readFileSync(
-  path.join(root, "src/components/onboarding/host/StepWaiting.tsx"),
-  "utf8",
-);
-const onboardingWindow = fs.readFileSync(
-  path.resolve(root, "../app/OnboardingWindow.swift"),
+const appDelegate = fs.readFileSync(path.join(root, "../app/AppDelegate.swift"), "utf8");
+const stepBroadcast = fs.readFileSync(
+  path.join(root, "src/components/onboarding/host/StepBroadcast.tsx"),
   "utf8",
 );
 
@@ -20,37 +17,50 @@ function test(name, fn) {
   try {
     fn();
     passed += 1;
-    console.log(`PASS ${name} - host-first waits without reporting completion`);
+    console.log(`PASS ${name} - broadcast gate is the US-004 seam`);
   } catch (error) {
     failed += 1;
     console.error(`FAIL ${name} - ${error.message.split("\n")[0]}`);
   }
 }
 
-test("Q0543 host-first onboarding holds until a connected client exists", () => {
+test("US-004 host Broadcast holds until the backend reports a proven paired state", () => {
+  assert.match(app, /const BROADCAST_IDX = ENGINE_IDX \+ 1/);
+  assert.match(app, /const \[broadcast, setBroadcast\] = useState<BroadcastState>\("waiting"\)/);
+  assert.doesNotMatch(app, /accept(?:ed)?Click|rawAccept|hasAccepted/);
   assert.match(
-    onboardingWindow,
-    /connectedClients:\s*\(\)\s*=>\s*post\('connectedClients',\s*\[\]\)/,
-    "host bridge must expose connectedClients() so no-client state is observable",
+    app,
+    /w\.index === BROADCAST_IDX && broadcast !== "accepted"[\s\S]*\? undefined[\s\S]*: w\.next/,
+    "Next must be hidden at Broadcast until broadcast === accepted",
   );
   assert.match(
-    stepWaiting,
-    /window\.xpair\s*\.\s*connectedClients\(\)/,
-    "Connect/Waiting step must poll the real connected-client list",
+    app,
+    /w\.index === BROADCAST_IDX && broadcast === "accepted"[\s\S]*\? t\("shell\.continue"\)/,
+    "Accepted broadcast must restore the Continue label",
   );
   assert.match(
-    stepWaiting,
-    /const connected\s*=\s*clients\.length\s*>\s*0/,
-    "Connect/Waiting step must derive connected state from the client list",
+    app,
+    /w\.index === BROADCAST_IDX && broadcast === "incoming"[\s\S]*t\("bc\.deny"\)[\s\S]*t\("bc\.accept"\)/,
+    "Accept/Deny buttons must live in the footerSlot while incoming",
   );
+  assert.doesNotMatch(app, /shell\.skip|t\("shell\.skip"\)/, "Broadcast must not expose Skip");
+  assert.match(
+    stepBroadcast,
+    /export type BroadcastState =[\s\S]*"waiting"[\s\S]*"incoming"[\s\S]*"accepted-pending-proof"[\s\S]*"accepted"[\s\S]*"denied"/,
+  );
+  assert.match(
+    app,
+    /window\.xpair[\s\S]*\.acceptPairing\(\{ id: request\.id, keyFingerprint: request\.keyFingerprint \}\)[\s\S]*\.then\(applyPairingStatus\)/,
+  );
+  assert.match(stepBroadcast, /setState\("waiting"\)/, "Deny recovery must rebroadcast in-body");
+  assert.doesNotMatch(stepBroadcast, /setState\("accepted"\)/, "Accept belongs in the WizardShell footerSlot");
+});
 
-  const appUsesClientStateBeforeDone =
-    /connectedClients\(\)[\s\S]{0,500}(?:w\.goTo\([^)]*4|w\.next\(\)|complete\(\))/.test(app) ||
-    /w\.index\s*===\s*3[\s\S]{0,300}(?:clients?\.length|connected|hasClient|clientReady)/.test(app);
-
-  assert.ok(
-    appUsesClientStateBeforeDone,
-    "App.tsx can advance from Connect to Done without checking connectedClients()/client state",
+test("launch gate opens Connect when permissions are granted but no client is paired", () => {
+  assert.match(
+    appDelegate,
+    /\} else \{[\s\S]*startServing\(\)[\s\S]*isHostRole && !PairingManager\.shared\.hasPairedClient\(\)[\s\S]*OnboardingWindow\(mode: \.grantOnly, initialStep: "connect"/,
+    "permissions-complete launch with an empty pairing ledger must serve first, then open grant-only Connect",
   );
 });
 

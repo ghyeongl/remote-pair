@@ -48,10 +48,15 @@ final class CaptureEngine {
     private var bitrate = 4_000_000
     private var sink: ((Data) -> Void)?
     private var eventSink: ((CaptureEvent) -> Void)?
+    private let sampleQueueKey = DispatchSpecificKey<Bool>()
     private let sampleQueue = DispatchQueue(label: "rp.sck")
     private let errorLock = NSLock()
     private var reportedErrorKinds = Set<CaptureFailureKind>()
     private var startGeneration: UInt64 = 0
+
+    init() {
+        sampleQueue.setSpecific(key: sampleQueueKey, value: true)
+    }
 
     /// Advisory: true while capture is running (a viewer is connected → the sidecar sent capture:start).
     /// Read cross-thread only for the menu-bar status line, so a one-tick-stale value is acceptable.
@@ -63,6 +68,9 @@ final class CaptureEngine {
     // pixel buffer and re-encode it as an IDR on wall-clock cadence or PLI/FIR demand.
     // These fields are touched only on sampleQueue.
     private var forceKeyframeFlag = false
+    // Set once a runtime ABR bitrate command arrives. Gates the hard DataRateLimits cap
+    // so ABR-off captures keep VideoToolbox's stock AverageBitRate-only behavior.
+    private var bitrateOverridden = false
     private var lastPixelBuffer: CVPixelBuffer?
     private var encodedFrameIndex: Int64 = 0
     private var lastKeyframeTime: CFTimeInterval = 0
@@ -106,6 +114,7 @@ final class CaptureEngine {
             lastPixelBuffer = nil
             firstFrameSubmitted = false
             forceKeyframeFlag = false
+            bitrateOverridden = false
         }
         startKeyframeTimer()
 
@@ -194,6 +203,16 @@ final class CaptureEngine {
     /// called again cleanly for the next session. Idempotent.
     func stop() {
         startGeneration &+= 1
+        if DispatchQueue.getSpecific(key: sampleQueueKey) == true {
+            stopOnSampleQueue()
+        } else {
+            sampleQueue.sync {
+                stopOnSampleQueue()
+            }
+        }
+    }
+
+    private func stopOnSampleQueue() {
         if let s = stream {
             s.stopCapture { _ in }
         }
@@ -207,9 +226,7 @@ final class CaptureEngine {
         sink = nil
         eventSink = nil
         stopKeyframeTimer()
-        sampleQueue.sync {
-            resetSampleState()
-        }
+        resetSampleState()
         errorLock.lock()
         reportedErrorKinds.removeAll(keepingCapacity: true)
         errorLock.unlock()
@@ -224,6 +241,24 @@ final class CaptureEngine {
             guard let self = self, self.stream != nil else { return }
             self.forceKeyframeFlag = true
             self.encodeRetainedKeyframe(reason: "on-demand")
+        }
+    }
+
+    /// Retarget the encoder's average bitrate at runtime (ABR actuation). Called from
+    /// another thread (ScreenServer's control reader) on a no-ack `bitrate` control op.
+    /// Best-effort: applied on the SCK sample queue (where the VT session lives); a
+    /// no-op if there is no session yet — the next ensureEncoder() uses the new value.
+    func setBitrate(_ bitrate: Int) {
+        sampleQueue.async { [weak self] in
+            guard let self = self else { return }
+            let safe = max(100_000, bitrate)
+            self.bitrate = safe
+            self.bitrateOverridden = true
+            guard let sess = self.session else { return }
+            VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: safe as CFNumber)
+            // DataRateLimits is [bytes, seconds]: cap the 1s window to the new bitrate/8.
+            let limits = [safe / 8, 1] as CFArray
+            VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
         }
     }
 
@@ -255,6 +290,14 @@ final class CaptureEngine {
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (self.fps * 2) as CFNumber)
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: self.bitrate as CFNumber)
+        // Mirror setBitrate's hard 1s cap so a bitrate set before the session existed
+        // (which only stored self.bitrate) is honored once the session is created. Only
+        // when a runtime bitrate override actually arrived — ABR-off captures keep
+        // VideoToolbox's stock AverageBitRate-only behavior (no hard burst cap).
+        if self.bitrateOverridden {
+            let limits = [self.bitrate / 8, 1] as CFArray
+            VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
+        }
         VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: self.fps as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(sess)
         session = sess

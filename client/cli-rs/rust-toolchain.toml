@@ -1,0 +1,8 @@
+# Pin the toolchain so local builds and CI (GitHub-hosted runners, any OS) are
+# byte-identical regardless of what an image happens to preinstall. rustup honors
+# this file automatically on first `cargo` invocation. 1.96.0 matches the version
+# provisioned locally on the Windows dev box.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

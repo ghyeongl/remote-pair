@@ -53,13 +53,58 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
 
   assert.match(
     patch,
-    /function cachedDetachedSessions\(\): readonly string\[\] \{[\s\S]*attached === 0[\s\S]*\.map\(s => s\.name\)/,
-    "detached cards must come from real unattached session names",
+    /function cachedDetachedSessions\(\): readonly string\[\] \{[\s\S]*const local = localAttachedSessionNames\(\);[\s\S]*liveSessionCache\.filter\(s => s\.attached === 0 && !local\.has\(s\.name\)\)\.map\(s => s\.name\)/,
+    "detached cards must come from unattached live tmux sessions that are not local attached terminal tabs",
+  );
+  const localAttachedNames = extract(
+    patch,
+    "function localAttachedSessionNames(): ReadonlySet<string> {",
+    "function localAttachedSessionNameList(): readonly string[] {",
+  );
+  assert.match(
+    localAttachedNames,
+    /normalizedSessionName\(session\.sessionName\)[\s\S]*names\.add\(name\)/,
+    "local attached snapshots must persist only stable tmux sessionName values",
+  );
+  assert.doesNotMatch(
+    localAttachedNames,
+    /session\.title|session\.id/,
+    "local attached snapshots must never fall back to mutable display titles or terminal ids",
   );
   assert.match(
     patch,
-    /function cachedHistorySessions\(\): readonly string\[\] \{[\s\S]*attached > 0[\s\S]*\.map\(s => s\.name\)/,
-    "live attached history must keep real session names separate from display titles",
+    /const liveNames = new Set\(cachedSessionNames\(\)\);[\s\S]*const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\)/,
+    "History must be persisted last-seen names minus every live tmux session",
+  );
+  assert.match(
+    patch,
+    /function cachedRemoteAttachedSessions\(\): readonly string\[\] \{[\s\S]*s\.attached > 0 && !local\.has\(s\.name\)/,
+    "sessions attached elsewhere must be tracked separately from Detached cards",
+  );
+  assert.match(
+    patch,
+    /const remoteAttached = cachedRemoteAttachedSessions\(\);[\s\S]*remoteAttached\.length > 0 \? localize\('remotepairAttachedElsewhere', "Some sessions are attached in another window or device\."\)/,
+    "attached-elsewhere sessions must render only an informational hint when no detached sessions exist",
+  );
+  assert.doesNotMatch(
+    patch,
+    /selecting one will reattach it here/,
+    "attached-elsewhere hint must not imply selecting it will steal the session",
+  );
+  assert.match(
+    patch,
+    /function refreshSessionData\(commandService: ICommandService\): void \{[\s\S]*const next = normalizeSessionCommandResult\(value\);[\s\S]*if \(!nextUnavailable\) \{[\s\S]*recordHistoryNames\(next\.map\(s => s\.name\)\);[\s\S]*\}/,
+    "successful live-list refreshes must record every valid live session name into last-seen History",
+  );
+  assert.match(
+    patch,
+    /function recordHistoryNames\(names: readonly string\[\]\): void \{[\s\S]*const meaningful = names\.filter\(n => SESSION_NAME_RE\.test\(n\)\);[\s\S]*storageService\.store\(HISTORY_STORAGE_KEY, JSON\.stringify\(merged\), StorageScope\.WORKSPACE, StorageTarget\.MACHINE\);/,
+    "History recording must stay at the data layer and validate names before persisting",
+  );
+  assert.doesNotMatch(
+    patch,
+    /this\.recordHistory\(/,
+    "render-time History writes must stay removed",
   );
   assert.match(
     patch,
@@ -78,8 +123,18 @@ test("named sessions remain distinct and exact-name attachable (Q0096 Q0248)", (
   );
   assert.match(
     patch,
-    /const persisted = this\.readHistory\(\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => reattach\(name\)\)/,
-    "persisted real session names must reattach through xpair attach",
+    /const persisted = this\.readHistory\(\)\.filter\(name => !liveNames\.has\(name\)\);[\s\S]*for \(const name of persisted\)[\s\S]*this\.addCard\(name, \(\) => validateAndReattach\(name, this\.commandService\)\)/,
+    "persisted History names must validate through checkAttach before any reattach",
+  );
+  assert.match(
+    patch,
+    /function validateAndReattach\(name: string, commandService: ICommandService\): void \{[\s\S]*commandService\.executeCommand\('remotepair\.sessions\.checkAttach', name\)[\s\S]*const attached = checkedSession \? normalizedAttached\(checkedSession\.attached\) : -1;[\s\S]*if \(isRecord\(value\) && value\.ok === true && attached === 0\)[\s\S]*reattach\(name\)/,
+    "History validation must use checkAttach and only reattach when the session is live and unattached",
+  );
+  assert.match(
+    patch,
+    /attached > 0 \? localize\('remotepairAttachedElsewhere', "Some sessions are attached in another window or device\."\)/,
+    "History validation must surface the attached-elsewhere refusal instead of stealing with xpair attach -d",
   );
 
   const attach = extract(cli, "cmd_attach() {", "\ncmd_host() {");

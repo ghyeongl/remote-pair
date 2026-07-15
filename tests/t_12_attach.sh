@@ -9,30 +9,21 @@ run_cli() {
   MLOG="$(cat "$MOCKLOG" 2>/dev/null)"
 }
 
-SBX_REMOTE_HOST="" new_sandbox
+new_sandbox
 make_all_mocks
 SESSION="gh_proj_1"
-MOCK_SESS_EXISTS="$SESSION" run_cli attach --local "$SESSION"
+run_cli attach --local "$SESSION"
 
-it "attach/local-existing-session"
-assert_rc "$RP_RC" 0 "local attach succeeds"
-assert_contains "$MLOG" "tmux-aqua|-S|/tmp/aqua-tmux.sock|has-session|-t|=$SESSION" "checks exact local session existence"
-assert_contains "$MLOG" "tmux-aqua|-S|/tmp/aqua-tmux.sock|attach|-d|-t|=$SESSION" "attaches exact local session"
-cleanup_sandbox
-
-SBX_REMOTE_HOST="" new_sandbox
-make_all_mocks
-SESSION="missing_1"
-MOCK_SESS_EXISTS="" run_cli attach --local "$SESSION"
-
-it "attach/local-missing-session"
-assert_rc "$RP_RC" 4 "missing local session returns not-found"
-assert_contains "$RP_ERR" "session not found: $SESSION" "missing local session is reported"
-assert_absent "$MLOG" "new-session" "attach never creates a session"
+it "attach/removed-local-flag"
+assert_rc "$RP_RC" 2 "--local is rejected"
+assert_contains "$RP_ERR" "unknown attach option: --local" "unknown-option error is reported"
+assert_absent "$MLOG" "ssh|" "rejected option does not probe ssh"
+assert_absent "$MLOG" "tmux-aqua" "rejected option does not invoke tmux-aqua"
 cleanup_sandbox
 
 new_sandbox
 make_all_mocks
+make_mock mosh-client   # bundled static mosh-client present → attach should pin --client to it
 SESSION="test-host_proj_1"
 run_cli attach "$SESSION"
 
@@ -40,8 +31,24 @@ it "attach/remote-existing-session"
 assert_rc "$RP_RC" 0 "remote attach succeeds"
 assert_contains "$MLOG" "ssh|-n|-o|BatchMode=yes|-o|ConnectTimeout=4|test-host" "checks remote session existence over ssh"
 assert_contains "$MLOG" "has-session -t '=$SESSION'" "checks exact remote session name"
-assert_contains "$MLOG" "mosh|--server=$HOME/.local/bin/mosh-server|test-host" "uses mosh for remote attach"
+assert_contains "$MLOG" "mosh|" "uses mosh for remote attach"
+assert_contains "$MLOG" "--client=$HOME/.local/bin/mosh-client" "mosh uses the bundled static mosh-client"
+assert_contains "$MLOG" "--server=$HOME/.local/bin/mosh-server" "mosh points at the bundled remote mosh-server"
+assert_contains "$MLOG" "test-host" "mosh targets the configured remote host"
 assert_contains "$MLOG" "attach|-d|-t|=$SESSION" "attaches exact remote session"
+cleanup_sandbox
+
+# Bundled mosh-client ABSENT (e.g. a system-mosh install) → do NOT pin --client; mosh PATH-resolves it.
+new_sandbox
+make_all_mocks   # note: no mosh-client mock → ~/.local/bin/mosh-client does not exist
+SESSION="test-host_proj_1"
+run_cli attach "$SESSION"
+
+it "attach/remote-no-bundled-client"
+assert_rc "$RP_RC" 0 "remote attach succeeds without a bundled mosh-client"
+assert_contains "$MLOG" "mosh|" "still uses mosh for remote attach"
+assert_contains "$MLOG" "--server=$HOME/.local/bin/mosh-server" "still points at the remote mosh-server"
+assert_absent "$MLOG" "--client=" "no --client pinned when mosh-client is absent (mosh resolves it via PATH)"
 cleanup_sandbox
 
 new_sandbox

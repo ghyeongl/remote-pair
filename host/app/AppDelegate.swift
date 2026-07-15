@@ -1,26 +1,39 @@
-// AppDelegate.swift — menu bar (NSStatusItem) + dynamic session list + permissions/settings/update/About routing.
+// AppDelegate.swift — menu bar (NSStatusItem) + dynamic session list + permissions/update/About routing.
 //
 // Separation of responsibilities: tmux host=HostManager, approve=ApproveManager, session query/control=Sessions,
 //            permissions=Permissions, updates=Updater, setup/onboarding=OnboardingWindow.
 // The menu redraws the session list on every open via NSMenuDelegate.menuNeedsUpdate.
 
 import Cocoa
+import IOKit.pwr_mgt
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let host = HostManager()
+    private var keepAwakeAssertion: IOPMAssertionID = 0
     let approve = ApproveManager()
-    let advertiser = BonjourAdvertiser()   // ① LAN discovery: advertise _xpair._tcp (host role only)
+    let lanBeacon = LanBeacon()   // LAN discovery: broadcast host hints (host role only)
     var statusItem: NSStatusItem!
     var menu: NSMenu!
     var hostTimer: Timer?
     var tickTimer: Timer?
-    var onboarding: OnboardingWindow?   // shown while Screen Recording is ungranted (hard run-gate)
+    var onboarding: OnboardingWindow?   // shown while required host permissions are ungranted
     var grantWindow: OnboardingWindow?  // menu-bar "Grant Permissions…" — onboarding deep-linked to the Permissions step
 
     func applicationDidFinishLaunching(_ note: Notification) {
         ensureDirs()
+        // Daemon-lifetime keep-awake: hold a system-sleep assertion for the app's whole life so the agent
+        // Mac keeps computing for unattended work, not only while an RD viewer is connected (that's the
+        // separate display-caffeinate in the RD server). ponytail: always-on while the daemon runs;
+        // session-aware release is a follow-up (needs the session registry to know "truly idle").
+        IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                    "Xpair keep-awake (agent worker)" as CFString,
+                                    &keepAwakeAssertion)
+        XpairAuthorizedKeys.expirePendingProofs()
+        XpairAuthorizedKeys.reconcileForwardingAllowlist()   // migrate keys paired under the old narrow permitopen
+        PairingManager.shared.startPairAcceptWatcher()       // headless accept: pairing-status.json + pair-accept.request
         // Telemetry consent flags — both default OFF (opt-in). Registered so a never-toggled key reads false
-        // (zero network calls by default). Toggled in SettingsWindow.
+        // (zero network calls by default).
         UserDefaults.standard.register(defaults: [
             TelemetryClient.consentKey: false,
             SentryBridge.consentKey: false,
@@ -41,6 +54,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.terminate(nil); return
         }
         Installer.ensureInstalled()     // self-install on first run of a downloaded .app (no-op if already installed)
+        // D2: when the SSH front door is enabled, ensure the privileged hardening (-R denial + pf tailnet
+        // bind) is applied. Verify at launch; the one-time GUI admin prompt only appears if missing/drifted.
+        let d2Flag = "\(RP_DIR)/d2-frontdoor.enabled"
+        if FileManager.default.fileExists(atPath: d2Flag), !D2Hardening.applied() {
+            if !D2Hardening.apply() {
+                // Fail SAFE: hardening didn't apply, so do NOT run the D2 front door unhardened (-R open,
+                // physical :22 open). Disable the flag → the gate falls back to the legacy path until the
+                // next launch re-prompts and it succeeds.
+                try? FileManager.default.removeItem(atPath: d2Flag)
+                log(.error, "D2 hardening not applied (admin prompt cancelled/failed) — disabled the D2 front door (removed \(d2Flag)); re-enable to retry")
+            }
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         // Menu-bar icon: monochrome template (auto-adapts to light/dark menu bar).
         // Loaded by name from Resources (menubar.png + menubar@2x.png). Falls back to text glyph.
@@ -56,23 +81,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self           // rebuilt each time via menuNeedsUpdate
         statusItem.menu = menu
         rebuildMenu()
-
         log("launched (XpairHost v\(APP_VERSION), repo=\(GH_REPO))")
 
         // The tick loop (heartbeat + writeStatus + approve/onboarding triggers) ALWAYS runs — even while
-        // gated — because writeStatus() drives status.json, which the onboarding WKWebView polls for the
-        // Screen Recording grant. Serving (HostManager/ScreenServer/pairing/advertising) is gated below.
+        // gated — because writeStatus() drives status.json, which the onboarding WKWebView polls for
+        // grant status. Serving (HostManager/ScreenServer/pairing/advertising) is gated below.
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.poll() }
         // (legacy v0 InputServer 0.1s main-thread polling removed — screencapture's synchronous blocking froze the menu bar.
         //  Screen sharing is replaced by v1/v2 (xpair-screen serve-webrtc, view-only, no remote input).)
 
-        // Hard run-gate. The host needs BOTH Accessibility (approve auto-click via cliclick/System
-        // Events) AND Screen Recording (screen-share + approve OCR). If either is ungranted, show the
-        // in-process onboarding window and DO NOT start serving until the React flow completes (both
-        // granted). Dismissing the window while still ungranted terminates the app (enforced in
-        // OnboardingWindow.windowWillClose). `allGranted()` = axTrusted() && srGranted().
+        // LAN beacon starts BEFORE the permission run-gate (the lifecycle Bonjour had): a fresh
+        // host mid-onboarding is exactly when a LAN client must be able to list it and send the
+        // pairing request — gating the beacon on startServing() would deadlock LAN-only setups
+        // (onboarding completes only after a client pairs). Secret-free hint; safe pre-grant.
+        if isHostRole { lanBeacon.ensureAdvertising() }
+
+        // Hard run-gate. The host needs Accessibility (approve auto-click via cliclick/System Events),
+        // Screen Recording (screen-share + approve OCR), Remote Login, and File Sharing. If any required
+        // permission is ungranted, show the in-process onboarding window and DO NOT start serving until
+        // the React flow completes. Dismissing the window while still ungranted terminates the app
+        // (enforced in OnboardingWindow.windowWillClose).
         if !Permissions.allGranted() {
-            log(.warn, "Accessibility/Screen Recording not granted — showing onboarding (serving gated)")
+            log(.warn, "required host permissions not granted — showing onboarding (serving gated)")
             // Pre-register the app in the Accessibility + Screen Recording TCC lists so the user only
             // has to flip the toggle ON in System Settings (no "+"/drag-in). request() calls
             // AXIsProcessTrustedWithOptions / CGRequestScreenCaptureAccess, which add the (off) entries.
@@ -80,30 +110,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Permissions.request("sr")
             let ob = OnboardingWindow(onComplete: { [weak self] in
                 self?.onboarding = nil
-                self?.startServing()
+                // Dismissing the run gate after required permissions are granted but BEFORE a client pairs must still
+                // leave the host pairable: start serving AND (re)open a Connect/Broadcast pairing window
+                // exactly like the already-granted launch path. windowWillClose called endWindow(), so
+                // without this the host advertises presence but no live pairing metadata and every client
+                // filters it out.
+                self?.startServingAndOpenPairingIfNeeded()
             })
             onboarding = ob
             ob.show()
         } else {
-            startServing()
+            startServingAndOpenPairingIfNeeded()
+        }
+    }
+
+    /// startServing() + open a grant-only Connect/Broadcast window when the host has no paired client yet,
+    /// so it advertises a LIVE pairing window (serviceInstanceID/hostNonce/pairPort) that clients can
+    /// discover. Shared by the launch-already-granted path and the run-gate dismiss path.
+    private func startServingAndOpenPairingIfNeeded() {
+        startServing()
+        if isHostRole && !PairingManager.shared.hasPairedClient() {
+            let ob = OnboardingWindow(mode: .grantOnly, initialStep: "connect",
+                                      onComplete: { [weak self] in self?.grantWindow = nil })
+            grantWindow = ob
+            ob.show()
         }
     }
 
     /// Begins the serving path: tmux host, screen sidecar (via HostManager), LAN advertising, and the 5 s
-    /// watchdog. Called at launch when Screen Recording is already granted, or from the onboarding
+    /// watchdog. Called at launch when required permissions are already granted, or from the onboarding
     /// onComplete once the user grants it. Idempotent enough to call once per launch.
     private func startServing() {
         host.ensureServer()
-        if isHostRole { advertiser.ensureAdvertising() }   // ① advertise on launch (host/both only)
+        if isHostRole { lanBeacon.ensureAdvertising() }   // advertise on launch (host/both only)
         hostTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.host.ensureServer()
-            if isHostRole { self.advertiser.ensureAdvertising() }   // ① watchdog: re-advertise if listener died
+            if isHostRole { self.lanBeacon.ensureAdvertising() }   // watchdog: restart beacon if needed
         }
+    }
 
-        if UserDefaults.standard.bool(forKey: SettingsWindowController.autoUpdateKey) {
-            Updater.checkForUpdates(interactive: false)
-        }
+    func applicationWillTerminate(_ note: Notification) {
+        lanBeacon.stop()
+        if keepAwakeAssertion != 0 { IOPMAssertionRelease(keepAwakeAssertion) }
+    }
+
+    /// Self-test: the keep-awake assertion can be created (non-zero id) and released.
+    static func keepAwakeSelfTest() {
+        var id: IOPMAssertionID = 0
+        let rc = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                                             IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                             "Xpair keep-awake self-test" as CFString, &id)
+        precondition(rc == kIOReturnSuccess && id != 0)
+        IOPMAssertionRelease(id)
+        print("keep-awake self-test passed")
     }
 
     // ── dynamic menu ──
@@ -124,7 +184,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(permHeader)
         for (name, granted) in [("Accessibility", Permissions.axTrusted()),
                                 ("Screen Recording", Permissions.srGranted()),
-                                ("Full Disk", Permissions.fdaGranted())] {
+                                ("Full Disk", Permissions.fdaGranted()),
+                                ("Remote Login", Permissions.loginGranted()),
+                                ("File Sharing", Permissions.sharingGranted())] {
             let row = NSMenuItem(title: "   \(name)  \(granted ? "✓" : "✗")", action: nil, keyEquivalent: "")
             row.isEnabled = false
             menu.addItem(row)

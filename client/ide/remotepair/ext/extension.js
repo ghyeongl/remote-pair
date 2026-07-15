@@ -10,6 +10,7 @@
 // after the host-side input helper reports readiness.
 
 const vscode = require("vscode");
+const crypto = require("crypto");
 const cp = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -25,7 +26,14 @@ const onboardingBridge = require("./onboarding-bridge.js");
 // the host over SSH so the host can show this client as connected. Self-contained, stdlib-only,
 // fire-and-forget (never crashes/blocks the IDE).
 const heartbeat = require("./heartbeat.js");
-const { listSessionsFromCli, checkSessionAvailableFromCli } = require("./session-list.js");
+const { SESSION_NAME_RE, listSessionsFromCli, checkSessionAvailableFromCli } = require("./session-list.js");
+const {
+  normalizeOpenedSessionNames,
+  claimOpenedSessionsBucket,
+  migrateOpenedSessionsClaim,
+  touchOpenedSessionsClaim,
+  writeOpenedSessionsForBucket,
+} = require("./opened-sessions.js");
 
 // --- constants -------------------------------------------------------------
 
@@ -68,10 +76,11 @@ const RD_SESSION_TOKEN_REMOTE_FILE = "~/.xpair/host/rd-session-token";
 const RD_SESSION_TOKEN_RE = /^[A-Za-z0-9._-]{24,128}$/;
 const RD_TOKEN_FILE_NOT_READY_RE = /rd-session-token[\s\S]*(?:No such file|ENOENT)|(?:No such file|ENOENT)[\s\S]*rd-session-token/i;
 
-// REMOTE_HOST must be a bare ssh host alias / hostname. Validate hard before
-// it ever reaches a spawned process (defense in depth even though spawn is
-// argv-safe: prevents an attacker-controlled env from injecting ssh options).
-const HOST_RE = /^[A-Za-z0-9._-]+$/;
+// REMOTE_HOST must be an ssh alias / hostname, optionally prefixed with a normal
+// login (`user@host`). Validate hard before it ever reaches a spawned process
+// (defense in depth even though spawn is argv-safe: prevents an attacker-
+// controlled env from injecting ssh options).
+const HOST_RE = /^(?:(?!-)[A-Za-z0-9._-]+@)?(?!-)[A-Za-z0-9._-]+$/;
 const { spawnEnv, sshFailureKind, sshFailureMessage, SSH_STATE } = onboardingBridge;
 const RD_TRANSIENT_SSH_RE = /agent refused operation|signing failed|Permission denied \(publickey|Connection refused|Connection reset|kex_exchange|Operation timed out|Could not resolve|Host is down/i;
 const RD_MAX_TRANSIENT_ATTEMPTS = 4;
@@ -98,12 +107,64 @@ function rdTransientRetryDelayMs(attempt) {
 
 // --- logging (US-006) ------------------------------------------------------
 // Conforms to docs/logging.md: line format `[<ISO>] [<LEVEL>] [ide] [<session>] <msg>`,
-// file persist to ~/.xpair/host/logs/ide.log (mode 0700), rotate-on-open at 5 MB
+// file persist to ~/.xpair/client/logs/ide.log (mode 0700), rotate-on-open at 5 MB
 // (keep .1/.2, max 3 files), level threshold REMOTEPAIR_LOG > info, redaction before sink.
 
-const LOG_DIR = path.join(os.homedir(), ".xpair/host", "logs");
+const RP_CLIENT_DIR = path.join(os.homedir(), ".xpair/client");
+const RP_HOST_DIR = path.join(os.homedir(), ".xpair/host");
+const LOG_DIR = path.join(RP_CLIENT_DIR, "logs");
 const LOG_FILE = path.join(LOG_DIR, "ide.log");
-const CLIENT_ENV_FILE = path.join(os.homedir(), ".xpair/host", "client.env");
+const CLIENT_ENV_FILE = path.join(RP_CLIENT_DIR, "client.env");
+const OPENED_SESSIONS_FILE = path.join(RP_CLIENT_DIR, "opened-sessions.json");
+const OPENED_SESSIONS_DEBOUNCE_MS = 1000;
+const OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS = 10 * 60 * 1000;
+const OPENED_SESSIONS_RESTORE_ATTEMPTS = 3;
+const OPENED_SESSIONS_RESTORE_BACKOFF_MS = 600;
+const LEGACY_CLIENT_ENV_FILE = path.join(RP_HOST_DIR, "client.env");
+// Per-WINDOW lock scope: the window's two extension hosts share the same workspace,
+// while different windows (almost always) hold different workspaces — sessionId is NOT
+// documented as per-window, so it cannot key this. Two windows on the SAME folder share
+// one owner: acceptable (same probes, one notifier) and strictly better than per-app
+// starvation. Guarded access: contract tests require this module with a vscode stub.
+function computeWorkspaceScopeId() {
+  let scope = "global";
+  try {
+    const ws = vscode.workspace || {};
+    const id = (ws.workspaceFile && ws.workspaceFile.fsPath) ||
+      (ws.workspaceFolders || []).map((f) => f.uri.fsPath).join("|");
+    if (id) scope = crypto.createHash("sha1").update(id).digest("hex").slice(0, 12);
+  } catch (_e) { /* stubbed vscode */ }
+  return scope;
+}
+const CLIENT_SERVICES_SCOPE_ID = (() => {
+  let scope = "global";
+  try {
+    scope = computeWorkspaceScopeId();
+  } catch (_e) { /* stubbed vscode */ }
+  return scope;
+})();
+let currentSnapshotScopeId = CLIENT_SERVICES_SCOPE_ID;
+const CLIENT_SERVICES_LOCK_FILE = (() => {
+  const scope = CLIENT_SERVICES_SCOPE_ID;
+  return path.join(RP_CLIENT_DIR, `extension-services.${scope}.lock`);
+})();
+// Dedicated pairing identity — OFFER it (and the personal id_ed25519) via -i on every probe/tunnel ssh,
+// WITHOUT IdentitiesOnly: the key can exist locally from an unproven pairing attempt (not yet authorized
+// on the host), so adding -i must still leave the ssh-agent + default identities available —
+// IdentitiesOnly=yes would restrict auth to only these files and break a client whose working host auth
+// is agent-only. Neither present → [] (ssh uses its defaults). Only the pairing PROOF login (bridge)
+// forces the key alone.
+const PAIRING_KEY_FILE = path.join(RP_HOST_DIR, "pairing_ed25519");
+const PERSONAL_KEY_FILE = path.join(os.homedir(), ".ssh", "id_ed25519");
+function pairingIdArgs() {
+  try {
+    const a = [];
+    if (fs.existsSync(PAIRING_KEY_FILE)) a.push("-i", PAIRING_KEY_FILE);
+    if (fs.existsSync(PERSONAL_KEY_FILE)) a.push("-i", PERSONAL_KEY_FILE);
+    return a;
+  } catch { /* ignore */ }
+  return [];
+}
 const LOG_COMP = "ide";
 const LOG_MAX_BYTES = 5 * 1024 * 1024; // rotate-on-open threshold
 const LOG_LEVELS = { trace: 0, debug: 1, info: 2, warn: 3, error: 4 };
@@ -119,6 +180,18 @@ const LOG_THRESHOLD = resolveLogThreshold();
 
 function sshControlPath() {
   return "/tmp/rp-cm-" + (process.env.RP_SSH_CM_TAG || "x") + "-%C";
+}
+
+function sshControlMasterArgs() {
+  if (process.platform === "win32") return [];
+  return [
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    `ControlPath=${sshControlPath()}`,
+    "-o",
+    "ControlPersist=300",
+  ];
 }
 
 // Local-tz ISO-8601 with offset, second precision (e.g. 2026-06-15T10:45:16+0900).
@@ -225,7 +298,7 @@ function stripEnvQuotes(val) {
 function readClientEnvValue(keyName) {
   let raw;
   try {
-    raw = fs.readFileSync(CLIENT_ENV_FILE, "utf8");
+    raw = fs.readFileSync(fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV_FILE, "utf8");
   } catch (_e) {
     return null;
   }
@@ -241,50 +314,12 @@ function readClientEnvValue(keyName) {
   return null;
 }
 
-function setClientEnvValue(keyName, value) {
-  let raw = "";
-  try {
-    raw = fs.readFileSync(CLIENT_ENV_FILE, "utf8");
-  } catch (_e) {
-    raw = "";
-  }
-  const lines = raw ? raw.split(/\r?\n/) : [];
-  const next = [];
-  let found = false;
-  for (const line of lines) {
-    if (line === "" && next.length === lines.length - 1) continue;
-    const t = line.trim();
-    const eq = t.indexOf("=");
-    if (eq >= 0 && t.slice(0, eq).trim() === keyName) {
-      if (!found) next.push(`${keyName}=${value}`);
-      found = true;
-    } else {
-      next.push(line);
-    }
-  }
-  if (!found) next.push(`${keyName}=${value}`);
-  fs.mkdirSync(path.dirname(CLIENT_ENV_FILE), { recursive: true });
-  fs.writeFileSync(CLIENT_ENV_FILE, `${next.join("\n")}\n`);
-}
-
-/** Read REMOTE_HOST from ~/.xpair/host/client.env (KEY=VALUE lines). */
+/** Read REMOTE_HOST from ~/.xpair/client/client.env (KEY=VALUE lines). */
 function readRemoteHost() {
   // env override wins (useful for testing), then the client.env file.
   const fromEnv = process.env.REMOTE_HOST;
   if (fromEnv && HOST_RE.test(fromEnv.trim())) return fromEnv.trim();
   return readClientEnvValue("REMOTE_HOST");
-}
-
-function localModeActive() {
-  const fromFile = readClientEnvValue("LOCAL_MODE");
-  const raw = fromFile !== null ? fromFile : process.env.LOCAL_MODE;
-  return /^(1|true|yes|on|local)$/i.test(String(raw || "").trim());
-}
-
-function clearLocalModeFlag() {
-  if (!localModeActive()) return false;
-  setClientEnvValue("LOCAL_MODE", "0");
-  return true;
 }
 
 /** Validated REMOTE_HOST or null. */
@@ -308,25 +343,105 @@ function readEnabledNotifyTypes() {
   return enabled;
 }
 
-function hasConfiguredValue(section, key) {
-  const inspected = section.inspect(key);
-  return !!(
-    inspected &&
-    (
-      inspected.globalValue !== undefined ||
-      inspected.workspaceValue !== undefined ||
-      inspected.workspaceFolderValue !== undefined
-    )
-  );
+function mirrorTelemetryConsentToSetting() {
+  const cfg = vscode.workspace.getConfiguration("xpair.telemetry");
+  const enabled = telemetry.telemetryConsent();
+  if (!!cfg.get("enabled", false) === enabled) return;
+  try {
+    cfg.update("enabled", enabled, vscode.ConfigurationTarget.Global)
+      .then(undefined, (e) => log(`telemetry setting mirror: ${e && e.message ? e.message : e}`, "warn"));
+  } catch (e) {
+    log(`telemetry setting mirror: ${e && e.message ? e.message : e}`, "warn");
+  }
 }
 
-function syncTelemetryConsentFromSettings() {
+function syncTelemetryConsentFromSettingChange() {
   const cfg = vscode.workspace.getConfiguration("xpair.telemetry");
-  if (!hasConfiguredValue(cfg, "enabled")) return;
   const enabled = !!cfg.get("enabled", false);
-  const current = telemetry.getConsent();
-  if (current.telemetry === enabled && current.crashReport === enabled) return;
-  telemetry.setConsent(enabled, enabled);
+  if (telemetry.telemetryConsent() === enabled) return;
+  telemetry.setTelemetryConsent(enabled);
+}
+
+function readClientServicesLockPid() {
+  try {
+    const raw = fs.readFileSync(CLIENT_SERVICES_LOCK_FILE, "utf8").trim();
+    const m = raw.match(/^\d+/);
+    if (!m) return 0;
+    const pid = parseInt(m[0], 10);
+    return Number.isFinite(pid) ? pid : 0;
+  } catch (_e) {
+    return 0;
+  }
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return !!(e && e.code === "EPERM");
+  }
+}
+
+function writeClientServicesLock() {
+  // Atomic create-with-content: write the pid to a private temp file, then link(2) it
+  // into place. O_EXCL-then-write leaves a window where a racing host reads an EMPTY
+  // lock (pid 0), treats it as stale, and unlinks a live owner — link never exposes a
+  // partially-written lock, and fails with EEXIST exactly like O_EXCL.
+  fs.mkdirSync(RP_CLIENT_DIR, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(RP_CLIENT_DIR, 0o700); } catch (_e) {}
+  const tmp = `${CLIENT_SERVICES_LOCK_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${process.pid}\n`, { mode: 0o600 });
+  try {
+    fs.linkSync(tmp, CLIENT_SERVICES_LOCK_FILE);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (_e) {}
+  }
+}
+
+function releaseClientServicesLock() {
+  if (readClientServicesLockPid() !== process.pid) return;
+  try { fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE); } catch (_e) {}
+}
+
+function sweepStaleServiceLocks() {
+  // Opportunistic: session-scoped lock names accumulate across window sessions — unlink dead ones.
+  try {
+    for (const name of fs.readdirSync(RP_CLIENT_DIR)) {
+      if (!/^extension-services\..+\.lock$/.test(name)) continue;
+      const p = path.join(RP_CLIENT_DIR, name);
+      if (p === CLIENT_SERVICES_LOCK_FILE) continue;
+      try {
+        const raw = fs.readFileSync(p, "utf8").trim();
+        const pid = parseInt((raw.match(/^\d+/) || ["0"])[0], 10);
+        if (!isProcessAlive(pid)) fs.unlinkSync(p);
+      } catch (_e) { /* another window may be racing the same sweep */ }
+    }
+  } catch (_e) { /* best-effort */ }
+}
+
+function claimClientServicesLock() {
+  sweepStaleServiceLocks();
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      writeClientServicesLock();
+      return { dispose: releaseClientServicesLock };
+    } catch (e) {
+      if (!e || e.code !== "EEXIST") {
+        log(`client services lock: ${e && e.message ? e.message : e}`, "warn");
+        return null;
+      }
+      const pid = readClientServicesLockPid();
+      if (pid && isProcessAlive(pid)) return null;
+      try {
+        fs.unlinkSync(CLIENT_SERVICES_LOCK_FILE);
+      } catch (unlinkErr) {
+        if (!unlinkErr || unlinkErr.code !== "ENOENT") return null;
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -343,6 +458,7 @@ function sshRun(host, remoteCmd, opts = {}) {
   const maxBuffer = opts.maxBuffer || 16 * 1024 * 1024;
   const timeoutMs = opts.timeoutMs || 15000;
   const args = [
+    ...pairingIdArgs(),
     "-o",
     "BatchMode=yes",
     "-o",
@@ -353,12 +469,7 @@ function sshRun(host, remoteCmd, opts = {}) {
     // and a single SSH-agent (1Password) authorization instead of one per probe. The path lives
     // under this GUI session's temp dir and %C keys it by host/port/user, so the electron-main
     // onboarding guard and extension-host workbench share it without a pid split.
-    "-o",
-    "ControlMaster=auto",
-    "-o",
-    `ControlPath=${sshControlPath()}`,
-    "-o",
-    "ControlPersist=300",
+    ...sshControlMasterArgs(),
     host, // validated against HOST_RE; passed as its own argv element
     remoteCmd,
   ];
@@ -476,6 +587,11 @@ function classifiedSshFailureMessage(detail) {
   return sshFailureMessage(state, detail);
 }
 
+function gatewayMacBlockDetail(gw) {
+  const state = gw && gw.state ? gw.state : "unknown";
+  return `gateway MAC guard fail-closed: ${state}${gw && gw.err ? ` (${gw.err})` : ""}`;
+}
+
 function rdFailureKindForSshState(state) {
   if (state === SSH_STATE.HOST_KEY_MISMATCH) return "host-key";
   if (state === SSH_STATE.KEY_AUTH_BLOCKED) return "key-auth";
@@ -519,7 +635,7 @@ function getFreePort() {
 
 /**
  * Spawn an ssh local-forward tunnel (foreground: ssh -N).
- * argv-safe: host is validated, ports are integers.
+   * argv-safe: host is validated, ports are integers.
  *
  * Returns the child process — child.kill() to teardown.  We deliberately do NOT pass `-f`:
  * with `-f`, ssh forks into the background and the foreground (this Node child) exits
@@ -538,16 +654,15 @@ function spawnTunnel(host, localPort, remotePort) {
   // onboarding guard authenticate once and the workbench tunnel reuse the same live master, without
   // reusing stale masters from earlier launches.
   const args = [
+    ...pairingIdArgs(),
     "-o", "BatchMode=yes",
     "-o", `ConnectTimeout=${SSH_CONNECT_TIMEOUT}`,
     "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "ControlMaster=auto",
-    "-o", `ControlPath=${sshControlPath()}`,
-    "-o", "ControlPersist=300",
+    ...sshControlMasterArgs(),
     "-o", "ExitOnForwardFailure=yes",
     "-N",
     "-L", `${localPort}:127.0.0.1:${rport}`,
-    host, // validated HOST_RE element
+    host, // validated HOST_RE ssh target
   ];
   log(`tunnel: ssh -N -L ${localPort}:127.0.0.1:${rport} ${host}`);
   const child = cp.spawn("ssh", args, { windowsHide: true, detached: false, env: spawnEnv() });
@@ -762,6 +877,20 @@ class RemoteDesktopPanel {
     const host = getValidHost();
     if (!host) {
       this.post({ type: "status", state: "no-host" });
+      return;
+    }
+    try {
+      const gw = onboardingBridge.gatewayMacStatus();
+      if (gw && gw.allowed === false) {
+        const detail = gatewayMacBlockDetail(gw);
+        log(detail, "warn");
+        this.post({ type: "status", state: "error", detail, failureKind: "reach" });
+        return;
+      }
+    } catch (e) {
+      const detail = `gateway MAC guard unavailable; auto-connect disabled: ${e && e.message ? e.message : e}`;
+      log(detail, "warn");
+      this.post({ type: "status", state: "error", detail, failureKind: "reach" });
       return;
     }
     await this._startV2(host);
@@ -1191,7 +1320,7 @@ async function connectHost(panel) {
   const host = getValidHost();
   if (!host) {
     vscode.window.showWarningMessage(
-      "Xpair: REMOTE_HOST is not set (or invalid) in ~/.xpair/host/client.env."
+      "Xpair: REMOTE_HOST is not set (or invalid) in ~/.xpair/client/client.env."
     );
     return;
   }
@@ -1382,11 +1511,15 @@ async function setupLayout(context, force) {
   try {
     await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
   } catch (_e) {}
-  // Reveal the custom "Terminal" sidebar (embedded EditorPart, workbench source).
+  // Default the primary sidebar to the Browser. A fresh launch has no attached terminal
+  // sessions, so we start in the Browser (file explorer) rather than the empty Sessions
+  // sidebar. The workbench-side RemotePairEmptySessionsBrowserFallback contribution keeps this
+  // in sync afterwards (re-reveals the Browser whenever the last terminal tab is closed), so
+  // the two agree on every launch and there is no Terminal→Browser flash.
   try {
-    await vscode.commands.executeCommand("remotepair.terminalSidebar.view.focus");
+    await vscode.commands.executeCommand("workbench.view.explorer");
   } catch (e) {
-    log(`setupLayout reveal terminal sidebar: ${e && e.message ? e.message : e}`);
+    log(`setupLayout reveal browser: ${e && e.message ? e.message : e}`);
   }
   try {
     await context.globalState.update(KEY, true);
@@ -1398,7 +1531,7 @@ async function setupLayout(context, force) {
 // --- FOLDER_MAPS parser ----------------------------------------------------
 
 /**
- * Read FOLDER_MAPS from ~/.xpair/host/client.env.
+ * Read FOLDER_MAPS from ~/.xpair/client/client.env.
  * Format: "clientDir::hostDir" pairs separated by ";".
  * Returns an array of { clientDir, hostDir } objects (may be empty).
  */
@@ -1486,7 +1619,7 @@ function unquoteShellWord(s) {
 }
 
 function readFolderMaps() {
-  const envPath = path.join(os.homedir(), ".xpair/host", "client.env");
+  const envPath = fs.existsSync(CLIENT_ENV_FILE) ? CLIENT_ENV_FILE : LEGACY_CLIENT_ENV_FILE;
   let raw;
   try {
     raw = fs.readFileSync(envPath, "utf8");
@@ -1605,20 +1738,19 @@ function reconcileBrowserRoots() {
 
 /**
  * C1.D3 — Run the client `xpair` CLI and capture its stdout/stderr. Spawned through
- * the user's login shell so PATH resolution finds `xpair` wherever it was installed
- * (~/.local/bin, /opt/homebrew/bin, /usr/local/bin, …) — the extension host does not inherit
- * an interactive PATH. argv is passed as a single POSIX-quoted command string to `sh -lc`.
+ * argv directly so local arguments are never shell-joined. The bridge resolver picks the
+ * platform install path first, then falls back to PATH through spawnEnv()'s enrichment.
  *
  * Returns { code, stdout, stderr }. Never throws (spawn errors resolve as code -1).
  */
 function runXpairCli(args, opts = {}) {
   const timeoutMs = opts.timeoutMs || 120000;
-  const quoted = ["xpair", ...args].map(shSingleQuote).join(" ");
-  const shell = process.env.SHELL || "/bin/sh";
+  const bin = onboardingBridge.rpBin();
+  const argv = (Array.isArray(args) ? args : []).map((arg) => String(arg));
   return new Promise((resolve) => {
     let child;
     try {
-      child = cp.spawn(shell, ["-lc", quoted], { windowsHide: true });
+      child = cp.spawn(bin, argv, { windowsHide: true, env: spawnEnv() });
     } catch (e) {
       resolve({ code: -1, stdout: "", stderr: String(e) });
       return;
@@ -1643,13 +1775,213 @@ function runXpairCli(args, opts = {}) {
   });
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let openedSessionsWriteTimer = null;
+let openedSessionsClaimTouchTimer = null;
+let openedSessionsPendingNames = null;
+let openedSessionsWritesEnabled = false;
+let openedSessionsClaimedBucketKey = null;
+
+function touchOpenedSessionsClaimNow() {
+  const bucketKey = openedSessionsClaimedBucketKey;
+  if (!bucketKey) return false;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during claim heartbeat: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+  if (!host) return false;
+  try {
+    if (!touchOpenedSessionsClaim(OPENED_SESSIONS_FILE, host, bucketKey, { now: Date.now(), pid: process.pid })) {
+      log("opened sessions: claim heartbeat skipped; lock unavailable or bucket no longer owned", "debug");
+      return false;
+    }
+    log(`opened sessions: touched claim heartbeat for bucket ${bucketKey}`, "debug");
+    return true;
+  } catch (e) {
+    log(`opened sessions: claim heartbeat failed: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+}
+
+function startOpenedSessionsClaimHeartbeat() {
+  if (openedSessionsClaimTouchTimer || !openedSessionsClaimedBucketKey) return;
+  openedSessionsClaimTouchTimer = setInterval(() => {
+    touchOpenedSessionsClaimNow();
+  }, OPENED_SESSIONS_CLAIM_TOUCH_INTERVAL_MS);
+}
+
+function stopOpenedSessionsClaimHeartbeat() {
+  if (!openedSessionsClaimTouchTimer) return;
+  clearInterval(openedSessionsClaimTouchTimer);
+  openedSessionsClaimTouchTimer = null;
+}
+
+function writeOpenedSessionsNow(host, names) {
+  const clean = normalizeOpenedSessionNames(names);
+  const bucketKey = openedSessionsClaimedBucketKey;
+  if (!bucketKey) {
+    log("opened sessions: write skipped; no claimed snapshot bucket", "debug");
+    return false;
+  }
+  try {
+    if (!writeOpenedSessionsForBucket(OPENED_SESSIONS_FILE, host, bucketKey, clean, { now: Date.now(), pid: process.pid })) {
+      log("opened sessions: write skipped; lock unavailable or invalid claimed bucket", "debug");
+      return false;
+    }
+    log(`opened sessions: wrote ${clean.length} session(s) for bucket ${bucketKey}`, "debug");
+    return true;
+  } catch (e) {
+    log(`opened sessions: write failed: ${e && e.message ? e.message : e}`, "warn");
+    return false;
+  }
+}
+
+function migrateOpenedSessionsSnapshotScope() {
+  const oldBucketKey = openedSessionsClaimedBucketKey;
+  if (!oldBucketKey) return;
+  const nextScope = computeWorkspaceScopeId();
+  if (currentSnapshotScopeId === nextScope) return;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during snapshot scope migration: ${e && e.message ? e.message : e}`, "warn");
+  }
+  if (host) {
+    const migratedBucketKey = migrateOpenedSessionsClaim(OPENED_SESSIONS_FILE, host, oldBucketKey, nextScope, { now: Date.now(), pid: process.pid });
+    if (migratedBucketKey) {
+      openedSessionsClaimedBucketKey = migratedBucketKey;
+      currentSnapshotScopeId = nextScope;
+      log(`opened sessions: migrated snapshot bucket ${oldBucketKey} -> ${migratedBucketKey}`, "debug");
+    } else {
+      log(`opened sessions: snapshot bucket migration skipped ${oldBucketKey} -> ${nextScope}`, "debug");
+    }
+  }
+}
+
+function scheduleOpenedSessionsWrite(names) {
+  if (!openedSessionsClaimedBucketKey) {
+    log("opened sessions: ignored write before snapshot bucket claim", "debug");
+    return;
+  }
+  const host = getValidHost();
+  if (!host) return;
+  const clean = normalizeOpenedSessionNames(names);
+  if (!openedSessionsWritesEnabled) {
+    log(`opened sessions: ignored pre-restore write of ${clean.length} session(s)`, "debug");
+    return;
+  }
+  openedSessionsPendingNames = clean;
+  if (openedSessionsWriteTimer) return;
+  openedSessionsWriteTimer = setTimeout(() => {
+    openedSessionsWriteTimer = null;
+    const pending = openedSessionsPendingNames || [];
+    openedSessionsPendingNames = null;
+    writeOpenedSessionsNow(host, pending);
+  }, OPENED_SESSIONS_DEBOUNCE_MS);
+}
+
+function flushOpenedSessionsWriteOnDeactivate() {
+  if (!openedSessionsClaimedBucketKey) return;
+  if (!openedSessionsWriteTimer) return;
+  clearTimeout(openedSessionsWriteTimer);
+  openedSessionsWriteTimer = null;
+  const pending = openedSessionsPendingNames || [];
+  openedSessionsPendingNames = null;
+  let host = null;
+  try {
+    host = getValidHost();
+  } catch (e) {
+    log(`opened sessions: host lookup failed during deactivate flush: ${e && e.message ? e.message : e}`, "warn");
+    return;
+  }
+  if (!host) return;
+  writeOpenedSessionsNow(host, pending);
+}
+
+function enableOpenedSessionWrites() {
+  openedSessionsWritesEnabled = true;
+}
+
+async function waitForAvailableSessionList() {
+  for (let attempt = 1; attempt <= OPENED_SESSIONS_RESTORE_ATTEMPTS; attempt += 1) {
+    const result = await listSessionsFromCli(runXpairCli, { log, timeoutMs: 5000 });
+    if (!result.unavailable) return result;
+    if (attempt < OPENED_SESSIONS_RESTORE_ATTEMPTS) {
+      await delay(OPENED_SESSIONS_RESTORE_BACKOFF_MS);
+    }
+  }
+  return null;
+}
+
+async function restoreOpenedSessionsOnActivation() {
+  const host = getValidHost();
+  const claimScope = computeWorkspaceScopeId();
+  currentSnapshotScopeId = claimScope;
+  const claim = host ? claimOpenedSessionsBucket(OPENED_SESSIONS_FILE, host, claimScope, { log, pid: process.pid }) : null;
+  openedSessionsClaimedBucketKey = claim ? claim.bucketKey : null;
+  startOpenedSessionsClaimHeartbeat();
+  const openedNames = claim ? claim.sessions : [];
+  let restored = 0;
+  let sessionListCanSyncSnapshot = false;
+
+  try {
+    if (!host || openedNames.length === 0) {
+      return 0;
+    }
+
+    const list = await waitForAvailableSessionList();
+    if (!list) {
+      log("opened sessions: session list unavailable during restore; keeping snapshot", "debug");
+      return 0;
+    }
+    if (list.sessions.length === 0) {
+      log("opened sessions: live session list empty during restore; keeping snapshot", "debug");
+      return 0;
+    }
+    sessionListCanSyncSnapshot = true;
+
+    const live = new Map(list.sessions.map((entry) => [entry.name, entry.attached]));
+    for (const name of openedNames) {
+      const attached = live.get(name);
+      if (!SESSION_NAME_RE.test(name) || attached === undefined) continue;
+      if (attached !== 0) {
+        log(`opened sessions: skipped restore for ${name}; attached elsewhere (${attached})`, "debug");
+        continue;
+      }
+      try {
+        await vscode.commands.executeCommand("remotepair.terminalSidebar.reattachSession", name);
+        restored += 1;
+      } catch (e) {
+        log(`opened sessions: restore ${name} failed: ${e && e.message ? e.message : e}`, "debug");
+      }
+    }
+    return restored;
+  } finally {
+    enableOpenedSessionWrites();
+    if (sessionListCanSyncSnapshot && restored === 0) {
+      try {
+        await vscode.commands.executeCommand("remotepair.terminalSidebar.syncOpenedSessions");
+      } catch (e) {
+        log(`opened sessions: post-restore sync failed: ${e && e.message ? e.message : e}`, "debug");
+      }
+    }
+  }
+}
+
 /**
- * C1.D3 — Mount-first add-mapping flow for the Browser's "Add Mapping" affordance.
+ * C1.D3 / Win32 P4 — Add-mapping flow for the Browser's "Add Mapping" affordance.
  *   1. Prompt for a HOST folder path (v1 = host-path input box).
- *   2. `xpair mount mount <hostPath>` (SMB default, macOS-native no-kext) → real OS mount.
- *   3. Parse the printed "Mountpoint: <path>" and register a FOLDER_MAP via
- *      `xpair map add <mountpoint> <hostPath>` (writes <mountpoint>::<hostPath>).
- *   4. Reconcile roots so the mountpoint appears as a Browser root without restart.
+ *   2. macOS: `xpair mount mount <hostPath>` -> parse "Mountpoint: <path>".
+ *      Windows: skip mount; derive the UNC root and let `xpair map add` validate it.
+ *   3. Register a FOLDER_MAP via `xpair map add <clientRoot> <hostPath>`.
+ *   4. Reconcile roots so the client root appears as a Browser root without restart.
  */
 async function addRoot() {
   const hostPath = await vscode.window.showInputBox({
@@ -1668,8 +2000,47 @@ async function addRoot() {
   const host = hostPath.trim();
 
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `Xpair: mounting ${host}…`, cancellable: false },
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: process.platform === "win32" ? `Xpair: adding ${host}...` : `Xpair: mounting ${host}…`,
+      cancellable: false,
+    },
     async () => {
+      if (process.platform === "win32") {
+        const uncRoot = onboardingBridge.defaultMountpoint(host);
+        if (!uncRoot) {
+          vscode.window.showErrorMessage("Xpair: configure the Mac host before adding a Windows UNC mapping.");
+          return;
+        }
+        const winMap = await runXpairCli(["map", "add", uncRoot, host, "--method", "mount"], { timeoutMs: 30000 });
+        if (winMap.code !== 0) {
+          log(`addRoot: UNC map add failed (code ${winMap.code}): ${winMap.stderr || winMap.stdout}`);
+          const detail = (winMap.stderr || winMap.stdout || "").trim().split(/\r?\n/).slice(-3).join(" ");
+          vscode.window.showErrorMessage(`Xpair: registering UNC mapping failed. ${detail}`);
+          return;
+        }
+
+        let mappedRoot = uncRoot;
+        for (const line of winMap.stdout.split(/\r?\n/)) {
+          const added = line.match(/^mapping added:\s*(.*?)\s+\u2192/);
+          const existing = line.match(/^already mapped \(or under a mapped root\):\s*(\S.*?)\s*$/);
+          if (added) { mappedRoot = added[1]; break; }
+          if (existing) { mappedRoot = existing[1]; break; }
+        }
+        if (!fs.existsSync(mappedRoot)) {
+          const netUse = mappedRoot.replace(/\//g, "\\");
+          vscode.window.showErrorMessage(`Xpair: UNC path is unreachable: ${mappedRoot}. Run: net use ${netUse} /persistent:yes`);
+          return;
+        }
+
+        reconcileBrowserRoots();
+        try {
+          await vscode.commands.executeCommand("workbench.view.explorer");
+        } catch (_e) {}
+        vscode.window.showInformationMessage(`Xpair: added mapping ${mappedRoot} -> ${host}.`);
+        return;
+      }
+
       // Step 2: mount.
       const mres = await runXpairCli(["mount", "mount", host], { timeoutMs: 180000 });
       if (mres.code !== 0) {
@@ -1740,7 +2111,7 @@ async function showLogs() {
   // Offer to collect logs into a shareable tarball for a bug report.
   const COLLECT = "Collect logs (--collect)";
   const picked = await vscode.window.showInformationMessage(
-    "Xpair logs are in ~/.xpair/host/logs. Collect them into a tarball for a bug report?",
+    "Xpair logs are in ~/.xpair/client/logs. Collect them into a tarball for a bug report?",
     COLLECT
   );
   if (picked === COLLECT) {
@@ -1773,8 +2144,8 @@ function runSetup() {
   // that onboarding-main.cjs's firstFailingGuard() honors (and clears on next open). Path MUST
   // match FORCE_ONBOARDING_SENTINEL in onboarding-main.cjs.
   try {
-    fs.mkdirSync(path.join(os.homedir(), ".xpair/host"), { recursive: true });
-    fs.writeFileSync(path.join(os.homedir(), ".xpair/host", ".force-onboarding"), "");
+    fs.mkdirSync(RP_CLIENT_DIR, { recursive: true });
+    fs.writeFileSync(path.join(RP_CLIENT_DIR, ".force-onboarding"), "");
   } catch (e) {
     const detail = e && e.message ? e.message : String(e);
     log(`runSetup: could not write force-onboarding sentinel: ${detail}`, "warn");
@@ -1808,8 +2179,8 @@ function endSessionReonboard() {
       }
       log("endSessionReonboard: re-onboarding on next launch (sessions persist)");
       try {
-        fs.mkdirSync(path.join(os.homedir(), ".xpair/host"), { recursive: true });
-        fs.writeFileSync(path.join(os.homedir(), ".xpair/host", ".force-onboarding"), "");
+        fs.mkdirSync(RP_CLIENT_DIR, { recursive: true });
+        fs.writeFileSync(path.join(RP_CLIENT_DIR, ".force-onboarding"), "");
       } catch (e) {
         const detail = e && e.message ? e.message : String(e);
         log(`endSessionReonboard: sentinel write failed: ${detail}`, "warn");
@@ -1845,14 +2216,33 @@ function installSentryHooks() {
 function activate(context) {
   log("Xpair activating…");
 
-  syncTelemetryConsentFromSettings();
+  mirrorTelemetryConsentToSetting();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("xpair.telemetry.enabled")) {
-        syncTelemetryConsentFromSettings();
+        syncTelemetryConsentFromSettingChange();
       }
     })
   );
+  const clientServiceDisposables = [];
+  const clientServicesLock = claimClientServicesLock();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      migrateOpenedSessionsSnapshotScope();
+    })
+  );
+  if (clientServicesLock) {
+    clientServiceDisposables.push(clientServicesLock);
+    context.subscriptions.push({
+      dispose: () => {
+        for (let i = clientServiceDisposables.length - 1; i >= 0; i -= 1) {
+          try { clientServiceDisposables[i].dispose(); } catch (_e) {}
+        }
+      },
+    });
+  } else {
+    log("client services lock held by another extension host", "debug");
+  }
 
   // Start the CLIENT→HOST liveness heartbeat (writes now + every 30s; idempotent across
   // activations). Fire-and-forget — must never block or crash activation.
@@ -1872,22 +2262,21 @@ function activate(context) {
   } catch (_e) { /* best-effort */ }
 
   // 0) Telemetry (opt-in, both consent flags default OFF → zero network calls). Two side effects:
-  //    a) app_first_launch{is_fresh_install} — fired ONCE, gated by a globalState stamp.
+  //    a) app_first_launch{is_fresh_install} — fired once from the creator of TELEMETRY_INSTALL_TS.
   //    b) Sentry init for the extension host — a no-op unless CRASH_REPORT_CONSENT + SENTRY_DSN
   //       are both present (init just registers process error hooks that re-check consent on fire).
   try {
     // Stamp the install creation time at FIRST RUN, INDEPENDENT of consent. A bare epoch-ms with
     // no id is not PII, so this is safe pre-consent and gives time_to_wow_ms a real elapsed base
     // (first launch → first session) instead of ~0. Idempotent across activations.
+    telemetry.seedBakedKeys(); // materialize build-baked PostHog/Sentry keys into telemetry.env (idempotent)
     telemetry.firstRunStamp();
-    const FIRST_LAUNCH_KEY = "remotepair.installTimestamp";
-    const stampedAt = context.globalState.get(FIRST_LAUNCH_KEY);
-    const isFresh = !stampedAt;
-    if (isFresh) {
-      context.globalState.update(FIRST_LAUNCH_KEY, Date.now());
+    // Claim-based, not created-based: the stamp can exist from an abandoned onboarding
+    // (window closed before Done) whose event never sent — the claim persists until
+    // a consented launch/completion actually emits it, exactly once per install.
+    if (telemetry.claimFirstLaunchOnce()) {
+      telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: true });
     }
-    // Fire once per install (the stamp guards repeats across activations).
-    telemetry.capture(telemetry.EVENTS.APP_FIRST_LAUNCH, { is_fresh_install: isFresh });
   } catch (e) {
     log(`telemetry first-launch: ${e && e.message ? e.message : e}`, "warn");
   }
@@ -1922,8 +2311,7 @@ function activate(context) {
   //    Shows the configured host NAME + live reachability status instead of the
   //    generic SSH "$(remote)" glyph: $(vm-active) host when reachable, red
   //    background + $(vm-outline) when down, $(sync~spin) while probing, and a
-  //    "Set host" affordance when none is configured. Click still opens the
-  //    endpoint quickpick (remotepair.connectHost).
+  //    "Set host" affordance when none is configured.
   const hostBtn = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100000000);
   // Click = non-destructive re-onboarding (detach/reattach; sessions persist) — the canonical
   // "set up / switch host" action. The button still DISPLAYS host name + reachability below.
@@ -1940,34 +2328,27 @@ function activate(context) {
   context.subscriptions.push(panelToggleBtn);
 
   let hostReachable = null; // null = unknown/probing, true/false = last probe result
-  // Telemetry: classify the real connection path used today (Bonjour LAN discovery does not
-  // exist yet, so a `.ts.net` host = tailscale, otherwise the manual/LAN path). Reported as
-  // host_connected{path}. NOTE: `lan` here means "not a tailnet name", not Bonjour-discovered.
+  // Telemetry: classify the real connection path used today (`.ts.net` = tailscale, otherwise the
+  // manual/local path). Reported as host_connected{path}. NOTE: `lan` here means "not a tailnet name".
   const classifyPath = (host) =>
     /\.ts\.net$/i.test(String(host || "")) ? telemetry.PATHS.TAILSCALE : telemetry.PATHS.LAN;
   const renderHostButton = () => {
     const host = getValidHost();
-    if (localModeActive()) {
-      hostBtn.text = "$(debug-disconnect) 로컬 모드";
-      hostBtn.tooltip = host
-        ? `Xpair: 로컬 모드 — launch/attach use local sessions until ${host} is reachable.`
-        : "Xpair: 로컬 모드 — launch/attach use local sessions.";
-      hostBtn.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-    } else if (!host) {
+    if (!host) {
       hostBtn.text = "$(gear) Set host";
-      hostBtn.tooltip = "Xpair: no host configured — click to set up";
+      hostBtn.tooltip = "Xpair: no host configured — click to set up again.";
       hostBtn.backgroundColor = undefined;
     } else if (hostReachable === true) {
       hostBtn.text = `$(vm-active) ${host}`;
-      hostBtn.tooltip = `Xpair: ${host} — reachable. Click to connect.`;
+      hostBtn.tooltip = `Xpair: ${host} — reachable. Click to set up again.`;
       hostBtn.backgroundColor = undefined;
     } else if (hostReachable === false) {
       hostBtn.text = `$(vm-outline) ${host}`;
-      hostBtn.tooltip = `Xpair: ${host} — unreachable. Click to connect / retry.`;
+      hostBtn.tooltip = `Xpair: ${host} — unreachable. Click to set up again.`;
       hostBtn.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
     } else {
       hostBtn.text = `$(sync~spin) ${host}`;
-      hostBtn.tooltip = `Xpair: ${host} — checking reachability…`;
+      hostBtn.tooltip = `Xpair: ${host} — checking reachability. Click to set up again.`;
       hostBtn.backgroundColor = undefined;
     }
     hostBtn.show();
@@ -1989,6 +2370,26 @@ function activate(context) {
     let ok = false;
     let probeReason = telemetry.REASONS.UNKNOWN;
     try {
+      const gw = onboardingBridge.gatewayMacStatus();
+      if (gw && gw.allowed === false) {
+        hostReachable = false;
+        renderHostButton();
+        if (prev === true) {
+          telemetry.capture(telemetry.EVENTS.HOST_CONNECT_FAILED, {
+            path: classifyPath(host),
+            reason: telemetry.REASONS.HOST_UNREACHABLE,
+          });
+        }
+        log(gatewayMacBlockDetail(gw), "warn");
+        return;
+      }
+    } catch (e) {
+      hostReachable = false;
+      renderHostButton();
+      log(`gateway MAC guard unavailable; auto-connect disabled: ${e && e.message ? e.message : e}`, "warn");
+      return;
+    }
+    try {
       const r = await sshRun(host, "true", { timeoutMs: 6000 });
       ok = r.code === 0;
       if (!ok) probeReason = r.code === -2 ? telemetry.REASONS.TIMEOUT : telemetry.REASONS.HOST_UNREACHABLE;
@@ -1997,13 +2398,10 @@ function activate(context) {
       probeReason = telemetry.REASONS.HOST_UNREACHABLE;
     }
     hostReachable = ok;
-    if (ok && clearLocalModeFlag()) {
-      log(`local mode cleared: ${host} is reachable`);
-    }
     renderHostButton();
     // Edge-trigger telemetry: only on a change to/from reachable (prev !== current).
     // host_connected cardinality = ONCE PER INSTALL (Insight A/B count installs, not IDE
-    // restarts): claimHostConnectedOnce() is a shared client.env stamp honored by BOTH this
+    // restarts): claimHostConnectedOnce() is a shared telemetry.env stamp honored by BOTH this
     // probe and the webview check() emitter, so only the first observed reachability across the
     // whole install emits. host_connect_failed stays edge-triggered (per-failure is intended).
     if (ok && prev !== true) {
@@ -2020,9 +2418,15 @@ function activate(context) {
       });
     }
   };
-  probeHost();
-  const hostProbeTimer = setInterval(probeHost, 20000);
-  context.subscriptions.push({ dispose: () => clearInterval(hostProbeTimer) });
+  if (clientServicesLock) {
+    probeHost();
+    const hostProbeTimer = setInterval(probeHost, 20000);
+    clientServiceDisposables.push({ dispose: () => clearInterval(hostProbeTimer) });
+  } else {
+    // Non-owner host: ONE startup probe so its own status-bar item doesn't sit on
+    // hostReachable=null forever; the owner runs the interval and the poller.
+    probeHost();
+  }
 
   // 4) Commands.
   context.subscriptions.push(
@@ -2030,6 +2434,25 @@ function activate(context) {
     vscode.commands.registerCommand("remotepair.runSetup", () => runSetup()),
     vscode.commands.registerCommand("remotepair.endSessionReonboard", () => endSessionReonboard()),
     vscode.commands.registerCommand("remotepair.connectHost", () => connectHost(panel)),
+    // Recovery path for a fail-closed roaming state (blueprint §6.4): when the user moves to another
+    // network the stored gateway MAC differs and auto-connect stays blocked. confirmGatewayBaseline()
+    // adopts the current network as the new baseline; re-probe so reachability re-enables immediately
+    // without editing client.env. This is the ONLY caller of confirmGatewayBaseline().
+    vscode.commands.registerCommand("remotepair.confirmGatewayBaseline", async () => {
+      const gw = onboardingBridge.confirmGatewayBaseline();
+      if (gw && gw.allowed) {
+        vscode.window.showInformationMessage(
+          `Xpair: adopted the current network as the gateway baseline${gw.current ? ` (${gw.current})` : ""}. Reconnecting…`,
+        );
+        // Owner and non-owner both re-probe: adopting the baseline is exactly the
+        // moment stale unreachable state must refresh, and the non-owner has no interval.
+        await probeHost();
+      } else {
+        vscode.window.showWarningMessage(
+          `Xpair: could not confirm the gateway baseline${gw && gw.err ? ` (${gw.err})` : ""}.`,
+        );
+      }
+    }),
     vscode.commands.registerCommand("remotepair.launchRemoteClaude", () => launchRemoteClaude()),
     vscode.commands.registerCommand("remotepair.remoteDesktop.refresh", () => panel.refresh()),
     vscode.commands.registerCommand("remotepair.sessions.listJson", () =>
@@ -2037,6 +2460,9 @@ function activate(context) {
     ),
     vscode.commands.registerCommand("remotepair.sessions.checkAttach", (name) =>
       checkSessionAvailableFromCli(runXpairCli, name, { log })
+    ),
+    vscode.commands.registerCommand("remotepair.sessions.writeOpened", (names) =>
+      scheduleOpenedSessionsWrite(names)
     ),
     vscode.commands.registerCommand("remotepair.ensureExtensions", () => ensureExtensions(true)),
     vscode.commands.registerCommand("remotepair.setupFileAccess", () => setupFileAccess()),
@@ -2082,17 +2508,25 @@ function activate(context) {
   }
 
   // 4) Host notifications poller.
-  const notifier = new NotificationPoller();
-  notifier.start();
-  context.subscriptions.push({ dispose: () => notifier.stop() });
+  if (clientServicesLock) {
+    const notifier = new NotificationPoller();
+    notifier.start();
+    clientServiceDisposables.push({ dispose: () => notifier.stop() });
+  }
 
-  // 5a) Force the Sessions sidebar open on every activation so it is always the
-  //     active primary-sidebar container — overrides any persisted
-  //     'workbench.sidebar.activeviewletid' that may still point to Browser
-  //     (e.g. after a workspace reload where Explorer was last active).
-  //     Fire-and-forget: do NOT await so the sidebar switch races with the layout
-  //     restore rather than blocking it, minimising any visible flash.
-  vscode.commands.executeCommand("remotepair.terminalSidebar");
+  // 5a) Warm the Sessions sidebar in every window so the frontend reattacher/provider hooks are
+  //     wired. Snapshot restore/write ownership is claimed per opened-session bucket.
+  vscode.commands.executeCommand("remotepair.terminalSidebar")
+    .then(() => {
+      return restoreOpenedSessionsOnActivation();
+    })
+    .then((restored) => {
+      if (restored === 0) {
+        return vscode.commands.executeCommand("workbench.view.explorer");
+      }
+      return undefined;
+    })
+    .then(undefined, (e) => log(`startup session restore / Browser default: ${e && e.message ? e.message : e}`, "warn"));
 
   // 5) Open the RD editor tab on startup (Remote Desktop is this client's
   //    primary surface), then apply the one-time workbench layout. Chained so
@@ -2117,6 +2551,8 @@ function activate(context) {
 function deactivate() {
   // Stop the heartbeat and best-effort remove the host file so the host expires this client promptly.
   try { heartbeat.stopHeartbeat(); } catch { /* never let teardown throw */ }
+  try { stopOpenedSessionsClaimHeartbeat(); } catch { /* never let teardown throw */ }
+  try { flushOpenedSessionsWriteOnDeactivate(); } catch { /* never let teardown throw */ }
 }
 
 module.exports = { activate, deactivate, RemoteDesktopPanel };

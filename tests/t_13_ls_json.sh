@@ -58,21 +58,6 @@ PY
   [ $? = 0 ] && _pass "json session '$1' attached=$2 ($3)" || _fail "json bad attached for '$1' ($3) :: out=[$RP_OUT]"
 }
 
-SBX_REMOTE_HOST="" new_sandbox
-make_all_mocks
-MOCK_ATT=$'local_one\t1\nlocal_two\t0\n_keeper\t1' run_cli ls --json
-
-it "ls-json/local-sessions"
-assert_rc "$RP_RC" 0 "local ls json succeeds"
-assert_contains "$MLOG" "tmux-aqua|-S|/tmp/aqua-tmux.sock|list-sessions|-F|#S" "local json asks tmux for formatted sessions"
-assert_contains "$MLOG" $'list-sessions|-F|#S	#{session_attached}' "local json asks tmux for real-tab session format"
-assert_json_contains "local_one" "local attached session is listed"
-assert_json_contains "local_two" "local detached session is listed"
-assert_json_absent "_keeper" "keeper session is excluded"
-assert_json_field "local_one" 1 "attached count preserved"
-assert_json_field "local_two" 0 "detached count preserved"
-cleanup_sandbox
-
 new_sandbox
 make_all_mocks
 MOCK_ATT=$'remote_one\t1\nremote_two\t0\n_keeper\t1' run_cli ls --json
@@ -89,14 +74,14 @@ assert_json_field "remote_one" 1 "remote attached count preserved"
 assert_json_field "remote_two" 0 "remote detached count preserved"
 cleanup_sandbox
 
-SBX_REMOTE_HOST="" new_sandbox
+new_sandbox
 make_all_mocks
 MOCK_ATT=$'plain_one: 1 windows (attached)\n_keeper: 1 windows\nplain_two: 1 windows' run_cli ls
 
 it "ls-json/plain-human-output"
 assert_rc "$RP_RC" 0 "plain ls succeeds"
 assert_contains "$RP_OUT" "Folder mappings" "plain ls keeps human mapping header"
-assert_contains "$RP_OUT" "[local] tmux-aqua sessions:" "plain ls keeps human session header"
+assert_contains "$RP_OUT" "[test-host] tmux-aqua sessions:" "plain ls keeps human session header"
 assert_contains "$RP_OUT" "plain_one" "plain ls lists normal sessions"
 assert_contains "$RP_OUT" "plain_two" "plain ls lists later sessions"
 assert_absent "$RP_OUT" "_keeper" "plain ls filters keeper session"

@@ -13,8 +13,8 @@ for t in t_*.sh; do
   p="$(printf '%s' "$s" | sed -n 's/.*pass=\([0-9]*\).*/\1/p')"
   f="$(printf '%s' "$s" | sed -n 's/.*fail=\([0-9]*\).*/\1/p')"
   [ -z "$p" ] && p=0; [ -z "$f" ] && f=0
-  # No summary line and rc!=0 means the file itself exited abnormally → count it as 1 fail
-  if [ -z "$s" ] && [ "$rc" != 0 ]; then f=$((f+1)); printf '  (no summary, rc=%s — counted as fail)\n' "$rc"; fi
+  # No summary line means the test file did not call finish; count it as a harness failure even if rc=0.
+  if [ -z "$s" ]; then f=$((f+1)); printf '  (no __SUMMARY__ line, rc=%s — counted as fail)\n' "$rc"; fi
   TOTP=$((TOTP+p)); TOTF=$((TOTF+f))
 done
 printf '\n========================================\n'

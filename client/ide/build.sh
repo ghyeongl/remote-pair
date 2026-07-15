@@ -125,6 +125,15 @@ if [ "$RP_LOCAL_IDENTITY" = "1" ]; then
     "$VENDOR/product.json" > "$_pj_tmp" && mv "$_pj_tmp" "$VENDOR/product.json"
 fi
 
+# 2c) Build the pre-workbench onboarding webview before extension injection. dev-build.sh copies the
+#     extension tree into VSCodium, and onboarding-main.cjs loads onboarding-webview/dist/index.html
+#     from that injected tree. Keep the build output in place so the injected extension has dist/, then
+#     dev-build.sh strips source/node_modules from the copy.
+echo "→ building client onboarding webview"
+( cd "$RP/ext/onboarding-webview" && npm ci && npm run build )
+[ -f "$RP/ext/onboarding-webview/dist/index.html" ] \
+  || { echo "✗ onboarding-webview build produced no dist/index.html" >&2; exit 1; }
+
 # 3) run the Xpair orchestrator (pristine VSCodium dev/build.sh + Xpair identity)
 #    with CWD = recipe root so its relative sources (get_repo.sh, build.sh, …) resolve into vendor.
 ( cd "$VENDOR" && bash "$RP/dev-build.sh" "$@" )
@@ -132,12 +141,16 @@ fi
 # 4) relocate the packaged app out of vendor into a clean dist/. The gulp recipe hardcodes its
 #    output to ../VSCode-<os>-<arch>/ (= inside vendor/vscodium/); move it so vendor stays
 #    artifact-free and the deliverable lives at a predictable client/ide/dist/ path.
+WIN32_OUTPUTS=()
 shopt -s nullglob
 for out in "$VENDOR"/VSCode-darwin-*/ "$VENDOR"/VSCode-linux-*/ "$VENDOR"/VSCode-win32-*/; do
   mkdir -p "$HERE/dist"
   rm -rf "$HERE/dist/$(basename "$out")"
   mv "$out" "$HERE/dist/"
   echo "→ build output: client/ide/dist/$(basename "$out")"
+  case "$(basename "$out")" in
+    VSCode-win32-*) WIN32_OUTPUTS+=( "$HERE/dist/$(basename "$out")" ) ;;
+  esac
 done
 shopt -u nullglob
 
@@ -193,13 +206,74 @@ for app in "$HERE"/dist/VSCode-darwin-*/*.app; do
   for f in install.sh config.sh lib.sh logging.sh; do
     cp "$SHARED/$f" "$_cli/shared/$f"
   done
+  # Bake publishable telemetry keys (PostHog project key / Sentry DSN) from CI secrets into the
+  # extension bundle; telemetry.js seeds them into ~/.xpair/client/telemetry.env at activation.
+  # Publishable client keys => world-readable (0644) so any macOS user of the shared /Applications
+  # app can read it. Absent env (local builds) => no file => telemetry stays inert. Never echoed.
+  # The extension's ext/ source dir IS the packaged extension root (dev-build.sh copies ext/* into
+  # extensions/remotepair/), so telemetry.js lands at .../remotepair/telemetry.js and its
+  # seedBakedKeys() reads __dirname-relative — bake alongside it at the extension root = dirname
+  # of the bundled cli dir.
+  # ponytail: mac client only — the win32 IDE release is a disabled placeholder today; bake into
+  # its extension root too if/when that release path is enabled.
+  _extroot="$(dirname "$_cli")"
+  _tenv="$_extroot/telemetry.build.env"
+  : > "$_tenv"
+  [ -n "${RP_POSTHOG_KEY:-}" ] && printf 'POSTHOG_KEY=%s\n' "$RP_POSTHOG_KEY" >> "$_tenv"
+  [ -n "${RP_SENTRY_DSN:-}" ]  && printf 'SENTRY_DSN=%s\n'  "$RP_SENTRY_DSN"  >> "$_tenv"
+  if [ -s "$_tenv" ]; then chmod 644 "$_tenv"; echo "→ baked telemetry keys into extension bundle (telemetry.build.env)"; else rm -f "$_tenv"; fi
   # The client CLI scripts install.sh installs to ~/.local/bin (+ the Service + hangul-romanize helper).
   for f in xpair xpair-launch xpair-mount xpair-desktop xpair-editor xpair-askpass hangul-romanize; do
     [ -e "$CLI_SRC/$f" ] && cp "$CLI_SRC/$f" "$_cli/client/cli/$f"
   done
+  if [ -f "$CLI_SRC/bin/maplib.sh" ]; then
+    mkdir -p "$_cli/client/cli/bin"
+    cp "$CLI_SRC/bin/maplib.sh" "$_cli/client/cli/bin/maplib.sh"
+  fi
   cp -R "$CLI_SRC/Launch Xpair.workflow" "$_cli/client/cli/Launch Xpair.workflow"
+  # The canonical host uninstaller: install.sh stages it to ~/.xpair/client/share so the
+  # client-side uninstall-host wrapper streams ONE teardown implementation over ssh.
+  mkdir -p "$_cli/host"
+  cp "$HERE/../../host/uninstall-host.sh" "$_cli/host/uninstall-host.sh"
   chmod -R u+w "$_cli"
   echo "→ bundled Xpair client CLI → $(basename "$app")/Contents/Resources/app/extensions/remotepair/cli"
+  # Static mosh + mosh-client (brew-free client attach). build-mosh.sh emits both to ~/.local/bin
+  # (static protobuf 3.21.12, pre-abseil → 0 brew dylib). Bundle into the repo-shaped tree so
+  # `install.sh --role client` copies them to ~/.local/bin exactly like the xpair CLI. Missing/failed
+  # build → skip (attach falls back to ssh); never hard-fail the IDE build.
+  if [ ! -x "$HOME/.local/bin/mosh-client" ] || [ ! -x "$HOME/.local/bin/mosh" ]; then
+    echo "  mosh-client/mosh missing (~/.local/bin) → auto-running ./host/build-mosh.sh ..."
+    ( cd "$HERE/../.." && ./host/build-mosh.sh ) || echo "⚠ build-mosh.sh failed — bundling without mosh (attach falls back to ssh)" >&2
+  fi
+  if [ -x "$HOME/.local/bin/mosh-client" ] && [ -x "$HOME/.local/bin/mosh" ]; then
+    # Validate the helper we're about to REUSE, BEFORE copying it into the bundle: it must be arm64
+    # (the client app is VSCode-darwin-arm64) AND link only system dylibs. A stale x86_64 helper, or
+    # one linked against Intel Homebrew (/usr/local) or arm64 Homebrew (/opt/homebrew), passes `-x` but
+    # would ship a broken/non-brew-free binary.
+    # An invalid helper SKIPS the mosh bundle (attach falls back to ssh) rather than aborting the whole
+    # IDE build — a maintainer's stray/Homebrew-linked ~/.local/bin/mosh-client shouldn't kill the client
+    # app build. Warn loudly so it gets noticed.
+    _mc_src="$HOME/.local/bin/mosh-client"; _mc_ok=1
+    if ! lipo -archs "$_mc_src" 2>/dev/null | tr ' ' '\n' | grep -qx arm64; then
+      echo "⚠ ~/.local/bin/mosh-client is not arm64 ($(lipo -archs "$_mc_src" 2>/dev/null || file -b "$_mc_src")) — SKIPPING mosh bundle (attach uses ssh). Rebuild: rm -f ~/.local/bin/mosh ~/.local/bin/mosh-client && ./host/build-mosh.sh" >&2; _mc_ok=0
+    fi
+    if [ "$_mc_ok" = 1 ]; then
+      _mc_nonsys="$(otool -L "$_mc_src" | tail -n +2 | awk '{print $1}' | grep -vE '^/(usr/lib|System)/' || true)"
+      if [ -n "$_mc_nonsys" ]; then
+        echo "⚠ ~/.local/bin/mosh-client links non-system (Homebrew) dylibs — SKIPPING mosh bundle (attach uses ssh):" >&2
+        printf '  %s\n' "$_mc_nonsys" >&2; _mc_ok=0
+      fi
+    fi
+    if [ "$_mc_ok" = 1 ]; then
+      mkdir -p "$_cli/client/cli/bin"
+      cp "$_mc_src"              "$_cli/client/cli/bin/mosh-client"
+      cp "$HOME/.local/bin/mosh" "$_cli/client/cli/bin/mosh"
+      chmod +x "$_cli/client/cli/bin/mosh-client" "$_cli/client/cli/bin/mosh"
+      echo "→ bundled static mosh + mosh-client (arm64, system-only) → .../remotepair/cli/client/cli/bin/"
+    fi
+  else
+    echo "  (no ~/.local/bin/mosh-client — skipping mosh bundle; client attach uses ssh fallback)"
+  fi
   # Also bundle the SIGNED host app so the onboarding's `xpair install-host` (default scp mode) finds a
   # local .app to ship to the host. The installed CLI (~/.local/bin/xpair) runs install-host with
   # RP_REPO_ROOT=<this cli dir> (config.sh derives REPO_ROOT=<cli>; install.sh persists it to
@@ -240,3 +314,56 @@ if [ "$(uname)" = "Darwin" ]; then
   done
   shopt -u nullglob
 fi
+
+# 6) Windows packaging: bundle the native Xpair CLI (when supplied) and emit a zip artifact.
+#    The mac host payloads above (mosh, XpairHost.app, lipo validation, codesign) do not apply on
+#    Windows. This pass is deliberately gated on packaged VSCode-win32-* outputs moved by THIS
+#    invocation so mac/linux builds never enter it because of stale dist/ directories. CI passes
+#    XPAIR_CLI_EXE from client/cli-rs/target/release/xpair.exe when the Rust CLI exists; branches
+#    before that merge still produce an IDE zip without the bundled CLI.
+for app in "${WIN32_OUTPUTS[@]}"; do
+  _app_name="$(basename "$app")"
+  _resource_bin="$app/resources/app/bin"
+  mkdir -p "$_resource_bin"
+
+  if [ -n "${XPAIR_CLI_EXE:-}" ]; then
+    _xpair_cli_exe="$XPAIR_CLI_EXE"
+    if [ ! -f "$_xpair_cli_exe" ] && command -v cygpath >/dev/null 2>&1; then
+      _xpair_cli_exe="$(cygpath -u "$XPAIR_CLI_EXE" 2>/dev/null || printf '%s' "$XPAIR_CLI_EXE")"
+    fi
+    if [ ! -f "$_xpair_cli_exe" ]; then
+      echo "✗ XPAIR_CLI_EXE points to a missing file: $XPAIR_CLI_EXE" >&2
+      exit 1
+    fi
+    cp "$_xpair_cli_exe" "$_resource_bin/xpair.exe"
+    chmod +x "$_resource_bin/xpair.exe" 2>/dev/null || true
+    echo "→ bundled native Xpair CLI → ${_app_name}/resources/app/bin/xpair.exe"
+  else
+    echo "⚠ XPAIR_CLI_EXE not set — building ${_app_name} without bundled xpair.exe" >&2
+  fi
+
+  _zip="$HERE/dist/Xpair-${_app_name#VSCode-}-${RP_BUILD_VER}.zip"
+  rm -f "$_zip"
+
+  _ps=""
+  for _ps_candidate in powershell.exe powershell pwsh; do
+    if command -v "$_ps_candidate" >/dev/null 2>&1; then
+      _ps="$_ps_candidate"
+      break
+    fi
+  done
+  if [ -z "$_ps" ]; then
+    echo "✗ PowerShell not found — cannot create the win32 IDE zip artifact" >&2
+    exit 1
+  fi
+
+  _zip_src="${app%/}"
+  _zip_dst="$_zip"
+  if command -v cygpath >/dev/null 2>&1; then
+    _zip_src="$(cygpath -w "$_zip_src")"
+    _zip_dst="$(cygpath -w "$_zip_dst")"
+  fi
+  WIN32_ZIP_SRC="$_zip_src" WIN32_ZIP_DST="$_zip_dst" "$_ps" -NoProfile -ExecutionPolicy Bypass -Command \
+    "\$ErrorActionPreference = 'Stop'; Compress-Archive -Path \$env:WIN32_ZIP_SRC -DestinationPath \$env:WIN32_ZIP_DST -Force"
+  echo "→ win32 zip artifact: client/ide/dist/$(basename "$_zip")"
+done

@@ -11,6 +11,7 @@ const patch = fs.readFileSync(
 );
 const cli = fs.readFileSync(path.join(repoRoot, "client/cli/xpair"), "utf8");
 const launcher = fs.readFileSync(path.join(repoRoot, "client/cli/xpair-launch"), "utf8");
+const maplib = fs.readFileSync(path.join(repoRoot, "client/cli/bin/maplib.sh"), "utf8");
 
 let failures = 0;
 function test(name, fn) {
@@ -26,14 +27,15 @@ function test(name, fn) {
 
 test("client paths map to host paths before Browser roots and launches (Q0041)", () => {
   assert.match(
-    cli,
-    /resolve_host\(\)[\s\S]*best_c="" best_h=""[\s\S]*case "\$d" in "\$c"\|"\$c"\/\*\)[\s\S]*"\$\{d#"\$best_c"\}"/,
+    maplib,
+    /map_to_host\(\)[\s\S]*best_c="" best_h=""[\s\S]*case "\$d" in "\$c"\|"\$c"\/\*\)[\s\S]*"\$\{d#"\$best_c"\}"/,
     "CLI must resolve a client path through the longest matching FOLDER_MAPS host prefix",
   );
+  assert.match(maplib, /resolve_host\(\) \{ map_to_host "\$1"; \}/);
   assert.match(
     cli,
-    /cmd_map\(\)[\s\S]*\{"client":%s,"host":%s\}[\s\S]*_json_str "\$\(map_client_of "\$pair"\)"[\s\S]*_json_str "\$\(map_host_of "\$pair"\)"/,
-    "map list --json must expose clean client and host path pairs (JSON-escaped via _json_str) as the mapping SSOT",
+    /cmd_map\(\)[\s\S]*_c="\$\(map_client_of "\$pair"\)"[\s\S]*\{"client":%s,"host":%s,"method":%s\}[\s\S]*_json_str "\$\(map_host_of "\$pair"\)"[\s\S]*_json_str "\$\(map_mode_of "\$_c"\)"/,
+    "map list --json must expose client/host path pairs plus per-mapping method (JSON-escaped via _json_str) as the mapping SSOT",
   );
   assert.match(
     launcher,

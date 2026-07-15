@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal WiX v4/v5 package for the native xpair client.
+
+  POC scope: install the single `xpair.exe` to `C:\Program Files\Xpair` (per-machine)
+  and add that folder to the system PATH. No services, no shortcuts, no signing yet
+  (v1 ships unsigned per the plan). Version is injected from Cargo.toml by CI via
+  `-d Version=<x.y.z>`; the binary is located via the bind path `-b target/release`.
+
+  Build:  wix build packaging/windows/xpair.wxs -b target/release -arch x64 \
+            -d Version=0.1.0 -o xpair-0.1.0-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Xpair (native client)"
+      Manufacturer="x10lab"
+      Version="$(var.Version)"
+      UpgradeCode="7F3A1C2E-9B4D-4E6A-8C1F-2D5E6A7B8C90"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <!-- Block downgrades; allow same-or-newer to replace cleanly. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Xpair is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="Main" Title="Xpair CLI" Level="1">
+      <ComponentGroupRef Id="XpairComponents" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Xpair" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <ComponentGroup Id="XpairComponents" Directory="INSTALLFOLDER">
+      <!-- The CLI binary; KeyPath drives repair/versioning off the file itself. -->
+      <Component Id="XpairExe" Guid="*">
+        <File Id="xpair.exe" Source="xpair.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- Append the install dir to the system PATH; removed on uninstall (Permanent=no). -->
+      <Component Id="XpairPath" Guid="A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D">
+        <Environment
+            Id="UpdatePath"
+            Name="PATH"
+            Value="[INSTALLFOLDER]"
+            Permanent="no"
+            Part="last"
+            Action="set"
+            System="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

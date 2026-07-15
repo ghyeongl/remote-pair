@@ -1,5 +1,5 @@
 cask "xpair-host" do
-  version "0.5.0" # release-pinned (NOT the dev shared/.build-counter, which bumps per build); bump when cutting a release
+  version "0.5.1a1" # release-pinned (NOT the dev shared/.build-counter, which bumps per build); bump when cutting a release
   sha256 :no_check # self-signed (not notarized); quarantine stripped post-install
 
   url "https://github.com/x10lab/xpair/releases/download/v#{version}/XpairHost-#{version}.zip"
@@ -23,9 +23,19 @@ cask "xpair-host" do
                    args: ["-dr", "com.apple.quarantine", "#{appdir}/XpairHost.app"]
   end
 
-  uninstall quit: "com.x10lab.xpair-host"
+  uninstall launchctl: [
+              "com.x10lab.xpair-host",
+              "com.x10lab.xpair-host-watchdog",
+            ],
+            quit: "com.x10lab.xpair-host",
+            trash: [
+              "~/Library/LaunchAgents/com.x10lab.xpair-host.plist",
+              "~/Library/LaunchAgents/com.x10lab.xpair-host-watchdog.plist",
+            ]
 
   zap trash: [
+    "~/Library/LaunchAgents/com.x10lab.xpair-host.plist",
+    "~/Library/LaunchAgents/com.x10lab.xpair-host-watchdog.plist",
     "~/.xpair/host",
     "~/.local/share/xpair",
   ]

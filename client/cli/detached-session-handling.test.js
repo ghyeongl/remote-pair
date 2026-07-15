@@ -32,18 +32,13 @@ function between(source, startNeedle, endNeedle) {
 test("Q0061 launcher preserves detached/orphaned sessions and reattaches instead of creating duplicates", () => {
   assert.match(
     launcher,
-    /list-clients -t "=\$\{base\}_\$\{n\}"[\s\S]*printf '1 reattach'/,
-    "local numbering must skip only live attached clients, then choose existing _1 for reattach",
-  );
-  assert.match(
-    launcher,
-    /tm_local has-session -t "=\$SESS" 2>\/dev\/null && NEED_CREATE=0[\s\S]*if \[ "\$NEED_CREATE" = 1 \]; then[\s\S]*tm_local new-session -d -s "\$SESS"[\s\S]*attach -d -t "=\$SESS"/,
-    "local launch must check for an existing session before new-session and attach -d either way",
+    /while pgrep -f "mosh-client\.\*attach -d -t =\$\{base\}_\$\{n\}/,
+    "remote numbering must skip only live attached client tabs",
   );
   assert.match(
     launcher,
     /if tm has-session -t "=\\\$SESSION" 2>\/dev\/null; then NEED_CREATE=0; fi[\s\S]*if \[ "\\\$NEED_CREATE" = 1 \]; then[\s\S]*tm new-session -d -x \$\{COLS\} -y \$\{LINES\}[\s\S]*attach -d -t "=\$ACTUAL_SESSION"/,
-    "remote launch must preserve an existing host session and use attach -d for takeover",
+    "uniform host launch must preserve an existing host session and use attach -d for takeover",
   );
   assert.match(
     launcher,
@@ -52,7 +47,7 @@ test("Q0061 launcher preserves detached/orphaned sessions and reattaches instead
   );
 
   const attachBody = between(cli, "cmd_attach() {", "\n}\n\ncmd_host() {");
-  assert.match(attachBody, /has-session -t "=\$session"/);
+  assert.match(attachBody, /has-session -t \$\(sh_quote "=\$session"\)/);
   assert.match(attachBody, /attach -d -t "=\$session"/);
   assert.doesNotMatch(
     attachBody,

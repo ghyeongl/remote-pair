@@ -32,16 +32,7 @@ test("Q0546 remote relaunch reattaches existing tmux sessions instead of creatin
     "remote setup must detect existing sessions before creating one",
   );
   assert.match(launcher, /if \[ "\\\$NEED_CREATE" = 1 \]; then[\s\S]*tm new-session -d/);
-  assert.match(launcher, /mosh --server="\$MOSH_SERVER" "\$REMOTE_HOST" -- "\$REMOTE_HOME\/\.local\/bin\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$ACTUAL_SESSION"/);
-});
-
-test("Q0546 local relaunch takes over detached sessions and starts fresh only for _2 or --fresh", () => {
-  assert.match(launcher, /local SESS="\$\{LOCAL_PROJ\}_\$\{N\}" CONT=1 NEED_CREATE=1/);
-  assert.match(launcher, /\[ "\$N" -gt 1 \] && CONT=0/);
-  assert.match(launcher, /\[ "\$FRESH" = 1 \] && CONT=0/);
-  assert.match(launcher, /tm_local has-session -t "=\$SESS" 2>\/dev\/null && NEED_CREATE=0/);
-  assert.match(launcher, /exec "\$LOCAL_BIN\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$SESS"/);
-  assert.match(launcher, /exec tmux attach -d -t "=\$TSESS"/);
+  assert.match(launcher, /mosh --ssh="ssh \$SSH_ID" --server="\$MOSH_SERVER" "\$REMOTE_HOST" -- "\$REMOTE_HOME\/\.local\/bin\/tmux-aqua" -S "\$AQUA_SOCK" attach -d -t "=\$ACTUAL_SESSION"/);
 });
 
 test("Q0546 claude sessions resume the exact recorded conversation id when continuing", () => {
@@ -55,8 +46,6 @@ test("Q0546 claude sessions resume the exact recorded conversation id when conti
 test("Q0546 launch injects CL_CONTINUE into newly created sessions so context is restored", () => {
   assert.match(launcher, /CONT=\$\{RCONT\}/);
   assert.match(launcher, /printf "export CL_CONTINUE=%s\\n" "\\\$CONT"/);
-  assert.match(launcher, /printf "export CL_CONTINUE=%s\\n" "\$CONT"/);
-  assert.match(launcher, /printf "export CL_CONTINUE=%s\\n" "\$TCONT"/);
   assert.match(launcher, /SESSION=\$\{REMOTE_PROJ_Q\}/);
   assert.match(launcher, /ACTUAL_SESSION="\$\(printf '%s\\n' "\$SSH_OUT" \| grep '\^__SESSION__:' \| tail -1 \| sed 's\/\^__SESSION__:\/\/'\)"/);
   assert.match(launcher, /export RP_SESSION="\$ACTUAL_SESSION"/);

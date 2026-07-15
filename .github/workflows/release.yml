@@ -16,6 +16,11 @@ on:
       version:
         description: 'Version without leading v (e.g. 0.4.0)'
         required: true
+      include_win32_ide:
+        description: 'Opt in to win32 IDE release wiring once P5 artifact promotion is accepted'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -106,7 +111,9 @@ jobs:
           echo "Signing identities:"; security find-identity -v -p codesigning | grep "RemotePair Local Signing" || true
 
           # Build + sign + verify (build-host finds the cert by CN in the search list above).
-          ./host/build-host.sh
+          # RP_SENTRY_DSN (repo secret) → build-host.sh injects it into Info.plist as RPSentryDSN.
+          # Empty (e.g. forks without the secret) ⇒ build-host.sh skips injection ⇒ crash reporting Noop.
+          RP_SENTRY_DSN="${{ secrets.RP_SENTRY_DSN }}" ./host/build-host.sh
 
           # Gate: the host asset MUST be signed with the stable cert (not ad-hoc) before we publish.
           codesign -dvv build/XpairHost.app 2>&1 | grep -q "Authority=RemotePair Local Signing" \
@@ -118,7 +125,9 @@ jobs:
           # In CI ($GITHUB_ACTIONS set) build.sh defaults RP_LOCAL_IDENTITY=0 (prod identity, not
           # XpairLocal); set it explicitly for clarity. RP_BUILD_VER pins the version to the tag
           # (skips the shared shared/.build-counter so the release version == the tag, no drift).
-          ( cd client/ide && RP_LOCAL_IDENTITY=0 RP_BUILD_VER="${RP_VERSION}" ./build.sh )
+          # RP_POSTHOG_KEY / RP_SENTRY_DSN (repo secrets) → build.sh bakes them into the bundled CLI;
+          # install.sh materializes into ~/.xpair/client/telemetry.env. Empty (forks) => no bake => telemetry inert.
+          ( cd client/ide && RP_POSTHOG_KEY="${{ secrets.RP_POSTHOG_KEY }}" RP_SENTRY_DSN="${{ secrets.RP_SENTRY_DSN }}" RP_LOCAL_IDENTITY=0 RP_BUILD_VER="${RP_VERSION}" ./build.sh )
           IDE_APP="client/ide/dist/VSCode-darwin-arm64/Xpair.app"
           [ -d "$IDE_APP" ] || { echo "::error::IDE build did not produce $IDE_APP — prod-identity build failed (got XpairLocal?)"; exit 1; }
           codesign -dvv "$IDE_APP" 2>&1 | grep -q "Authority=RemotePair Local Signing" \
@@ -137,4 +146,132 @@ jobs:
           # Alpha builds (version has a letter suffix, e.g. 0.5.0a38) → mark Pre-release and NOT
           # latest, so the host Updater (tracks /releases/latest, excludes pre-releases) ignores them.
           PRE=""; case "$RP_VERSION" in *[a-z]*) PRE="--prerelease --latest=false";; esac
-          gh release create "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --title "v${RP_VERSION}" --generate-notes $PRE
+          # Idempotent publish: a prior windows-msi fallback may have already created this release
+          # (MSI-only, --latest=false). If so, upload the mac assets into it — and for FINAL tags
+          # promote it to latest now that the mac zips are present (closes the fallback's latest gap).
+          # Otherwise create it fresh. Makes reruns-after-a-signing-fix land cleanly.
+          if gh release view "v${RP_VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --clobber
+            # FINAL tags only: promote the (possibly fallback-created --latest=false) release to
+            # latest. Let a failure fail the job — a silently un-promoted latest breaks mac updaters.
+            if [ -z "$PRE" ]; then gh release edit "v${RP_VERSION}" --latest; fi
+          else
+            gh release create "v${RP_VERSION}" "$HOST_ZIP" "$HOST_STABLE" "$IDE_ZIP" "$IDE_STABLE" --title "v${RP_VERSION}" --generate-notes $PRE
+          fi
+
+      - name: Win32 IDE release opt-in placeholder
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_win32_ide }}
+        run: |
+          echo "::notice::win32 IDE release publication is intentionally disabled until artifact promotion from win32-ide-build.yml is accepted."
+
+  windows-msi:
+    name: build and upload Windows MSI
+    # Ordered after the mac release job (which normally creates the GitHub Release) but
+    # NOT gated on its success: a broken mac signing/build must not block the Windows MSI.
+    # if:always() runs this even when `release` fails; the upload step creates the Release
+    # if the mac job didn't (see "Ensure release exists").
+    needs: release
+    # Run even when the mac `release` job fails (decoupled MSI), but NOT after a manual cancel.
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, Windows, X64, Win11]
+    defaults:
+      run:
+        working-directory: client/cli-rs
+        shell: powershell -ExecutionPolicy Bypass -NoProfile -Command "& '{0}'"
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Win11 self-hosted runner is validated by win-probe.yml; workflow_dispatch can rerun
+      # this release path if the runner is temporarily unavailable.
+      - name: Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustc -V
+          cargo -V
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Install WiX
+        # Pin WiX v5 — the last major before v6/v7's Open Source Maintenance Fee (OSMF)
+        # EULA gate (WIX7015), which otherwise fails the build. v5 uses the same v4 schema
+        # namespace as xpair.wxs.
+        run: |
+          dotnet tool update --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Resolve release version
+        id: release_ver
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $v = "${{ github.event.inputs.version }}"
+          } else {
+            $v = "${{ github.ref_name }}"
+            if ($v.StartsWith("v")) { $v = $v.Substring(1) }
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "release version=$v"
+
+      - name: Resolve version from Cargo.toml
+        id: ver
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "cargo version=$v"
+
+      - name: Build .msi
+        # Unsigned per W1; Windows SmartScreen will warn until code signing lands.
+        run: >
+          wix build packaging/windows/xpair.wxs
+          -b target/release
+          -arch x64
+          -d Version=${{ steps.ver.outputs.version }}
+          -o xpair-${{ steps.ver.outputs.version }}-x64.msi
+
+      - name: Upload MSI assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Keep the default Stop here so a Copy-Item failure is fatal (never upload a stale alias).
+          $releaseTag = "v${{ steps.release_ver.outputs.version }}"
+          $ver = "${{ steps.release_ver.outputs.version }}"
+          $versioned = "xpair-${{ steps.ver.outputs.version }}-x64.msi"
+          $stable = "xpair-cli.msi"
+          Copy-Item -Force $versioned $stable
+          # gh writes to stderr on a missing release; Actions defaults ErrorActionPreference=Stop,
+          # which would turn that native stderr into a terminating NativeCommandError before the
+          # $LASTEXITCODE check runs. Continue (scoped to the gh probes below) lets us branch on the
+          # exit code ourselves.
+          $ErrorActionPreference = 'Continue'
+          # Ensure the Release exists. Normally the mac `release` job creates it; if that job failed
+          # (e.g. signing) it won't, so create it here. Poll first: whether the mac job just created
+          # it or not, a fresh release can be briefly invisible (gh#6599), so a single probe would
+          # wrongly fall into the create path on a transient miss.
+          $exists = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            gh release view $releaseTag 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $exists = $true; break }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $exists) {
+            # A fallback release carries ONLY the MSI (no XpairHost.zip/Xpair.zip), so it must
+            # never become /releases/latest — that would break mac Updater.swift / install_host.rs
+            # which pull the mac zips from latest. Always --latest=false; alpha also --prerelease.
+            # ponytail: deliberate tradeoff — the STABLE Windows updater reads /releases/latest
+            # (self_update.rs Channel::Stable), so during a mac-failure window it won't auto-deliver
+            # this MSI. It self-heals: the mac idempotent-publish rerun promotes the real latest.
+            # Alpha is unaffected (its updater scans the release list). Full decouple (stable updater
+            # scans too, mirroring alpha) is tracked in docs/win32-client-roadmap.md.
+            $pre = @("--latest=false")
+            if ($ver -match '[a-zA-Z]') { $pre += "--prerelease" }
+            gh release create $releaseTag --title $releaseTag --notes "Windows CLI MSI ($versioned)." @pre
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
+            # gh#6599: a just-created release can 404 for a few seconds; poll before uploading.
+            for ($i = 0; $i -lt 10; $i++) {
+              gh release view $releaseTag 2>$null | Out-Null
+              if ($LASTEXITCODE -eq 0) { break }
+              Start-Sleep -Seconds 3
+            }
+          }
+          gh release upload $releaseTag $versioned $stable --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed ($LASTEXITCODE)" }

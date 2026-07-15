@@ -2,9 +2,38 @@
 //
 // Menu-bar-only accessory app: no Dock icon + holds a graphic session (the gating condition for AX synthetic input).
 // Responsibilities are split across the individual .swift files: Config / HostManager / ApproveManager / Sessions /
-//   Permissions / Updater / SettingsWindow / AppDelegate.
+//   Permissions / Updater / AppDelegate.
 
 import Cocoa
+
+if CommandLine.arguments.contains("--pairing-self-test") {
+    do {
+        try PairingSecuritySelfTest.run()
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("pairing security self-test failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+if CommandLine.arguments.contains("--sentry-self-test") {
+    exit(SentryBridge.selfTest() ? 0 : 1)
+}
+
+if CommandLine.arguments.contains("--keepawake-self-test") {
+    AppDelegate.keepAwakeSelfTest()
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--capture-control-self-test") {
+    do {
+        try CaptureControlTests.runAll()
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("capture control self-test failed: \(error)\n".utf8))
+        exit(1)
+    }
+}
 
 // §10: install local crash dumps before anything else so even startup crashes are captured.
 // ensureDirs() first — the signal-path handler writes to an fd opened under $LOG_DIR at install.

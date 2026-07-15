@@ -25,10 +25,19 @@ let startCode = Data([0,0,0,1])
 // ---- VT encoder (created once we know dimensions) ----
 final class Enc {
   let fps: Int
-  let bitrate: Int
+  var bitrate: Int
   var session: VTCompressionSession?
   var au = Data()
   init(fps: Int, bitrate: Int) { self.fps = fps; self.bitrate = bitrate }
+  func applyBitrate(_ bps: Int) {
+    bitrate = bps
+    guard let sess = session else { return }
+    VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+    let bytesPerSecond = max(1, bps / 8)
+    let limits = [bytesPerSecond as CFNumber, 1 as CFNumber] as CFArray
+    VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
+    FileHandle.standardError.write("rp-screencap: bitrate \(bps)bps\n".data(using:.utf8)!)
+  }
   func ensure(_ w: Int, _ h: Int) {
     if session != nil { return }
     var s: VTCompressionSession?
@@ -44,12 +53,62 @@ final class Enc {
     VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
     VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (self.fps * 2) as CFNumber)
     VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_AverageBitRate, value: self.bitrate as CFNumber)
+    // DataRateLimits is a HARD 1-second byte cap that constrains frame/IDR bursts. Only
+    // install it when ABR is active; with ABR off (the default) normal RD captures must
+    // keep VideoToolbox's stock behavior (AverageBitRate only). Installing it
+    // unconditionally would change off-by-default capture, contradicting the
+    // zero-behavior-change contract for RP_ABR unset.
+    if abrControlEnabled() {
+      let bytesPerSecond = max(1, self.bitrate / 8)
+      let limits = [bytesPerSecond as CFNumber, 1 as CFNumber] as CFArray
+      VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
+    }
     VTSessionSetProperty(sess, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: self.fps as CFNumber)
     VTCompressionSessionPrepareToEncodeFrames(sess)
     session = sess
   }
 }
 let enc = Enc(fps: argFps, bitrate: argBr)
+// The encoder (Enc.ensure / VTCompressionSessionEncodeFrame) runs on the SCK
+// sample-output queue. applyBitrate touches the same enc.session/enc.bitrate, so
+// it must run on this same queue to avoid a data race with encoding.
+let sckQueue = DispatchQueue(label: "rp.sck")
+
+func startControlReader() -> DispatchSourceRead {
+  let source = DispatchSource.makeReadSource(fileDescriptor: FileHandle.standardInput.fileDescriptor, queue: DispatchQueue(label: "rp.control"))
+  var buffer = ""
+  source.setEventHandler {
+    let data = FileHandle.standardInput.availableData
+    if data.isEmpty {
+      source.cancel()
+      return
+    }
+    if let text = String(data: data, encoding: .utf8) {
+      buffer.append(text)
+      while let nl = buffer.firstIndex(of: "\n") {
+        let line = String(buffer[..<nl]).trimmingCharacters(in: .whitespacesAndNewlines)
+        buffer.removeSubrange(...nl)
+        let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+        if parts.count == 2, parts[0] == "bitrate", let bps = Int(parts[1]), bps > 0 {
+          sckQueue.async { enc.applyBitrate(bps) }
+        }
+      }
+    }
+  }
+  source.resume()
+  return source
+}
+// Only attach the stdin control reader when ABR is active. The host pipes a control
+// stdin ONLY when RP_ABR is enabled (serve_webrtc.rs abr_enabled(): RP_ABR set and
+// != "0"); RP_ABR is inherited from the host's env. In normal non-ABR runs the host
+// does not pipe stdin, so an unconditional reader would attach to whatever stdin the
+// helper inherited (the host's terminal/pipe) and steal its input.
+func abrControlEnabled() -> Bool {
+  guard let v = ProcessInfo.processInfo.environment["RP_ABR"] else { return false }
+  return v != "0"
+}
+let controlReader: DispatchSourceRead? = abrControlEnabled() ? startControlReader() : nil
+_ = controlReader  // retained to keep the dispatch source alive
 
 func appendParamSets(_ fmt: CMFormatDescription) {
   var count = 0
@@ -125,7 +184,7 @@ SCShareableContent.getWithCompletionHandler { content, err in
   cfg.showsCursor = true
   let stream = SCStream(filter: filter, configuration: cfg, delegate: nil)
   do {
-    try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "rp.sck"))
+    try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: sckQueue)
     stream.startCapture { e in
       if let e = e { die("startCapture failed (Screen Recording grant?): \(e)") }
       FileHandle.standardError.write("rp-screencap: SCK \(cfg.width)x\(cfg.height) @\(argFps)fps capturing\n".data(using:.utf8)!)

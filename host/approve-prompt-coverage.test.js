@@ -26,7 +26,7 @@ function test(name, fn) {
 test("Q0103/Q0104/Q0114/Q0129/Q0142 approve handling accounts for permission, Claude Code, Chrome, and 1Password prompts", () => {
   assert.match(
     cli,
-    /cmd_approve\(\)[\s\S]*--for\|--label\|--expect[\s\S]*--type[\s\S]*APPROVE_TRIGGER\.label[\s\S]*APPROVE_TRIGGER\.type[\s\S]*handled \(window-close verified\)/,
+    /cmd_approve\(\)[\s\S]*--for\|--label\|--expect[\s\S]*--type[\s\S]*approve_trigger\.label[\s\S]*approve_trigger\.type[\s\S]*handled \(window-close verified\)/,
     "xpair approve must carry prompt identity/method through the product CLI and report verified handling",
   );
 

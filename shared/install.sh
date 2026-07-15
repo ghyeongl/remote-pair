@@ -6,8 +6,9 @@
 #   client  Machine you sit at. Service "Launch Xpair" + launcher + xpair CLI. (No app/permissions/build needed.)
 #   both    Both roles on one machine (default).
 #
-# All runtime state lives under ~/.xpair/host (self-contained). ~/.claude only receives the
-# Claude harness (approve skill) — Xpair behavior does not depend on ~/.claude being synced.
+# Host runtime stays in ~/.xpair/host; client runtime lives in ~/.xpair/client.
+# ~/.claude only receives the Claude harness (approve skill) — Xpair behavior does not
+# depend on ~/.claude being synced.
 #
 # Sync is OFF by default (opt-in). ~/.claude git backbone is set up only with --with-sync or SYNC_URL set.
 # Every action is recorded in the manifest so uninstall.sh can precisely reverse it.
@@ -35,12 +36,44 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown arg: $1" >&2; exit 2 ;;
 esac; done
 case "$ROLE" in host|client|both) : ;; *) echo "invalid --role: $ROLE (host|client|both)" >&2; exit 2 ;; esac
-MANIFEST="$RP_DIR/.manifest-$ROLE"
+export XPAIR_CONFIG_ROLE="$ROLE"
+. "$HERE/config.sh"
+HOST_MANIFEST="$RP_HOST_DIR/.manifest-host"
+CLIENT_MANIFEST="$RP_CLIENT_DIR/.manifest-client"
 
 say()  { printf '\033[1;36m▸ %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m⚠ %s\033[0m\n' "$*" >&2; }
 is_host()   { [ "$ROLE" = host ] || [ "$ROLE" = both ]; }
 is_client() { [ "$ROLE" = client ] || [ "$ROLE" = both ]; }
+use_host_manifest() { MANIFEST="$HOST_MANIFEST"; BACKUP_DIR="$RP_HOST_DIR/backups"; }
+use_client_manifest() { MANIFEST="$CLIENT_MANIFEST"; BACKUP_DIR="$RP_CLIENT_DIR/backups"; }
+use_shared_manifest() { if is_client; then use_client_manifest; else use_host_manifest; fi; }
+use_host_role_manifest() { if is_host; then use_host_manifest; else use_client_manifest; fi; }
+
+install_unrecorded_file() {
+  local src="$1" dst="$2" mode="${3:-}"
+  mkdir -p "$(dirname "$dst")"
+  if [ -e "$dst" ]; then
+    mkdir -p "$BACKUP_DIR"
+    local bak="$BACKUP_DIR/$(echo "$dst" | sed 's#/#_#g').bak"
+    cp -p "$dst" "$bak"
+  fi
+  cp "$src" "$dst"
+  if [ -n "$mode" ]; then chmod "$mode" "$dst"; fi
+}
+
+manifest_init_used() {
+  if is_host; then use_host_manifest; manifest_init; fi
+  if is_client; then use_client_manifest; manifest_init; fi
+}
+
+revert_manifest_if_present() {
+  local m="$1"
+  [ -f "$m" ] || return 0
+  say "Existing install detected — reverting $(basename "$m") before reinstall"
+  MANIFEST="$m"; manifest_revert >/dev/null 2>&1 || true
+  rm -f "$m"
+}
 
 _write_env() {
   local f="$1"; shift
@@ -49,15 +82,62 @@ _write_env() {
     local k; for k in "$@"; do printf '%s=%q\n' "$k" "${!k}"; done
   } > "$f"
 }
+_role_has_host() { [ "$1" = host ] || [ "$1" = both ]; }
+_role_has_client() { [ "$1" = client ] || [ "$1" = both ]; }
 write_config() {
-  mk_dir "$RP_DIR"; chmod 700 "$RP_DIR"
-  _write_env "$COMMON_ENV" "${COMMON_KEYS[@]}"
-  if is_host;   then _write_env "$HOST_ENV"   "${HOST_KEYS[@]}"; fi
-  if is_client; then _write_env "$CLIENT_ENV" "${CLIENT_KEYS[@]}"; fi
-  # role marker — read as the SSOT when the app Installer refuses host self-install on a client machine.
-  [ -e "$RP_DIR/role" ] || record FILE "$RP_DIR/role"
-  printf '%s\n' "$ROLE" > "$RP_DIR/role"
+  local existing_host_role="" existing_client_role="" effective_role="host" has_host=0 has_client=0 maintain_client_role=0
+  [ -f "$RP_HOST_DIR/role" ] && existing_host_role="$(cat "$RP_HOST_DIR/role" 2>/dev/null || true)"
+  [ -f "$RP_CLIENT_DIR/role" ] && existing_client_role="$(cat "$RP_CLIENT_DIR/role" 2>/dev/null || true)"
+  _role_has_host "$ROLE" && has_host=1
+  _role_has_client "$ROLE" && has_client=1
+  _role_has_host "$existing_host_role" && has_host=1
+  _role_has_client "$existing_host_role" && has_client=1
+  _role_has_host "$existing_client_role" && has_host=1
+  _role_has_client "$existing_client_role" && has_client=1
+  { [ -f "$RP_HOST_DIR/.manifest-host" ] || [ -s "$RP_HOST_DIR/host.env" ]; } && has_host=1
+  { [ -f "$RP_CLIENT_DIR/.manifest-client" ] || [ -s "$RP_CLIENT_DIR/client.env" ]; } && has_client=1
+  if [ "$has_host" = 1 ] && [ "$has_client" = 1 ]; then
+    effective_role=both
+  elif [ "$has_client" = 1 ]; then
+    effective_role=client
+  else
+    effective_role=host
+  fi
+  if is_client || [ -d "$RP_CLIENT_DIR" ] || [ -f "$RP_CLIENT_DIR/role" ] || [ -f "$RP_CLIENT_DIR/client.env" ] || [ -f "$RP_CLIENT_DIR/.manifest-client" ]; then
+    maintain_client_role=1
+  fi
+
+  if is_host; then
+    use_host_manifest; mk_dir "$RP_HOST_DIR"; chmod 700 "$RP_HOST_DIR"
+  fi
+  if is_client; then
+    use_client_manifest; mk_dir "$RP_CLIENT_DIR"; chmod 700 "$RP_CLIENT_DIR"
+  fi
+  # Swift gates host self-install by ~/.xpair/host/role. Even a client-only
+  # install writes it so an app left on disk stays access-only.
+  use_host_role_manifest; mk_dir "$RP_HOST_DIR"; chmod 700 "$RP_HOST_DIR"
+  printf '%s\n' "$effective_role" | write_file "$RP_HOST_DIR/role" 644
+  if is_host; then
+    use_host_manifest; _write_env "$HOST_COMMON_ENV" "${COMMON_KEYS[@]}"
+    use_host_manifest; _write_env "$HOST_ENV" "${HOST_KEYS[@]}"
+  fi
+  if is_client; then
+    use_client_manifest; _write_env "$CLIENT_COMMON_ENV" "${COMMON_KEYS[@]}"
+    use_client_manifest; _write_env "$CLIENT_ENV" "${CLIENT_KEYS[@]}"
+  fi
+  if [ "$maintain_client_role" = 1 ]; then
+    if is_client; then use_client_manifest; else use_host_manifest; fi
+    mk_dir "$RP_CLIENT_DIR"; chmod 700 "$RP_CLIENT_DIR"
+    printf '%s\n' "$effective_role" | write_file "$RP_CLIENT_DIR/role" 644
+  fi
 }
+
+reload_runtime_env_after_migration() {
+  . "$HERE/config.sh"
+}
+
+migrate_layout || warn "layout migration skipped some steps; continuing"
+reload_runtime_env_after_migration
 
 # ── 0. Input ──
 say "Xpair install — role=$ROLE, sync=$([ "$DO_SYNC" = 1 ] && echo on || echo off) (bundle=$BUNDLE_PREFIX, app=$APP_NAME)"
@@ -71,48 +151,88 @@ fi
 # FILE on first install, a revert would delete it and reinstall would reset to defaults → user edits lost.
 # Stash it just before revert and restore it right after, so the "create only if absent" guard below sees the preserved copy.
 _RP_NOTIFY_STASH=""
-if [ -f "$MANIFEST" ]; then
-  say "Existing install detected — reverting before reinstall"
-  if [ -f "$RP_DIR/notify.conf" ]; then _RP_NOTIFY_STASH="$(mktemp)" && cp -p "$RP_DIR/notify.conf" "$_RP_NOTIFY_STASH"; fi
-  manifest_revert >/dev/null 2>&1 || true
-  if [ -n "$_RP_NOTIFY_STASH" ] && [ ! -e "$RP_DIR/notify.conf" ]; then
-    mkdir -p "$RP_DIR" && cp -p "$_RP_NOTIFY_STASH" "$RP_DIR/notify.conf"
-  fi
-  [ -n "$_RP_NOTIFY_STASH" ] && rm -f "$_RP_NOTIFY_STASH"
+if is_host && [ -f "$RP_HOST_DIR/notify.conf" ]; then
+  _RP_NOTIFY_STASH="$(mktemp)" && cp -p "$RP_HOST_DIR/notify.conf" "$_RP_NOTIFY_STASH"
 fi
-manifest_init
+if is_host; then
+  revert_manifest_if_present "$HOST_MANIFEST"
+fi
+if is_client; then
+  revert_manifest_if_present "$CLIENT_MANIFEST"
+fi
+if is_host && [ -f "$RP_HOST_DIR/.manifest-both" ]; then
+  revert_manifest_if_present "$RP_HOST_DIR/.manifest-both"
+fi
+if is_client && [ -f "$RP_CLIENT_DIR/.manifest-both" ]; then
+  revert_manifest_if_present "$RP_CLIENT_DIR/.manifest-both"
+fi
+if [ -n "$_RP_NOTIFY_STASH" ] && [ ! -e "$RP_HOST_DIR/notify.conf" ]; then
+  mkdir -p "$RP_HOST_DIR" && cp -p "$_RP_NOTIFY_STASH" "$RP_HOST_DIR/notify.conf"
+fi
+[ -n "$_RP_NOTIFY_STASH" ] && rm -f "$_RP_NOTIFY_STASH"
+manifest_init_used
 write_config
+use_shared_manifest
 record NOTE "installed role=$ROLE at $(date '+%F %T') on $(hostname -s)"
 
 # ── Common: umbrella CLI → PATH + log directory ──
+use_shared_manifest
 say "xpair CLI → $LOCAL_BIN"
-install_file "$CLIENT_DIR/xpair" "$LOCAL_BIN/xpair" 755
+install_unrecorded_file "$CLIENT_DIR/xpair" "$LOCAL_BIN/xpair" 755
+# maplib.sh rides with the CLI, not with a role: host-only installs run xpair too.
+# UNRECORDED like the CLI itself: on a both-role install, a client-role uninstall
+# preserves $LOCAL_BIN/xpair (host remains) — a client-manifest entry would revert
+# maplib out from under the surviving CLI. It dies with ~/.xpair/client instead.
+if [ -f "$CLIENT_DIR/bin/maplib.sh" ]; then
+  say "map helpers → $RP_CLIENT_DIR/bin/maplib.sh"
+  install_unrecorded_file "$CLIENT_DIR/bin/maplib.sh" "$RP_CLIENT_DIR/bin/maplib.sh" 644
+else
+  warn "client/cli/bin/maplib.sh not found — mapping commands will require self-update"
+fi
 case ":$PATH:" in *":$LOCAL_BIN:"*) : ;; *) warn "$LOCAL_BIN is not in PATH — add it to your shell rc" ;; esac
-mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
+if is_client; then
+  mk_dir "$CLIENT_LOG_DIR"; chmod 700 "$CLIENT_LOG_DIR"
+else
+  mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
+fi
 
 # ── Common: ensure mosh (resilient UDP attach; ssh fallback if absent) ──
-# Split by role. The CLIENT runs `mosh`/`mosh-client` to connect and always has Homebrew (it installed
-# Xpair via cask), so install the mosh package there if missing. The HOST needs only mosh-server, which
-# ships INSIDE XpairHost.app — built static against protobuf 3.21.12 (pre-abseil → 0 Homebrew dylib deps;
-# see host/build-mosh.sh) and symlinked to ~/.local/bin/mosh-server by the app's self-installer. So a
-# host-only install never touches brew. Untracked by the manifest (like cliclick) — uninstall leaves it.
-if command -v mosh >/dev/null 2>&1; then
-  say "mosh present ($(command -v mosh))"
-elif is_client; then
-  BREW="$(command -v brew 2>/dev/null || true)"
-  for _b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -n "$BREW" ] && break; [ -x "$_b" ] && BREW="$_b"; done
-  if [ -n "$BREW" ]; then
-    say "mosh not found — installing via Homebrew (client attach)"
-    "$BREW" install mosh || warn "mosh install failed — manual: brew install mosh (attach falls back to ssh)"
+# CLIENT: ship a self-contained STATIC mosh + mosh-client inside Xpair.app (built against protobuf
+# 3.21.12, pre-abseil → 0 Homebrew dylib deps; see host/build-mosh.sh), bundled into this repo-shaped
+# CLI tree by client/ide/build.sh. Install them to ~/.local/bin the same way the xpair CLI is installed,
+# so a client install is fully brew-free. A dev checkout (no client build → no bundle) falls back to any
+# system mosh on PATH, else to `ssh -t` at attach time. HOST: needs only mosh-server, shipped INSIDE
+# XpairHost.app and symlinked to ~/.local/bin by the app's self-installer — so a host install is brew-free too.
+if command -v mosh >/dev/null 2>&1 && command -v mosh-client >/dev/null 2>&1; then
+  # A COMPLETE mosh (the wrapper AND its mosh-client helper) is already on PATH. RESPECT it — never
+  # overwrite/rm a user-owned binary or symlink (would corrupt e.g. a Homebrew install). Brew-free:
+  # this branch invokes no brew. A mosh wrapper WITHOUT its mosh-client is broken, so we fall through
+  # and install the complete bundled pair. A brew-less client has neither and also falls through.
+  say "mosh present ($(command -v mosh)) — keeping it"
+elif is_client && [ -x "$CLIENT_DIR/bin/mosh" ] && [ -x "$CLIENT_DIR/bin/mosh-client" ]; then
+  # Treat the wrapper + mosh-client as ONE unit. If EITHER $LOCAL_BIN target is a user-owned symlink
+  # (e.g. a Homebrew shim, even off-PATH), keep the user's setup and install NEITHER: installing only
+  # half the pair would mismatch (our client beside their wrapper), and install_file's `cp` would follow
+  # a symlink and overwrite the user's real binary. Only install when BOTH dests are regular-file/absent.
+  if [ -L "$LOCAL_BIN/mosh" ] || [ -L "$LOCAL_BIN/mosh-client" ]; then
+    warn "$LOCAL_BIN/mosh(-client) is a user-owned symlink — keeping the user's mosh, not installing the bundled pair"
   else
-    warn "mosh not found and Homebrew unavailable — attach falls back to ssh. Install Homebrew, then: brew install mosh"
+    say "mosh (bundled static) → $LOCAL_BIN (brew-free client attach)"
+    install_file "$CLIENT_DIR/bin/mosh"        "$LOCAL_BIN/mosh"        755
+    install_file "$CLIENT_DIR/bin/mosh-client" "$LOCAL_BIN/mosh-client" 755
   fi
+elif is_client; then
+  warn "no bundled mosh in this build and none on PATH — attach falls back to ssh (dev checkout)"
 else
   say "mosh-server provided by XpairHost.app bundle (host needs no Homebrew mosh)"
 fi
 
 # ── HOST: app + approve (skill/rules) + watchdog + LaunchAgent ──
 if is_host; then
+  use_host_manifest
+  mk_dir "$LOG_DIR"; chmod 700 "$LOG_DIR"
+  say "[host] shared logger → $RP_DIR/bin/logging.sh"
+  install_file "$HERE/logging.sh" "$RP_DIR/bin/logging.sh" 644
   say "[host] approve rules → $RULES_FILE"
   install_file "$HOST_DIR/rules.txt" "$RULES_FILE"
   if [ -d "$HOST_DIR/skills" ]; then
@@ -150,27 +270,67 @@ if is_host; then
       install_file "$HOST_DIR/hooks/approve-reminder.sh"    "$CLAUDE_DIR/hooks/xpair-approve-reminder.sh" 755
       settings="$CLAUDE_DIR/settings.json"
       approve_cmd='$HOME/.claude/hooks/xpair-approve-reminder.sh'
-      existed=0; [ -f "$settings" ] && existed=1
       say "[host] approve+notify hook → $settings (idempotent merge)"
       python3 "$RP_DIR/bin/manage-claude-hooks.py" add "$settings" "$approve_cmd" "$notify_cmd" || warn "approve/notify hook merge failed — manual check required"
-      # HOOKS rollback must remove both the approve_cmd and notify_cmd identifiers separately → record two lines.
-      if [ "$existed" = 1 ]; then
-        record HOOKS "$settings" "$approve_cmd"   # pre-existing file → roll back via surgical removal (approve)
-        record HOOKS "$settings" "$notify_cmd"    # pre-existing file → roll back via surgical removal (notify)
-      else
-        record FILE "$settings"                   # file we newly created → roll back via full deletion
-      fi
+      # Always roll back via surgical removal — never delete the whole settings.json (the user may add
+      # their own hooks to it). One HOOKS line each for the approve and notify identifiers.
+      record HOOKS "$settings" "$approve_cmd"
+      record HOOKS "$settings" "$notify_cmd"
     else
       warn "python3 not found — skipping approve/notify hook install (skill is installed). After installing the CLT, re-running install.sh --role host is recommended"
     fi
   fi
 
-  # Remove legacy label names — idempotent, best-effort
+  # Reclaim pre-rename cruft (RemotePair→Xpair, a29667b9) — idempotent, best-effort. The com.ghyeong.* labels
+  # and AutoApprove.app are pre-0.4.12 lineage (no collision with standalone remotepair 0.4.12, which is
+  # com.x10lab.remote-pair*), so clean them UNCONDITIONALLY — leaving stale auto-approve automation running
+  # would be a real downside.
   U=$(id -u)
-  for L in com.ghyeong.remote-pair com.ghyeong.remote-pair-watchdog com.ghyeong.auto-approve com.ghyeong.auto-approve-watchdog com.x10lab.remote-pair com.x10lab.remote-pair-watchdog com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
+  for L in com.ghyeong.remote-pair com.ghyeong.remote-pair-watchdog com.ghyeong.auto-approve com.ghyeong.auto-approve-watchdog; do
     launchctl bootout "gui/$U/$L" 2>/dev/null || true
   done
-  rm -rf "$HOME/Applications/RemotePairHost.app" "$HOME/Applications/RemotePair.app" "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
+  rm -rf "$HOME/Applications/AutoApprove.app" 2>/dev/null || true
+  # A deliberately-kept standalone remotepair 0.4.12 (repo ghyeongl/remote-pair) and the OLD pre-rename xpair
+  # self BOTH install to com.x10lab.remote-pair* + RemotePair(Host).app under ~/.remote-pair — the runtime dir
+  # can't tell them apart. Discriminate by CFBundleShortVersionString (read via `defaults`, which handles
+  # binary AND XML): standalone is 0.4.x; the pre-rename old-xpair self is 0.5.0a… (rename landed a29667b9).
+  # PRESERVE any 0.4.x AND any present-but-unreadable app (deleting a kept app is unrecoverable); reclaim only
+  # readable >= 0.5.0a old-xpair bundles. The app may be a cask install in /Applications and may be client-only
+  # (RemotePair.app), so probe both dirs and both bundles. Unified com.x10lab.remote-pair* labels are old-xpair
+  # cruft and are always reclaimed. Preserve only the
+  # com.x10lab.remote-pair-host* labels, and only when a 0.4.x/unreadable HOST bundle remains; a client-only
+  # RemotePair.app owns no host agent and must not suppress stale host cleanup. Remove identified old-xpair
+  # bundles regardless of dir.
+  _rp_keep_host=0; _rp_old=""
+  while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    for _app in RemotePairHost.app RemotePair.app; do
+      [ -d "$_d/$_app" ] || continue
+      _rp_ver="$(defaults read "$_d/$_app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || true)"
+      case "$_rp_ver" in
+        0.[0-4]|0.[0-4].*)
+          if [ "$_app" = RemotePairHost.app ]; then _rp_keep_host=1; fi ;; # standalone 0.4.x → preserve
+        "")
+            if [ "$_app" = RemotePairHost.app ]; then _rp_keep_host=1; fi
+            echo "install: $_d/$_app version unreadable — preserving (won't delete an unidentified app)" >&2 ;;
+        *) _rp_old="$_rp_old$_d/$_app
+" ;;                                     # >= 0.5.0a old-xpair pre-rename → reclaim this bundle
+      esac
+    done
+  done < <(if [ -n "${LEGACY_APP_DIRS:-}" ]; then printf '%s\n' $LEGACY_APP_DIRS; else printf '%s\n' "$HOME/Applications" "/Applications"; fi)
+  for L in com.x10lab.remote-pair com.x10lab.remote-pair-watchdog; do
+    launchctl bootout "gui/$U/$L" 2>/dev/null || true
+  done
+  if [ "$_rp_keep_host" -eq 0 ]; then
+    for L in com.x10lab.remote-pair-host com.x10lab.remote-pair-host-watchdog; do
+      launchctl bootout "gui/$U/$L" 2>/dev/null || true
+    done
+  fi
+  # Remove the identified old-xpair bundles (either dir); best-effort — /Applications may need sudo.
+  # ponytail: newline-delimited; app bundle paths never contain newlines.
+  while IFS= read -r _p; do [ -n "$_p" ] && rm -rf "$_p" 2>/dev/null || true; done <<RPOLD
+$_rp_old
+RPOLD
 
   # watchdog
   install -d "$RP_DIR/bin" 2>/dev/null || mkdir -p "$RP_DIR/bin"
@@ -241,37 +401,44 @@ fi
 
 # ── CLIENT: launcher + Service "Launch Xpair" ──
 if is_client; then
+  use_client_manifest
   say "[client] launcher + Service"
-  install -d "$RP_DIR/bin" 2>/dev/null || mkdir -p "$RP_DIR/bin"
-  [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_DIR/bin/hangul-romanize" 755
-  say "[client] shared logger → $RP_DIR/bin/logging.sh"
-  install_file "$HERE/logging.sh" "$RP_DIR/bin/logging.sh" 644
+  install -d "$RP_CLIENT_DIR/bin" 2>/dev/null || mkdir -p "$RP_CLIENT_DIR/bin"
+  [ -f "$CLIENT_DIR/hangul-romanize" ] && install_file "$CLIENT_DIR/hangul-romanize" "$RP_CLIENT_DIR/bin/hangul-romanize" 755
+  say "[client] shared logger → $RP_CLIENT_DIR/bin/logging.sh"
+  install_file "$HERE/logging.sh" "$RP_CLIENT_DIR/bin/logging.sh" 644
+  if [ -f "$HOST_DIR/uninstall-host.sh" ]; then
+    say "[client] host uninstaller → $RP_CLIENT_DIR/share/uninstall-host.sh"
+    install_file "$HOST_DIR/uninstall-host.sh" "$RP_CLIENT_DIR/share/uninstall-host.sh" 755
+  else
+    say "[client] host uninstaller not in this bundle — skipped (self-update stages it)"
+  fi
   install_file "$CLIENT_DIR/xpair-launch" "$LAUNCHER" 755
 
   # ── Web-tab launchers: editor (M4 code-server) + desktop (M5 Screen Sharing). manifest-recorded → reversible. ──
   if [ -f "$CLIENT_DIR/xpair-editor" ]; then
     say "[client] editor launcher → $LOCAL_BIN/xpair-editor"
-    install_file "$CLIENT_DIR/xpair-editor" "$LOCAL_BIN/xpair-editor" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-editor" "$LOCAL_BIN/xpair-editor" 755
   else
     warn "client/cli/xpair-editor not found — skipping ('xpair editor' unavailable)"
   fi
   if [ -f "$CLIENT_DIR/xpair-desktop" ]; then
     say "[client] desktop launcher → $LOCAL_BIN/xpair-desktop"
-    install_file "$CLIENT_DIR/xpair-desktop" "$LOCAL_BIN/xpair-desktop" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-desktop" "$LOCAL_BIN/xpair-desktop" 755
   else
     warn "client/cli/xpair-desktop not found — skipping ('xpair desktop' unavailable)"
   fi
   # ── Mount-based file access (alternative to Syncthing — see docs/m-mount.md). manifest-recorded → reversible. ──
   if [ -f "$CLIENT_DIR/xpair-mount" ]; then
     say "[client] mount launcher → $LOCAL_BIN/xpair-mount"
-    install_file "$CLIENT_DIR/xpair-mount" "$LOCAL_BIN/xpair-mount" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-mount" "$LOCAL_BIN/xpair-mount" 755
   else
     warn "client/cli/xpair-mount not found — skipping ('xpair mount' unavailable)"
   fi
   # ── askpass helper (sibling launcher used by 'xpair install-host' over SSH). ──
   if [ -f "$CLIENT_DIR/xpair-askpass" ]; then
     say "[client] askpass helper → $LOCAL_BIN/xpair-askpass"
-    install_file "$CLIENT_DIR/xpair-askpass" "$LOCAL_BIN/xpair-askpass" 755
+    install_unrecorded_file "$CLIENT_DIR/xpair-askpass" "$LOCAL_BIN/xpair-askpass" 755
   else
     warn "client/cli/xpair-askpass not found — skipping (SSH askpass prompts unavailable)"
   fi
@@ -295,7 +462,7 @@ if [ "$DO_SYNC" = 1 ]; then
     [ -z "$line" ] && continue; case "$line" in \#*) continue ;; esac
     add_gitignore "$line"
   done < "$HERE/claude.gitignore"
-  "$HERE/sync-setup.sh"
+  MANIFEST="$MANIFEST" "$HERE/sync-setup.sh"
 else
   say "sync off — ~/.claude not synced (enable with --with-sync)"
 fi

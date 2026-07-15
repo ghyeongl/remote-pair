@@ -177,7 +177,7 @@ STALE_PREFIXES 4
 ---
 
 ## 133
-Entry flow: Xpair client IDE Browser/Add Root/Settings/Logs surfaces: `remotepair.openFileBrowser` opens the relabeled Explorer Browser after `FOLDER_MAPS` reconciliation; Browser Add Root runs the mount-first host-folder mapping flow; Settings opens the stock workbench Settings editor; Show Logs reveals `~/.xpair/host/logs` and optionally runs collection in a terminal.
+Entry flow: Xpair client IDE Browser/Add Root/Settings/Logs surfaces: `remotepair.openFileBrowser` opens the relabeled Explorer Browser after `FOLDER_MAPS` reconciliation; Browser Add Root runs the mount-first host-folder mapping flow; Settings opens the stock workbench Settings editor; Show Logs reveals `~/.xpair/client/logs` and optionally runs collection in a terminal.
 
 Files read: `client/ide/remotepair/ext/extension.js`, `client/ide/remotepair/ext/package.json`, `client/ide/remotepair/patches/zz-remotepair-ide-frontend.patch`, `client/cli/xpair`, `client/ide/remotepair/ext/browser-mapping-contract.test.js`, `client/ide/remotepair/ext/add-mapping-q0414.test.js`, `client/ide/remotepair/ext/show-logs-diagnostics-q0380-q0400.test.js`.
 
