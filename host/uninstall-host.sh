@@ -194,7 +194,14 @@ revert_manifest_inline() {
     while IFS="$tab" read -r action a b _; do
       case "$action" in
         FILE)
-          [ -e "$a" ] && run rm -f "$a"
+          # Never delete the user's ~/.claude/settings.json via a FILE row (older bash/Swift
+          # installs recorded one when the file didn't pre-exist) — xpair hooks are removed
+          # surgically by the sweep above, so the file (and any user keys) must survive.
+          if [ "$a" = "$HOME/.claude/settings.json" ]; then
+            :
+          else
+            [ -e "$a" ] && run rm -f "$a"
+          fi
           ;;
         TREE)
           [ -e "$a" ] && run rm -rf "$a"
@@ -349,6 +356,25 @@ for L in \
   run_quiet launchctl bootout "gui/$U/$L"
   run rm -f "$HOME/Library/LaunchAgents/$L.plist"
 done
+
+# Belt-and-suspenders: surgically purge ALL xpair Claude Code hook entries from settings.json,
+# independent of the manifest (catches entries an older/stale manifest never recorded).
+# Prefer a manager shipped WITH this uninstaller (guaranteed to support `sweep`) over the installed
+# one, which on an old host install may predate the subcommand; skip with a note (never orphan silently).
+_xpair_settings="$HOME/.claude/settings.json"
+_xpair_hooks_mgr=""
+if command -v python3 >/dev/null 2>&1; then
+  for _c in "$SCRIPT_DIR/hooks/manage-claude-hooks.py" \
+            "$REPO_ROOT/host/hooks/manage-claude-hooks.py" \
+            "$HOME/.xpair/host/bin/manage-claude-hooks.py"; do
+    if [ -f "$_c" ] && grep -q sweep "$_c"; then _xpair_hooks_mgr="$_c"; break; fi
+  done
+fi
+if [ -f "$_xpair_settings" ] && [ -n "$_xpair_hooks_mgr" ]; then
+  run python3 "$_xpair_hooks_mgr" sweep "$_xpair_settings"
+elif [ -f "$_xpair_settings" ]; then
+  say "  (skip Claude hook sweep: no sweep-capable manage-claude-hooks.py found)"
+fi
 
 UNINSTALLER="$(find_shared_uninstaller || true)"
 if [ -n "$UNINSTALLER" ]; then

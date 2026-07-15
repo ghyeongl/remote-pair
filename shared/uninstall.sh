@@ -125,6 +125,25 @@ case "$ROLE" in
 esac
 found=0
 SELECTED_LOCAL_BINS="$(selected_local_bins)"
+# Belt-and-suspenders: purge xpair hook entries from settings.json independent of the manifest.
+# These hooks are HOST-owned — only sweep when the host role is being uninstalled, so a client-only
+# removal on a co-located machine leaves the still-installed host's hooks intact.
+case "$ROLE" in
+  host|both|all)
+    _xpair_settings="${CLAUDE_DIR:-$HOME/.claude}/settings.json"
+    # Prefer a manager shipped with this uninstaller (guaranteed `sweep`) over a possibly-older installed one.
+    _xpair_hooks_mgr=""
+    if command -v python3 >/dev/null 2>&1; then
+      for _c in "$HERE/../host/hooks/manage-claude-hooks.py" "$RP_HOST_DIR/bin/manage-claude-hooks.py"; do
+        if [ -f "$_c" ] && grep -q sweep "$_c"; then _xpair_hooks_mgr="$_c"; break; fi
+      done
+    fi
+    if [ -f "$_xpair_settings" ] && [ -n "$_xpair_hooks_mgr" ]; then
+      python3 "$_xpair_hooks_mgr" sweep "$_xpair_settings" >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
 for m in "${mans[@]}"; do
   [ -f "$m" ] || continue
   found=1
