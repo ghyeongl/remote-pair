@@ -39,6 +39,12 @@ cat > "$S" <<'JSON'
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/root/.claude/hooks/xpair-approve-reminder.sh PostToolUseFailure" } ] },
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/root/.xpair/host/bin/xpair-notify.sh PostToolUseFailure" } ] },
       { "hooks": [ { "type": "command", "command": "/root/.oh-my-claudecode/hooks/omc.sh" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [
+        { "type": "command", "command": "/root/.xpair/host/bin/xpair-notify.sh PreToolUse" },
+        { "type": "command", "command": "/root/.config/user-custom.sh" }
+      ] }
     ]
   }
 }
@@ -59,6 +65,7 @@ assert_contains "$body" "gstack-stop.sh" "gstack hook preserved"
 assert_contains "$body" "oh-my-claudecode" "omc hook preserved"
 assert_contains "$body" "claude-notify.sh" "claude-notify hook preserved"
 assert_contains "$body" "remote-pair-notify.sh" "legacy remote-pair hook preserved (not matched by xpair markers)"
+assert_contains "$body" "user-custom.sh" "non-xpair hook in a MIXED entry preserved (filter hooks, not the whole entry)"
 
 it "sweep/preserves-other-keys"
 assert_contains "$body" "\"model\"" "top-level model key preserved"
@@ -94,6 +101,23 @@ it "uninstall/invokes-sweep"
 assert_rc "$RP_RC" 0 "host uninstall dry-run rc=0 :: stderr=[$RP_ERR]"
 assert_contains "$RP_OUT" "sweep" "uninstall invokes the hook sweep"
 assert_contains "$RP_OUT" "settings.json" "sweep targets settings.json"
+cleanup_sandbox
+
+# ── Part C: client-only uninstall must NOT sweep host-owned hooks (role gate) ──
+new_sandbox
+mkdir -p "$HOME/.claude/hooks" "$HOME/.xpair/host/bin" "$HOME/.xpair/client"
+printf '{ "hooks": { "Stop": [ { "hooks": [ { "type":"command","command":"%s/.xpair/host/bin/xpair-notify.sh Stop" } ] } ] } }\n' "$HOME" > "$HOME/.claude/settings.json"
+cp "$_REPO_ROOT/host/hooks/manage-claude-hooks.py" "$HOME/.xpair/host/bin/manage-claude-hooks.py"
+printf 'REMOTE_HOST=x\n' > "$HOME/.xpair/client/client.env"
+printf 'client\n' > "$HOME/.xpair/client/role"
+HOME="$HOME" bash "$_REPO_ROOT/shared/uninstall.sh" --role client >/dev/null 2>"$RP_ERRFILE"; crc=$?
+it "role-gate/client-preserves-host-hooks"
+assert_rc "$crc" 0 "client-role uninstall rc=0 :: stderr=[$(cat "$RP_ERRFILE" 2>/dev/null)]"
+if grep -q "xpair-notify.sh" "$HOME/.claude/settings.json"; then
+  _pass "client-only uninstall keeps host-owned hooks (sweep gated to host roles)"
+else
+  _fail "client-only uninstall wrongly swept host-owned hooks"
+fi
 cleanup_sandbox
 
 finish

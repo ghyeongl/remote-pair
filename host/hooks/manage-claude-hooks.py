@@ -109,12 +109,25 @@ def sweep_event(hooks, event):
     arr = hooks.get(event, [])
     if not isinstance(arr, list):
         return False
-    new = [e for e in arr
-           if not any(_is_ours_cmd(h.get("command", "")) for h in e.get("hooks", []))]
-    if len(new) == len(arr):
+    changed = False
+    new_arr = []
+    for e in arr:
+        hlist = e.get("hooks")
+        if isinstance(hlist, list) and any(_is_ours_cmd(h.get("command", "")) for h in hlist):
+            # Mixed entry: drop only our hook objects, keep any non-xpair ones (and the entry).
+            kept = [h for h in hlist if not _is_ours_cmd(h.get("command", ""))]
+            changed = True
+            if kept:
+                e = dict(e)
+                e["hooks"] = kept
+                new_arr.append(e)
+            # else: every hook was ours → drop the whole entry
+        else:
+            new_arr.append(e)
+    if not changed:
         return False
-    if new:
-        hooks[event] = new
+    if new_arr:
+        hooks[event] = new_arr
     else:
         hooks.pop(event, None)
     return True
