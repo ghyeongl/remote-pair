@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v5
 
@@ -46,7 +46,8 @@ jobs:
         run: brew install libevent ncurses utf8proc cliclick cmake
 
       # The screen sidecar (Contents/Helpers/screen, --features webrtc) is built by
-      # build-host.sh via cargo. macos-latest runners have no Rust toolchain, so install it.
+      # build-host.sh via cargo. The self-hosted mac runner may not have a Rust toolchain
+      # provisioned, so install/refresh it here (dtolnay action is idempotent).
       - name: Install Rust toolchain (for screen sidecar)
         uses: dtolnay/rust-toolchain@stable
 
