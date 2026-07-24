@@ -10,7 +10,7 @@ MOCK_HASSESSION=0 MOCK_CLIENTS="" MOCK_SESS_EXISTS="" \
 
 it "harness/local-create"
 assert_rc "$RP_RC" 0 "local 생성 후 exec attach 성공"
-assert_contains "$MLOG" "tmux-aqua|-S|/tmp/aqua-tmux.sock|new-session" "tmux-aqua new-session 호출"
+assert_contains "$MLOG" "tmux-aqua|-S|/tmp/aqua-tmux-rp.sock|new-session" "tmux-aqua new-session 호출"
 assert_contains "$MLOG" "new-session|-d" "detached 세션 생성"
 assert_contains "$MLOG" "attach|-d" "attach -d take-over 호출"
 assert_absent "$MLOG" "ssh|" "로컬 경로에선 ssh 미호출"
