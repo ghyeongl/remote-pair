@@ -188,6 +188,7 @@ _proj_base() {
 LOCAL_PROJ="${LOCAL_HOST}_$(_proj_base "$PROJECT_DIR")"
 LOCAL_PROJ="${LOCAL_PROJ//[.:]/_}"
 choose_engine
+[ "$RP_ENGINE" != claude ] && LOCAL_PROJ="${LOCAL_PROJ}-${RP_ENGINE}"
 
 # ── respawn body (engine + crash restart) ──
 respawn_body() {
@@ -343,7 +344,7 @@ RESPAWN
 }
 
 respawn_body_opencode() {
-  # OpenCode's `--continue` is provider-global; existing sessions keep context through tmux reattach.
+  # OpenCode starts clean; no global --continue. Existing sessions keep context through tmux reattach.
   cat <<'RESPAWN'
 # Reap opencode children when tmux/bash exits — bash has huponexit OFF by default, so without this
 # EXIT trap (process-group kill) the agent CLI could survive as an orphan reparented to init.
@@ -354,14 +355,15 @@ command -v opencode >/dev/null 2>&1 || {
   printf '\n[opencode not found on host — install it with the native OpenCode installer or use --engine claude]\n' >&2
   exit 11
 }
-# Auto-approve via inline config merge (TUI has no skip-permissions flag). Merges with existing config.
-export OPENCODE_CONFIG_CONTENT='{"permission":{"edit":"allow","bash":"allow","webfetch":"allow"}}'
+# Auto-approve via inline config default (TUI has no skip-permissions flag).
+# Only inject when the user hasn't already supplied inline config (preserve their model/plugins).
+# NOTE: use an explicit if — a ${VAR:=json} default would be mangled by brace/quote parsing.
+if [ -z "${OPENCODE_CONFIG_CONTENT:-}" ]; then
+  OPENCODE_CONFIG_CONTENT='{"permission":{"edit":"allow","bash":"allow","webfetch":"allow"}}'
+fi
+export OPENCODE_CONFIG_CONTENT
 while :; do
-  if [ "${CL_CONTINUE:-0}" = 1 ]; then
-    { opencode --continue; } || opencode
-  else
-    opencode
-  fi
+  opencode
   [ $? -eq 0 ] && break
   printf '\n[opencode crashed — restarting in 3s, Ctrl+C to abort]\n'
   sleep 3 || break
@@ -497,6 +499,7 @@ launch_local() {
 HOST_DIR="$(map_to_host "$PROJECT_DIR")"
 REMOTE_PROJ="${REMOTE_HOST}_$(_proj_base "$HOST_DIR")"
 REMOTE_PROJ="${REMOTE_PROJ//[.:]/_}"
+[ "$RP_ENGINE" != claude ] && REMOTE_PROJ="${REMOTE_PROJ}-${RP_ENGINE}"
 
 if [ -n "$TARGET_PREF" ]; then
   TARGET="$TARGET_PREF"
