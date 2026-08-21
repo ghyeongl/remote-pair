@@ -1,0 +1,111 @@
+# pm-memo.md — xpair PM working record
+
+PM working notes, provenance, correction log, and parked material. Not a requirements source — `spec.md` is authoritative, `register.md` is the utterance→requirement trace. This file holds what neither of those is.
+
+Owner: xpair DRI session. Append-only by convention; supersede, never delete.
+
+---
+
+## Provenance — how the record was built (2026-08-21, "migration" run #1)
+
+The three PM files (`register.md`, `spec.md`, this file) were established on 2026-08-21 per a VP Type-1 allocation. Method followed the `/orchestrate migration` procedure (skill not yet built; instructions relayed as directive): investigate **intent** sources only — code is out of scope — and extract append-only, so re-runs converge.
+
+Sources drawn from, in order of signal:
+
+1. **`develop/docs/requirements.md`** — a reconstructed requirements layer, each requirement already cited to raw Q-IDs. This is the spine of `spec.md`.
+2. **`develop/docs/requirements-raw.md`** — 542 human Q/request entries (Q0001–Q0552) extracted from 18 top-level Claude Code sessions in the pre-migration repo `Lang-Swift/remote-pair` (2026-06-02 onward). This is the CEO-utterance corpus behind `register.md`. Kept as a pointer, not copied.
+3. **`recovered-queries-git-windows.md`** (repo root) — 66 user queries recovered from the 2026-06-22 git-migration / mosh-windows session (`Lang-Swift/remote-pair`, session `fcd7ea57…`). Mostly ephemeral git-rescue chatter; a handful carry durable requirements (repo→`xpair/{branch}` layout, codex-as-worker, mosh-over-ssh for tmux rendering, windows-host future).
+4. Secondary intent docs in `develop/docs/` (README, architecture, roadmaps, behavioral-spec/, design-*) — gap-digested for intent not already in requirements.md.
+
+**Not used as intent** (implementation fact, not intent — out of scope by method):
+- Source code anywhere in the tree.
+- `develop/docs/subagents/*.md` — machine-generated scratch (numeric filenames), no human intent.
+- Root `docs/rd-loss-benchmark/` — a nested benchmark clone, not this product's intent.
+
+**Session-store finding.** The repo-root `.session-context.sqlite` holds only this session. The real history is `develop/.session-context.sqlite` (255 turns), but it is 80% `COEXE` (codex-exec, 204) + `COSub`/`CCSub` subagent turns — machine, not human. Only 5 `Claude`-source turns exist and they are trivial ("xpair host 이 컴에 깔려있는거 지우려면 어떻게 해?", "했어"). **The store carries almost no durable human intent** — the Q-corpus above is the real utterance record.
+
+---
+
+## ⚠️ SUPERSEDED BY CEO — 0.5/0.6 abandoned, live base is 0.4.13
+
+**CEO 2026-08-21:** *"원래 0.5 0.6 만드려던 건 폐기했고... 지금은 0.4.13 돌리고 있어. 너도 0.4.13 위에서 돌고있어."* The 0.6.0-reframe headline below (written earlier the same session) is **history, not direction.** Corrected reality:
+
+- **Live base = 0.4.13** (`remote-pair`): tag `v0.4.13`, branch `origin/release/v0.4.13`, installed & running at `~/.remote-pair` (`.version`=0.4.13, pid ~1210). This session runs on it.
+- **0.5.x + 0.6.0 = scrapped.** The `develop` worktree (0.5.x monorepo + 0.6.0 docs, HEAD `v0.5.1a13`+19) is the abandoned line. There's a live-line worktree at `fix/v0413-engine-picker/` (uses legacy `remote-pair-approve-router.sh`).
+- **The corpus (§0–4 of spec) is the live 0.4.x-era intent** — not superseded after all. The whole "0.6.0 supersedes corpus" raise is moot.
+- **#2 approve target flips** to the live **`remote-pair-approve-router.sh`** — same bug confirmed by direct read at lines **145/155** (`dialog_gone()` @117, `for combo` loop @139). The VP-briefed `xpair-approve-router.sh` 143/153 is on the dead 0.5.x line. (The VP's *first* reading of `remote-pair-approve-router.sh` from `Env-X10lab/remote-pair` was actually the closer-to-live legacy file.) The installed running copy differs slightly from the worktree copy — the fix targets the 0.4.13 release line and must be verified against what's installed.
+- **Record placement under review:** these three files were written into the abandoned `develop/docs/`. They likely belong on the live 0.4.13 line (`release/v0.4.13`). Awaiting CEO/VP.
+- **NOT committed** pending the placement/line decision.
+
+---
+
+## Headline finding of migration #1 (SUPERSEDED — see above) — the 0.6.0 reframe supersedes the corpus
+
+The single most important thing the record turned up: **`roadmap-0.6.0.md` (self-declared "engineering SSoT") redefines the product and supersedes several baseline `[사실]` requirements.** This was not in `requirements.md` (the reconstructed corpus, 2026-06); it is a newer decision layer.
+
+- **Identity shift:** Xpair is now framed as *infrastructure that owns and keeps alive an agent-dedicated Mac* — the daemon/machine layer — with editors/terminals/IDEs demoted to **bring-your-own** clients. Litmus: build the daemon, not the workbench.
+- **Workbench FROZEN (D1):** the VSCodium IDE is a "reference client," no new IDE features. This freezes the corpus's M3 "IDE shell UX" investment (Sessions-first, RD-default-surface, Browser SSOT remain as behavior, but are not where effort goes).
+- **System sshd front door (D2):** custom SSH transport dropped; tailnet-only, fail-closed at the packet layer; access ≠ session (`xpair launch` is explicit).
+- **All two-way sync BANNED (D4):** supersedes the corpus's mount-first/Syncthing-fallback (REQ-MAP-4). Host FS is the single source of truth; SMB mount → open-remote-ssh (D5).
+- **GUI broker is the moat (D3):** answers TCC prompts against a whitelist with an audit log. **The approve items #2/#3 live inside this** — approve *is* the broker's ongoing-prompt-handling job.
+
+Recorded in `spec.md` §−1 (governing layer + supersession map) and `register.md` §2. **Raised to VP/CEO** because it reprioritizes the roadmap and, with the ledger empty, reads as the de-facto goal direction the empty O/KR should be set against.
+
+Verified against the primary doc directly (not just the digest) before reshaping the spec.
+
+**Version reality — 0.6.0 is a destination, not shipped (CEO-confirmed base is 0.4, 2026-08-21).** Three layers: **0.4.x legacy `remote-pair`** (last documented 0.4.12; no 0.4.14 found in-tree — CEO's "0.4.14" is the nearest memory of the 0.4 line; the running app on this machine is this legacy line) → **0.5.x current Xpair** (git HEAD `v0.5.1a13`+19, cask `0.5.1a1`, identity host 0.5.0; alpha, no stable) → **0.6.0 forward roadmap** (the reframe; mostly NOT built — 0.5.x still has SMB mount, IDE surfaces, `~/.remote-pair` paths). So the §−1 supersessions are *pending intent*, and the corpus §0–4 ≈ current 0.5.x shipped behavior. Approve items #2/#3 sit on the 0.5.x `xpair-approve-router.sh` (next-gen), while the legacy 0.4 `remote-pair` is what's live — which is exactly why the installed skill still correctly calls `remote-pair`.
+
+## Ledger status
+
+Domain O/KR is **empty — awaiting CEO** (per VP). Consequence: priority in `spec.md` cannot be justified against a KR. The M1–M6 roadmap ordering is inherited from `requirements.md` (dependency-derived), **not** goal-derived, and is subject to reversal once the ledger is set. Flagged so no reader mistakes the roadmap for a settled priority.
+
+---
+
+## Parked material — approve items #2 and #3 (do before starting, referenced by spec REQ-APPROVE-*)
+
+VP Type-1 allocation put two `approve` items on this session, after the record. Both are settled at fact-grade below because the **VP independently verified** the numbers (opened the live tree with `sed`), correcting an earlier relayed report. Materials from peer PM `skill-orchestrate`.
+
+### #2 — approve router success verdict is a false positive
+
+- File: **`develop/host/xpair-approve-router.sh`** (renamed from `remote-pair-approve-router.sh`).
+- `dialog_gone()` at **line 115**; success returns at **lines 143 and 153**.
+- Line 143 sits inside a `for` loop that presses candidate keys `key:A|B` sequentially and does `return 0` at the **first key that closed the window** — it never checks *which* button. **Pressing Decline and closing the dialog is recorded as `success`.**
+- **Falsifier (check first):** if the router already confirms the result by some path other than "dialog closed" (which button, or whether the blocked call actually unblocked), the diagnosis is wrong.
+- Fix *direction* (skill-orchestrate's opinion, not a design directive — method is this session's): verify the outcome, not the closure — which button, or that the blocked call resumed.
+- Evidence it is real (not weak): two sessions blocked on this today. `recordings` escalated it as "false positive, outside my authority"; `landing` misdiagnosed a 1Password approval twice before reaching "config is fine, approve can't handle that window". CEO: *"approve가 지금 동작을 잘 안하는듯"*.
+
+### #3 — approve SKILL.md generation port (lower urgency — before cutover)
+
+- Not a sync. The live-tree skill `develop/host/skills/approve/SKILL.md` is the **next generation** (English, CLI is `xpair`, router `xpair-approve-router.sh`); the installed copy `~/.claude/skills/approve/SKILL.md` is the older generation that `landing` edited last night.
+- Task: port the two pieces of content `landing` added into new-generation wording (this session writes the file; skill-orchestrate provides content only — one tree, one writer).
+- **Urgency lowered:** this machine still runs `remote-pair` (app pid 1210, AX/SR/FDA ✓, heartbeat 1s) while `xpair` is NOT running (heartbeat ~16 days STALE). The installed copy calling `remote-pair` is **currently correct**. Residual risk: when cutover reaches this machine and overwrites the installed copy with the new generation, `landing`'s fix silently disappears. Recurrence-prevention (make one a symlink of the other) belongs at that point.
+
+**Two content pieces to port** (from skill-orchestrate):
+1. **The missing third case — "about to issue a command that will raise an approval dialog."** The skill covers only "dialog already up" and "already failed"; the common third case is arming approve *before* the signing command:
+   ```
+   xpair approve --for "1Password" &   # router starts polling
+   sleep 2
+   ssh homepi1 '...'                    # the signing command comes after
+   ```
+   Key point: `ssh`'s `agent refused operation` dies **immediately**, not waiting for the dialog; a later router click that marks `success` cannot revive a dead call. Order-sensitive.
+2. **Non-blocking fallback and blocking on the same layer causes swaps.** `~/.xpair/bin/approve` (older gen: `~/.remote-pair/bin/approve`) + trigger `touch` only touch the trigger file — they do **not** poll/click. The actual clicking is the blocking `xpair approve`. The doc lists them side by side, so people substitute one for the other.
+3. **(bonus) Locked vault is out of approve's scope.** If `status` shows AX/SR/FDA all ✓ but signing is still refused, the problem is outside RemotePair/Xpair — ask the human to unlock the vault; do **not** retry-loop.
+
+---
+
+## Correction log
+
+| Date | What | Grounds | Author |
+|---|---|---|---|
+| 2026-08-21 | approve router location corrected: `remote-pair-approve-router.sh` 145·155 → `xpair-approve-router.sh` 143·153, `dialog_gone` @115 | VP opened the live tree with `sed` and verified directly, superseding a relayed line-number report | VP (relayed here) |
+| 2026-08-21 | approve item #3 reframed: "13 lines missing from original, sync" → "installed copy is older generation, port two content pieces into new-gen wording" | live-tree skill is next-generation, not missing content | skill-orchestrate → VP |
+| 2026-08-21 | approve #3 urgency lowered; order set 1→2→3 | this machine runs healthy `remote-pair`; xpair host stale 16d, so installed copy currently correct | VP |
+
+---
+
+## Open decisions (surfaced, not settled)
+
+- Crash reports opt-in vs opt-out — CEO asked, undecided (Q0448, Q0449). Do not silently enable analytics.
+- Xpair-era rename matrix — bundle IDs, cask tokens, display names, data folder (`​.xpair` vs `.xpair-ide`) — unsettled (Q0509, Q0514, Q0525, Q0528).
+- Current prerelease number/channel — must be re-checked against the live release before publishing (Q0446, Q0497, Q0527).
+- `0.4.12` screen-sharing removal vs later Remote-Desktop-as-default — must be documented per release line, not collapsed (Q0370, Q0438, Q0474).
