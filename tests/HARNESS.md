@@ -46,7 +46,7 @@ finish                 # 파일 끝. __SUMMARY__ 출력 + 실패 시 비0
 
 ## 관측 팁
 - 로컬/원격 세션명은 `new-session -s <NAME>`(MLOG) 또는 SSH_CAPTURE 의 `SESSION='<NAME>'` 로 확인.
-- 주입된 respawn 임시파일은 MLOG 의 `bash /…/claude-respawn.XXX` 경로를 추출해 `cat` 하면 `CL_CONTINUE=`/`CLAUDE_WARP_RC=` 확인 가능(런처가 삭제 안 함).
+- 주입된 respawn 임시파일은 MLOG 의 `bash /…/claude-respawn.XXX` 경로를 추출해 `cat` 하면 fresh Claude 실행과 `CLAUDE_WARP_RC=`를 확인 가능(런처가 삭제 안 함).
 - 원격 setup 스크립트 검증은 `$(cat "$SSH_CAPTURE")` 사용.
 
 ## 규칙

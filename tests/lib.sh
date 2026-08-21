@@ -100,6 +100,8 @@ case "$last" in
       __NO__)  echo __NO__;  exit 0 ;;
       ssherr)  exit 255 ;;
     esac ;;
+  \$HOME/.local/bin/tmux-aqua*" has-session -t "*)
+    [ "$MOCK_REMOTE_SESS_EXISTS" = 1 ] && exit 0 || exit 1 ;;
   *__SESSION__*|*RESPAWN_B64*) # 원격 setup 스크립트
     printf '%s' "$last" > "$SSH_CAPTURE"
     echo "__SESSION__:${MOCK_REMOTE_SESSION:-rp_remote_1}"; exit 0 ;;

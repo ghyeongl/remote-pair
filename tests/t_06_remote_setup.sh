@@ -63,6 +63,10 @@ _b64="$(grep "^RESPAWN_B64='" "$SSH_CAPTURE" | sed "s/^RESPAWN_B64='//;s/'$//")"
 _decoded="$(printf '%s' "$_b64" | base64 -d 2>/dev/null)"
 assert_contains "$_decoded" "claude --remote-control" "decode 결과에 claude --remote-control 포함"
 
+it "base64-roundtrip/no-automatic-resume"
+assert_absent "$_decoded" " --resume " "새 remote tmux는 stale Claude session을 resume하지 않음"
+assert_absent "$_decoded" "CL_CONTINUE" "remote respawn에 CL_CONTINUE 경로 없음"
+
 it "base64-roundtrip/crash-restart-loop"
 assert_contains "$_decoded" "restarting in 3s" "decode 결과에 crash-restart 루프 포함"
 

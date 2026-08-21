@@ -85,13 +85,26 @@ it "target/prompt-contains-session-annotation"
 assert_contains "$RP_OUT" "session _" "prompt contains 'session _' annotation"
 
 it "target/prompt-contains-state-word"
-# State is one of: new, reattach, fresh, new/reattach
+# State is exactly one of: new, reattach, fresh
 case "$RP_OUT" in
-  *"(new)"*|*"(reattach)"*|*"(fresh)"*|*"(new/reattach)"*)
+  *"(new)"*|*"(reattach)"*|*"(fresh)"*)
     _pass "prompt contains state word" ;;
   *)
     _fail "prompt missing state word :: RP_OUT=[$RP_OUT]" ;;
 esac
+assert_absent "$RP_OUT" "new/reattach" "prompt never emits ambiguous state"
+
+cleanup_sandbox
+
+# A live remote tmux _1 is labeled reattach (not new).
+new_sandbox
+make_all_mocks
+MOCK_REMOTE_SESS_EXISTS=1 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ \
+  run_launcher "$SBX"
+
+it "target/prompt-live-remote-session→reattach"
+assert_contains "$RP_OUT" "(reattach)" "live remote tmux is labeled reattach"
+assert_absent "$RP_OUT" "new/reattach" "live remote state is unambiguous"
 
 cleanup_sandbox
 
