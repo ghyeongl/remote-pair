@@ -85,13 +85,43 @@ it "target/prompt-contains-session-annotation"
 assert_contains "$RP_OUT" "session _" "prompt contains 'session _' annotation"
 
 it "target/prompt-contains-state-word"
-# State is one of: new, reattach, fresh, new/reattach
+# State is exactly one of: new, reattach, fresh
 case "$RP_OUT" in
-  *"(new)"*|*"(reattach)"*|*"(fresh)"*|*"(new/reattach)"*)
+  *"(new)"*|*"(reattach)"*|*"(fresh)"*)
     _pass "prompt contains state word" ;;
   *)
     _fail "prompt missing state word :: RP_OUT=[$RP_OUT]" ;;
 esac
+assert_absent "$RP_OUT" "new/reattach" "prompt never emits ambiguous state"
+
+cleanup_sandbox
+
+# A live remote tmux _1 is labeled reattach (not new).
+new_sandbox
+make_all_mocks
+MOCK_REMOTE_SESS_EXISTS=1 MOCK_REACH=ok MOCK_DIRCHECK=__YES__ \
+  run_launcher "$SBX"
+
+it "target/prompt-live-remote-session→reattach"
+assert_contains "$RP_OUT" "(reattach)" "live remote tmux is labeled reattach"
+assert_absent "$RP_OUT" "new/reattach" "live remote state is unambiguous"
+
+cleanup_sandbox
+
+# Remote state probe shell-quotes fallback basenames containing metacharacters.
+new_sandbox
+make_all_mocks
+META_DIR="$SBX/proj;echo-injected"
+mkdir -p "$META_DIR"
+META_KEY="$(printf '%s' "$(basename "$META_DIR")" | shasum -a 256 | cut -c1-12)"
+mkdir -p "$RP_DIR/session-names"
+printf '%s' 'proj;echo-injected' > "$RP_DIR/session-names/$META_KEY"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ \
+  run_launcher "$META_DIR"
+
+it "target/remote-probe-quotes-session-target"
+PROBE_LINE="$(printf '%s\n' "$MLOG" | grep 'has-session -t' | head -1)"
+assert_contains "$PROBE_LINE" '\;' "remote has-session target escapes shell metacharacters"
 
 cleanup_sandbox
 

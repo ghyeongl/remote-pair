@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # t_05_local_policy — LOCAL 3-way session policy:
-#   _N numbering, attach -d take-over, CL_CONTINUE, plain-tmux fallback.
+#   _N numbering, attach -d take-over, fresh conversation creation, plain-tmux fallback.
 cd "$(dirname "$0")"; . ./lib.sh
 
 # ── helper: extract respawn file path from MLOG ──
@@ -38,7 +38,7 @@ _sess_name() {
 }
 
 # ══════════════════════════════════════════════════════════════
-# Scenario 1: No session exists → new-session + attach -d, CL_CONTINUE=1
+# Scenario 1: No session exists → new-session + attach -d, fresh Claude conversation
 # ══════════════════════════════════════════════════════════════
 SBX_REMOTE_HOST="" new_sandbox
 make_all_mocks
@@ -66,10 +66,13 @@ RFILE1="$(_respawn_path "$MLOG")"
 it "s1/respawn file exists"
 [ -n "$RFILE1" ] && [ -f "$RFILE1" ] && _pass "respawn file found: $RFILE1" || _fail "respawn file not found (path='$RFILE1')"
 
-it "s1/respawn CL_CONTINUE=1"
+it "s1/respawn has no automatic resume"
 RBODY1=""
 [ -n "$RFILE1" ] && [ -f "$RFILE1" ] && RBODY1="$(cat "$RFILE1")"
-assert_contains "$RBODY1" "export CL_CONTINUE=1" "CL_CONTINUE=1 in respawn"
+assert_absent "$RBODY1" "CL_CONTINUE" "no CL_CONTINUE in respawn"
+assert_contains "$RBODY1" "FIRST_LAUNCH=1" "first invocation is explicitly fresh"
+assert_contains "$RBODY1" '--session-id "$OWN_SID"' "fresh launch owns an explicit tmux-scoped ID"
+assert_contains "$RBODY1" 'elif ! claude' "failed crash-resume has a fresh-session fallback"
 
 it "s1/respawn CLAUDE_WARP_RC=session name"
 assert_contains "$RBODY1" "export CLAUDE_WARP_RC=$SESS1" "CLAUDE_WARP_RC set to session name"
@@ -111,7 +114,7 @@ assert_contains "$MLOG" "$SESS2_NAME" "session name appears in attach call"
 cleanup_sandbox
 
 # ══════════════════════════════════════════════════════════════
-# Scenario 3: Client attached to _1 → launcher creates _2 (fresh, CL_CONTINUE=0)
+# Scenario 3: Client attached to _1 → launcher creates _2 fresh
 # ══════════════════════════════════════════════════════════════
 SBX_REMOTE_HOST="" new_sandbox
 make_all_mocks
@@ -134,15 +137,17 @@ assert_contains "$MLOG" "new-session|-d|-s|$SESS3_2" "_2 session created"
 it "s3/attach to _2"
 assert_contains "$MLOG" "attach|-d" "attach -d called"
 
-# Check respawn file for _2 → CL_CONTINUE=0 (fresh)
+# Check respawn file for _2 → no automatic resume (fresh)
 RFILE3="$(_respawn_path "$MLOG")"
 it "s3/respawn file for _2 exists"
 [ -n "$RFILE3" ] && [ -f "$RFILE3" ] && _pass "respawn file found" || _fail "respawn file not found (path='$RFILE3')"
 
-it "s3/CL_CONTINUE=0 for _2 (fresh)"
+it "s3/no automatic resume for _2 (fresh)"
 RBODY3=""
 [ -n "$RFILE3" ] && [ -f "$RFILE3" ] && RBODY3="$(cat "$RFILE3")"
-assert_contains "$RBODY3" "export CL_CONTINUE=0" "CL_CONTINUE=0 for _2"
+assert_absent "$RBODY3" "CL_CONTINUE" "no CL_CONTINUE for _2"
+assert_contains "$RBODY3" "FIRST_LAUNCH=1" "_2 first invocation is fresh"
+assert_contains "$RBODY3" 'OWN_SID="$(uuidgen' "_2 owns an independent conversation ID"
 
 it "s3/CLAUDE_WARP_RC=_2 session name"
 assert_contains "$RBODY3" "export CLAUDE_WARP_RC=$SESS3_2" "CLAUDE_WARP_RC set to _2"
@@ -150,7 +155,7 @@ assert_contains "$RBODY3" "export CLAUDE_WARP_RC=$SESS3_2" "CLAUDE_WARP_RC set t
 cleanup_sandbox
 
 # ══════════════════════════════════════════════════════════════
-# Scenario 4: --fresh flag → CL_CONTINUE=0 even for _1
+# Scenario 4: --fresh flag still creates a fresh _1
 # ══════════════════════════════════════════════════════════════
 SBX_REMOTE_HOST="" new_sandbox
 make_all_mocks
@@ -164,10 +169,11 @@ RFILE4="$(_respawn_path "$MLOG")"
 it "s4/respawn file exists"
 [ -n "$RFILE4" ] && [ -f "$RFILE4" ] && _pass "respawn file found" || _fail "respawn file not found (path='$RFILE4')"
 
-it "s4/--fresh forces CL_CONTINUE=0"
+it "s4/--fresh has no automatic resume"
 RBODY4=""
 [ -n "$RFILE4" ] && [ -f "$RFILE4" ] && RBODY4="$(cat "$RFILE4")"
-assert_contains "$RBODY4" "export CL_CONTINUE=0" "CL_CONTINUE=0 with --fresh"
+assert_absent "$RBODY4" "CL_CONTINUE" "no CL_CONTINUE with --fresh"
+assert_contains "$RBODY4" "FIRST_LAUNCH=1" "--fresh first invocation is fresh"
 
 cleanup_sandbox
 

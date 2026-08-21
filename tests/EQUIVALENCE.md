@@ -10,7 +10,7 @@
 | 2 | `_readable`: ASCII 그대로 / 비ASCII→haiku 번역+캐시 / hangul-romanize 폴백 / 원본 | 동일 (캐시 `$RP_DIR/session-names`) | **SAME** | t_03 |
 | 3 | `_proj_base` = 읽기쉬운이름(≤15) + 경로해시(5) | 동일 | **SAME** | t_03 |
 | 4 | host-prefix 세션명 `<host>_<base>`, `[.:]`→`_` | 동일 | **SAME** | t_03 |
-| 5 | respawn 루프 + `--resume`(기기별 last-session) + `CL_CONTINUE` | 동일 | **SAME** | t_05 s1,s3,s4 |
+| 5 | respawn 루프; 새 tmux는 fresh Claude, live tmux는 reattach | 동일 | **SAME** | t_04, t_05 s1,s2,s3,s4 |
 | 6 | 3-way: 없음→생성+continue / detached→`attach -d` take-over / attached→`_N` fresh | 동일 | **SAME** | t_05 s1-4 |
 | 7 | 일반 tmux 폴백 | 동일 | **SAME** | t_05 s5 |
 | 8 | 타깃 선택 (m1=로컬, 그외 프롬프트 [1]remote/[2]local) | 일반화: REMOTE_HOST 빈값/==local→로컬, `--local/--remote`, `RP_YES`→remote, 프롬프트 | **SAME** (+RP_YES 비대화 추가) | t_04 |
