@@ -128,13 +128,23 @@ dialog_gone(){
 # 키 후보가 현재 창에서 승인 동작임을 확인한다. 창이 닫힌 것만으로는 Decline 과 구분할 수 없으므로,
 # 화면에 표시된 승인 단축키 계약을 확인할 수 없는 키는 성공으로 간주하지 않는다.
 key_targets_approval(){
-  local id="$1" combo="$2" labels=""
+  local id="$1" combo="$2" labels="" declared="" candidate
   case "$id:$combo" in
     "Claude for Chrome:cmd+return"|"Claude for Chrome:command+return")
       labels="Always Allow|Always Approve|항상 허용|항상 승인" ;;
     "Claude for Chrome:return"|"Claude for Chrome:enter")
       labels="Allow Once|Approve Once|Authorize Once|한 번 허용|한 번 승인" ;;
     *)
+      # 사용자 지정 --type 또는 rules.txt 의 key action 자체가 승인 의도를 명시한다.
+      if [ -n "$HINT_TYPE" ]; then
+        declared="${HINT_TYPE#key:}"
+      else
+        declared="$(rule_by_id "$id")"; declared="${declared#*$'\t'}"; declared="${declared#key:}"
+      fi
+      IFS='|' read -ra _DECLARED_KEYS <<< "$declared"
+      for candidate in "${_DECLARED_KEYS[@]}"; do
+        [ "$candidate" = "$combo" ] && { log "[$id] key=$combo 승인 action 명시 확인"; return 0; }
+      done
       log "[$id] key=$combo 승인 동작 매핑 없음"; return 1 ;;
   esac
   [ -n "$("$OCR" "$SHOT" "$labels" 2>/dev/null)" ] || {
