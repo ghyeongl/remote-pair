@@ -34,8 +34,7 @@ Sources drawn from, in order of signal:
 - **0.5.x + 0.6.0 = scrapped.** The `develop` worktree (0.5.x monorepo + 0.6.0 docs, HEAD `v0.5.1a13`+19) is the abandoned line. There's a live-line worktree at `fix/v0413-engine-picker/` (uses legacy `remote-pair-approve-router.sh`).
 - **The corpus (§0–4 of spec) is the live 0.4.x-era intent** — not superseded after all. The whole "0.6.0 supersedes corpus" raise is moot.
 - **#2 approve target flips** to the live **`remote-pair-approve-router.sh`** — same bug confirmed by direct read at lines **145/155** (`dialog_gone()` @117, `for combo` loop @139). The VP-briefed `xpair-approve-router.sh` 143/153 is on the dead 0.5.x line. (The VP's *first* reading of `remote-pair-approve-router.sh` from `Env-X10lab/remote-pair` was actually the closer-to-live legacy file.) The installed running copy differs slightly from the worktree copy — the fix targets the 0.4.13 release line and must be verified against what's installed.
-- **Record placement under review:** these three files were written into the abandoned `develop/docs/`. They likely belong on the live 0.4.13 line (`release/v0.4.13`). Awaiting CEO/VP.
-- **NOT committed** pending the placement/line decision.
+- **Record placement RESOLVED (CEO, 2026-08-21):** the record + the #2 fix target `release/v0.4.13`. The three files (plus the provenance sources `requirements.md`, `requirements-raw.md`, `recovered-queries-git-windows.md`) are placed on the live line via PR #120; #2 is PR #121. Authored in `develop/docs/`, placed on the live line by the Sol-mode Codex implementer (PM authors, implementer places — one writer per checkout).
 
 ---
 
@@ -88,7 +87,7 @@ VP Type-1 allocation put two `approve` items on this session, after the record. 
    ssh homepi1 '...'                    # the signing command comes after
    ```
    Key point: `ssh`'s `agent refused operation` dies **immediately**, not waiting for the dialog; a later router click that marks `success` cannot revive a dead call. Order-sensitive.
-2. **Non-blocking fallback and blocking on the same layer causes swaps.** `~/.xpair/bin/approve` (older gen: `~/.remote-pair/bin/approve`) + trigger `touch` only touch the trigger file — they do **not** poll/click. The actual clicking is the blocking `xpair approve`. The doc lists them side by side, so people substitute one for the other.
+2. **Non-blocking fallback and blocking on the same layer causes swaps.** `~/.xpair/bin/approve` (older gen: `~/.remote-pair/bin/approve`) + trigger `touch` only touch the trigger file — they do **not** poll/click. The actual clicking is the blocking `xpair approve`. The doc lists them side by side, so people substitute one for the other. *(Unverified against the live 0.4.13 install — this is skill-orchestrate's peer report; the reviewer notes no repo file installs `~/.remote-pair/bin/approve` on the 0.4.13 line. Confirm the fallback actually exists before acting on this in #3.)*
 3. **(bonus) Locked vault is out of approve's scope.** If `status` shows AX/SR/FDA all ✓ but signing is still refused, the problem is outside RemotePair/Xpair — ask the human to unlock the vault; do **not** retry-loop.
 
 ---

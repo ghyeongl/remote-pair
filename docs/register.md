@@ -12,11 +12,13 @@ Answers "where did this requirement come from?" Every requirement in `spec.md` t
 
 The backing Q-IDs are recorded inline in `spec.md`'s source column (single source of truth — not duplicated here to avoid drift). This section records only the **grade of trace**, not a second copy of the ids:
 
-- **All REQ rows tagged `[사실]` in `spec.md` §0–2** have ≥1 Q-ID in their source column → each is a genuine utterance trace into `requirements-raw.md`. That citation *is* the register row.
+- **Most REQ rows tagged `[사실]` in `spec.md` §0–2** have ≥1 Q-ID in their source column → each is a genuine utterance trace into `requirements-raw.md`. That citation *is* the register row.
 - **`[봉인]` rows** (REQ-NAME-3, REQ-ROLE-4, REQ-OBS-4, REQ-RD-2, REQ-NET-4) trace to Qs that raised the question without settling it — the Q-IDs mark where the CEO surfaced the open issue.
-- **No `[보간]` or `[파생]` rows exist in the corpus layer** — every corpus requirement is Q-backed. That is why none carries a falsifier: there is nothing interpolated to falsify.
+- **Two `[파생]` exceptions: REQ-APPROVE-4 and REQ-APPROVE-5.** These are NOT Q-corpus-backed — they derive from the CEO's symptom statement + VP direct-read verification + the skill-orchestrate peer report (2026-08-21), and each carries a falsifier. They are the only non-Q-backed rows in §0–2.
 
-To regenerate this trace mechanically: for each REQ in `spec.md`, its source-column Q-IDs → grep `## <Qid>` in `requirements-raw.md`.
+To regenerate this trace mechanically: for each Q-backed REQ in `spec.md`, its source-column Q-IDs → grep `## <Qid>` in `requirements-raw.md`.
+
+**Provenance-file co-location.** This register and `spec.md` reference `requirements.md`, `requirements-raw.md`, and `recovered-queries-git-windows.md` as their sources. Those files are co-located on the live 0.4.13 line (`docs/`) so the trace resolves in a fresh checkout — they were carried over from the abandoned develop line alongside this record.
 
 ## 2. 0.6.0 layer (REQ-06-*) — provenance
 
