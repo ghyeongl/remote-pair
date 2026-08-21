@@ -33,7 +33,7 @@ Sources drawn from, in order of signal:
 - **Live base = 0.4.13** (`remote-pair`): tag `v0.4.13`, branch `origin/release/v0.4.13`, installed & running at `~/.remote-pair` (`.version`=0.4.13, pid ~1210). This session runs on it.
 - **0.5.x + 0.6.0 = scrapped.** The `develop` worktree (0.5.x monorepo + 0.6.0 docs, HEAD `v0.5.1a13`+19) is the abandoned line. There's a live-line worktree at `fix/v0413-engine-picker/` (uses legacy `remote-pair-approve-router.sh`).
 - **The corpus (§0–4 of spec) is the live 0.4.x-era intent** — not superseded after all. The whole "0.6.0 supersedes corpus" raise is moot.
-- **#2 approve target flips** to the live **`remote-pair-approve-router.sh`** — same bug confirmed by direct read at lines **145/155** (`dialog_gone()` @117, `for combo` loop @139). The VP-briefed `xpair-approve-router.sh` 143/153 is on the dead 0.5.x line. (The VP's *first* reading of `remote-pair-approve-router.sh` from `Env-X10lab/remote-pair` was actually the closer-to-live legacy file.) The installed running copy differs slightly from the worktree copy — the fix targets the 0.4.13 release line and must be verified against what's installed.
+- **#2 approve target flips** to the live **`remote-pair-approve-router.sh`** — same bug confirmed by direct read at lines **145/155** (`dialog_gone()` @117, `for combo` loop @139). The VP-briefed `xpair-approve-router.sh` 143/153 is on the dead 0.5.x line. (The VP's *first* reading of `remote-pair-approve-router.sh` from `Env-X10lab/remote-pair` was actually the closer-to-live legacy file.) The installed running copy differs slightly from the worktree copy — the fix targeted the 0.4.13 release line and was verified against tests. **Fixed in PR #121 (merged); deploy to the running `~/.remote-pair` host is a separate step owned by whoever runs it.**
 - **Record placement RESOLVED (CEO, 2026-08-21):** the record + the #2 fix target `release/v0.4.13`. The three files (plus the provenance sources `requirements.md`, `requirements-raw.md`, `recovered-queries-git-windows.md`) are placed on the live line via PR #120; #2 is PR #121. Authored in `develop/docs/`, placed on the live line by the Sol-mode Codex implementer (PM authors, implementer places — one writer per checkout).
 
 ---
@@ -73,24 +73,20 @@ VP Type-1 allocation put two `approve` items on this session, after the record. 
 - Fix *direction* (skill-orchestrate's opinion, not a design directive — method is this session's): verify the outcome, not the closure — which button, or that the blocked call resumed.
 - Evidence it is real (not weak): two sessions blocked on this today. `recordings` escalated it as "false positive, outside my authority"; `landing` misdiagnosed a 1Password approval twice before reaching "config is fine, approve can't handle that window". CEO: *"approve가 지금 동작을 잘 안하는듯"*.
 
-### #3 — approve SKILL.md content port (into the live 0.4.13 skill; follow-up to #2)
+### #3 — approve skill guidance (LARGELY ALREADY DONE on the live line — verify-only residual)
 
-*(Re-framed for the 0.4.13 pivot. The earlier "next generation / develop / xpair" framing was 0.5.x thinking — 0.5/0.6 are abandoned, there is no cutover, and no next-gen file to port INTO. The live remote-pair skill IS the target.)*
+**Premise corrected by direct read of the live 0.4.13 skill (2026-08-21).** skill-orchestrate's report said two content pieces were "missing from the repo skill and need porting." That premise came from the abandoned 0.5.x skill and is **FALSE against the live line.** The live `host/skills/approve/SKILL.md` already carries the substance:
 
-- **Target (live):** `host/skills/approve/SKILL.md` on `release/v0.4.13` — the `remote-pair` generation, and the only approve SKILL.md in a fresh checkout of the live line.
-- **Task:** port the two content pieces `landing` added (which currently live only in the installed copy `~/.claude/skills/approve/SKILL.md`) into the live repo skill `host/skills/approve/SKILL.md`. skill-orchestrate provides the content; this session writes the file (one tree, one writer).
-- **Recurrence prevention:** the installed copy `~/.claude/skills/approve/SKILL.md` and the repo `host/skills/approve/SKILL.md` diverge (landing edited only the installed one). Reconcile so a reinstall can't silently drop landing's fix — make the installed copy a symlink to the repo copy, or ensure the installer syncs. Before acting on content piece (b), verify REQ-APPROVE-5's falsifier: does a `~/.xpair`/`~/.remote-pair` bin/approve fallback actually exist on 0.4.13?
+- **(a) arm-before-dialog ordering** — line 47 already documents the "tool call already failed with Permission denied → non-blocking fallback → immediately (≤7s) retry the failed call" ordering, and that the blocking wrapper times out because the window can't be raised while it waits. That IS the order-sensitivity point.
+- **(b) non-blocking fallback vs blocking** — lines 46–47 already distinguish blocking `remote-pair approve` from the non-blocking fallback (`~/.remote-pair/bin/approve` / `touch /tmp/remote-pair.approve-request`, referenced at lines 29/47). The fallback DOES exist on 0.4.13 (contra the earlier "unverified" note).
+- **CLI is `remote-pair approve`** (skill lines 11–13), never `xpair approve`.
 
-**Two content pieces to port** (from skill-orchestrate):
-1. **The missing third case — "about to issue a command that will raise an approval dialog."** The skill covers only "dialog already up" and "already failed"; the common third case is arming approve *before* the signing command:
-   ```
-   xpair approve --for "1Password" &   # router starts polling
-   sleep 2
-   ssh homepi1 '...'                    # the signing command comes after
-   ```
-   Key point: `ssh`'s `agent refused operation` dies **immediately**, not waiting for the dialog; a later router click that marks `success` cannot revive a dead call. Order-sensitive.
-2. **Non-blocking fallback and blocking on the same layer causes swaps.** `~/.xpair/bin/approve` (older gen: `~/.remote-pair/bin/approve`) + trigger `touch` only touch the trigger file — they do **not** poll/click. The actual clicking is the blocking `xpair approve`. The doc lists them side by side, so people substitute one for the other. *(Unverified against the live 0.4.13 install — this is skill-orchestrate's peer report; the reviewer notes no repo file installs `~/.remote-pair/bin/approve` on the 0.4.13 line. Confirm the fallback actually exists before acting on this in #3.)*
-3. **(bonus) Locked vault is out of approve's scope.** If `status` shows AX/SR/FDA all ✓ but signing is still refused, the problem is outside RemotePair/Xpair — ask the human to unlock the vault; do **not** retry-loop.
+**Residual work (small, verify-first):**
+- Diff the installed copy `~/.claude/skills/approve/SKILL.md` (which `landing` edited) against the live repo skill — is there any wording actually absent from the repo? On this read, the key content is already in the repo skill, so #3 may reduce to nothing.
+- If a real delta exists, add it to the repo skill and set recurrence-prevention (symlink installed↔repo, or installer sync) so a reinstall can't drop it.
+- Confirm (c) below is present in the repo skill.
+
+**(c) Locked vault is out of approve's scope.** If `status` shows AX/SR/FDA ✓ but signing is still refused, the problem is outside RemotePair — ask the human to unlock the vault; do **not** retry-loop. (Verify this line is in the repo skill.)
 
 ---
 
