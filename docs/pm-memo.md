@@ -52,7 +52,7 @@ Recorded in `spec.md` §−1 (governing layer + supersession map) and `register.
 
 Verified against the primary doc directly (not just the digest) before reshaping the spec.
 
-**Version reality — 0.6.0 is a destination, not shipped (CEO-confirmed base is 0.4, 2026-08-21).** Three layers: **0.4.x legacy `remote-pair`** (last documented 0.4.12; no 0.4.14 found in-tree — CEO's "0.4.14" is the nearest memory of the 0.4 line; the running app on this machine is this legacy line) → **0.5.x current Xpair** (git HEAD `v0.5.1a13`+19, cask `0.5.1a1`, identity host 0.5.0; alpha, no stable) → **0.6.0 forward roadmap** (the reframe; mostly NOT built — 0.5.x still has SMB mount, IDE surfaces, `~/.remote-pair` paths). So the §−1 supersessions are *pending intent*, and the corpus §0–4 ≈ current 0.5.x shipped behavior. Approve items #2/#3 sit on the 0.5.x `xpair-approve-router.sh` (next-gen), while the legacy 0.4 `remote-pair` is what's live — which is exactly why the installed skill still correctly calls `remote-pair`.
+**Version reality — 0.6.0 is a destination, not shipped (CEO-confirmed base is 0.4, 2026-08-21).** Three layers: **0.4.x legacy `remote-pair`** (last documented 0.4.12; no 0.4.14 found in-tree — CEO's "0.4.14" is the nearest memory of the 0.4 line; the running app on this machine is this legacy line) → **0.5.x current Xpair** (git HEAD `v0.5.1a13`+19, cask `0.5.1a1`, identity host 0.5.0; alpha, no stable) → **0.6.0 forward roadmap** (the reframe; mostly NOT built — 0.5.x still has SMB mount, IDE surfaces, `~/.remote-pair` paths). *(This "Version reality" block was an intermediate note written when the CEO first said "base is 0.4.14"; it is superseded by the top "SUPERSEDED BY CEO" block — 0.5/0.6 are abandoned and the corpus ≈ the live 0.4.13, not 0.5.x.)* The approve fix (#2) targets the LIVE 0.4 `remote-pair-approve-router.sh` (see REQ-APPROVE-4 and the correction log); the 0.5.x `xpair-approve-router.sh` is the dead line. The installed skill correctly calls `remote-pair` because 0.4.13 is what runs here.
 
 ## Ledger status
 
@@ -97,6 +97,7 @@ VP Type-1 allocation put two `approve` items on this session, after the record. 
 | Date | What | Grounds | Author |
 |---|---|---|---|
 | 2026-08-21 | approve router location corrected: `remote-pair-approve-router.sh` 145·155 → `xpair-approve-router.sh` 143·153, `dialog_gone` @115 | VP opened the live tree with `sed` and verified directly, superseding a relayed line-number report | VP (relayed here) |
+| 2026-08-21 | approve router target **REVERSED to the live line**: `xpair-approve-router.sh` 143·153 (0.5.x, dead) → **`remote-pair-approve-router.sh` 145·155** (`dialog_gone` @117). Fixed in PR #121. | The VP row above pointed at the abandoned 0.5.x tree; the CEO confirming 0.4.13 is the live base moved the target back to the legacy router — this is the final, authoritative target. | PM |
 | 2026-08-21 | approve item #3 reframed: "13 lines missing from original, sync" → "installed copy is older generation, port two content pieces into new-gen wording" | live-tree skill is next-generation, not missing content | skill-orchestrate → VP |
 | 2026-08-21 | approve #3 urgency lowered; order set 1→2→3 | this machine runs healthy `remote-pair`; xpair host stale 16d, so installed copy currently correct | VP |
 
