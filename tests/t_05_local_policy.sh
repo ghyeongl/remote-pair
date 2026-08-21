@@ -70,7 +70,8 @@ it "s1/respawn has no automatic resume"
 RBODY1=""
 [ -n "$RFILE1" ] && [ -f "$RFILE1" ] && RBODY1="$(cat "$RFILE1")"
 assert_absent "$RBODY1" "CL_CONTINUE" "no CL_CONTINUE in respawn"
-assert_absent "$RBODY1" " --resume " "no automatic claude --resume"
+assert_contains "$RBODY1" "FIRST_LAUNCH=1" "first invocation is explicitly fresh"
+assert_contains "$RBODY1" '"$RESTART_SID" != "$BASE_SID"' "crash retry rejects the pre-launch stale pointer"
 
 it "s1/respawn CLAUDE_WARP_RC=session name"
 assert_contains "$RBODY1" "export CLAUDE_WARP_RC=$SESS1" "CLAUDE_WARP_RC set to session name"
@@ -144,7 +145,7 @@ it "s3/no automatic resume for _2 (fresh)"
 RBODY3=""
 [ -n "$RFILE3" ] && [ -f "$RFILE3" ] && RBODY3="$(cat "$RFILE3")"
 assert_absent "$RBODY3" "CL_CONTINUE" "no CL_CONTINUE for _2"
-assert_absent "$RBODY3" " --resume " "no automatic claude --resume for _2"
+assert_contains "$RBODY3" "FIRST_LAUNCH=1" "_2 first invocation is fresh"
 
 it "s3/CLAUDE_WARP_RC=_2 session name"
 assert_contains "$RBODY3" "export CLAUDE_WARP_RC=$SESS3_2" "CLAUDE_WARP_RC set to _2"
@@ -170,7 +171,7 @@ it "s4/--fresh has no automatic resume"
 RBODY4=""
 [ -n "$RFILE4" ] && [ -f "$RFILE4" ] && RBODY4="$(cat "$RFILE4")"
 assert_absent "$RBODY4" "CL_CONTINUE" "no CL_CONTINUE with --fresh"
-assert_absent "$RBODY4" " --resume " "no automatic claude --resume with --fresh"
+assert_contains "$RBODY4" "FIRST_LAUNCH=1" "--fresh first invocation is fresh"
 
 cleanup_sandbox
 

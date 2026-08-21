@@ -140,11 +140,26 @@ trap 'kill -- -$$ 2>/dev/null' EXIT
 RC="${CLAUDE_WARP_RC:-$(hostname -s)_$(basename "$PWD")}"
 RC="${RC//[.:]/_}"
 export CLAUDE_WARP_RC="$RC"
+_LSD="$HOME/.claude/.git/last-session"
+_K="$(printf '%s' "$PWD" | shasum -a 256 | cut -c1-16)"
+BASE_SID=""
+[ -f "$_LSD/$_K" ] && BASE_SID="$(head -1 "$_LSD/$_K" 2>/dev/null)"
+FIRST_LAUNCH=1
 while :; do
   # A newly-created tmux always starts a fresh Claude conversation. Existing live
-  # context survives by reattaching to its tmux and never reaches this respawn body.
-  claude --dangerously-skip-permissions --remote-control "$RC"
-  [ $? -eq 0 ] && break
+  # context survives by reattaching to its tmux and never reaches this initial path.
+  # After a crash inside this now-live tmux, resume only an ID recorded by the fresh
+  # conversation—not the stale pointer that existed before the tmux was created.
+  RESTART_SID=""
+  [ "$FIRST_LAUNCH" = 0 ] && [ -f "$_LSD/$_K" ] && RESTART_SID="$(head -1 "$_LSD/$_K" 2>/dev/null)"
+  if [ -n "$RESTART_SID" ] && [ "$RESTART_SID" != "$BASE_SID" ]; then
+    claude --dangerously-skip-permissions --resume "$RESTART_SID" --remote-control "$RC"
+  else
+    claude --dangerously-skip-permissions --remote-control "$RC"
+  fi
+  CLAUDE_RC=$?
+  FIRST_LAUNCH=0
+  [ "$CLAUDE_RC" -eq 0 ] && break
   printf '\n[claude crashed — restarting in 3s, Ctrl+C to abort]\n'
   sleep 3 || break
 done
