@@ -140,22 +140,20 @@ trap 'kill -- -$$ 2>/dev/null' EXIT
 RC="${CLAUDE_WARP_RC:-$(hostname -s)_$(basename "$PWD")}"
 RC="${RC//[.:]/_}"
 export CLAUDE_WARP_RC="$RC"
-_LSD="$HOME/.claude/.git/last-session"
-_K="$(printf '%s' "$PWD" | shasum -a 256 | cut -c1-16)"
-BASE_SID=""
-[ -f "$_LSD/$_K" ] && BASE_SID="$(head -1 "$_LSD/$_K" 2>/dev/null)"
+OWN_SID="$(uuidgen | tr 'A-Z' 'a-z')"
 FIRST_LAUNCH=1
 while :; do
   # A newly-created tmux always starts a fresh Claude conversation. Existing live
   # context survives by reattaching to its tmux and never reaches this initial path.
-  # After a crash inside this now-live tmux, resume only an ID recorded by the fresh
-  # conversation—not the stale pointer that existed before the tmux was created.
-  RESTART_SID=""
-  [ "$FIRST_LAUNCH" = 0 ] && [ -f "$_LSD/$_K" ] && RESTART_SID="$(head -1 "$_LSD/$_K" 2>/dev/null)"
-  if [ -n "$RESTART_SID" ] && [ "$RESTART_SID" != "$BASE_SID" ]; then
-    claude --dangerously-skip-permissions --resume "$RESTART_SID" --remote-control "$RC"
+  # Give this tmux its own conversation ID so concurrent _N sessions never share
+  # the cwd-wide last-session pointer. A failed crash-resume falls back to a new ID.
+  if [ "$FIRST_LAUNCH" = 1 ]; then
+    claude --dangerously-skip-permissions --session-id "$OWN_SID" --remote-control "$RC"
+  elif ! claude --dangerously-skip-permissions --resume "$OWN_SID" --remote-control "$RC"; then
+    OWN_SID="$(uuidgen | tr 'A-Z' 'a-z')"
+    claude --dangerously-skip-permissions --session-id "$OWN_SID" --remote-control "$RC"
   else
-    claude --dangerously-skip-permissions --remote-control "$RC"
+    :
   fi
   CLAUDE_RC=$?
   FIRST_LAUNCH=0
@@ -200,14 +198,15 @@ _local_next_n() {
 # _remote_next_n REMOTE_PROJ_BASE — echo "N state" (best-effort)
 # state: "new" | "reattach" | "fresh"
 _remote_next_n() {
-  local base="$1" n=1
+  local base="$1" n=1 target
   while pgrep -f "mosh-client.*attach -d -t =${base}_${n}( |\$)" >/dev/null 2>&1; do
     n=$((n+1))
   done
   if [ "$n" -gt 1 ]; then
     printf '%s fresh' "$n"
-  elif ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
-      "${REMOTE_BIN}/tmux-aqua -S ${AQUA_SOCK} has-session -t =${base}_1" >/dev/null 2>&1; then
+  elif printf -v target '%q' "=${base}_1" && \
+      ssh -n -o BatchMode=yes -o ConnectTimeout=3 "$REMOTE_HOST" \
+      "${REMOTE_BIN}/tmux-aqua -S ${AQUA_SOCK} has-session -t $target" >/dev/null 2>&1; then
     printf '1 reattach'
   else
     printf '1 new'

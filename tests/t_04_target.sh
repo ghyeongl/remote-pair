@@ -108,6 +108,23 @@ assert_absent "$RP_OUT" "new/reattach" "live remote state is unambiguous"
 
 cleanup_sandbox
 
+# Remote state probe shell-quotes fallback basenames containing metacharacters.
+new_sandbox
+make_all_mocks
+META_DIR="$SBX/proj;echo-injected"
+mkdir -p "$META_DIR"
+META_KEY="$(printf '%s' "$(basename "$META_DIR")" | shasum -a 256 | cut -c1-12)"
+mkdir -p "$RP_DIR/session-names"
+printf '%s' 'proj;echo-injected' > "$RP_DIR/session-names/$META_KEY"
+MOCK_REACH=ok MOCK_DIRCHECK=__YES__ \
+  run_launcher "$META_DIR"
+
+it "target/remote-probe-quotes-session-target"
+PROBE_LINE="$(printf '%s\n' "$MLOG" | grep 'has-session -t' | head -1)"
+assert_contains "$PROBE_LINE" '\;' "remote has-session target escapes shell metacharacters"
+
+cleanup_sandbox
+
 # ────────────────────────────────────────────────────────────
 # 시나리오 6: _remote_next_n via MLOG — _remote_next_n reused in RN loop
 # No live mosh-clients → RN=1 → remote session created as _1
