@@ -23,7 +23,7 @@ The requirement list the implementer's brief is drawn from. Built against the CE
 - installed & **running** at `~/.remote-pair` (`.version` = `0.4.13`; app healthy, pid ~1210). This session runs on it.
 - 0.4.13 is the legacy pre-rename `remote-pair` line; the corpus §0–4 (0.4.x-era intent) is **the live product's intent**, not a superseded one.
 
-**The abandoned `develop` worktree** (0.5.x monorepo + these 0.6.0 docs, git HEAD `v0.5.1a13`+19) is where this record was first written — **placement under review** (the record should live on the live 0.4.13 line; see `pm-memo.md`).
+**The abandoned `develop` worktree** (0.5.x monorepo + these 0.6.0 docs, git HEAD `v0.5.1a13`+19) is where this record was first authored — **placement RESOLVED: this record lives on `release/v0.4.13`** (the live line), placed via PR #120 alongside its provenance sources. See `pm-memo.md`.
 
 **Consequence for the approve items:** #2's real target is the **0.4.13 `remote-pair-approve-router.sh`** (same `dialog_gone`-only success bug confirmed at lines **145 / 155**, `dialog_gone()` @117), **not** the abandoned-line `xpair-approve-router.sh` 143/153 the brief named. The bug lineage is shared; the file to fix is the live one.
 

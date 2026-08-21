@@ -66,9 +66,9 @@ VP Type-1 allocation put two `approve` items on this session, after the record. 
 
 ### #2 — approve router success verdict is a false positive
 
-- File: **`develop/host/xpair-approve-router.sh`** (renamed from `remote-pair-approve-router.sh`).
-- `dialog_gone()` at **line 115**; success returns at **lines 143 and 153**.
-- Line 143 sits inside a `for` loop that presses candidate keys `key:A|B` sequentially and does `return 0` at the **first key that closed the window** — it never checks *which* button. **Pressing Decline and closing the dialog is recorded as `success`.**
+- File (LIVE 0.4.13 target): **`host/remote-pair-approve-router.sh`**. (The abandoned 0.5.x tree's `xpair-approve-router.sh` was the VP's initial mis-target; it is the dead line.)
+- `dialog_gone()` at **line 117**; success returns at **lines 145 and 155**.
+- Line 145 sits inside a `for` loop that presses candidate keys `key:A|B` sequentially and does `return 0` at the **first key that closed the window** — it never checks *which* button. **Pressing Decline and closing the dialog is recorded as `success`.** (Fixed in PR #121, merged 2026-08-21.)
 - **Falsifier (check first):** if the router already confirms the result by some path other than "dialog closed" (which button, or whether the blocked call actually unblocked), the diagnosis is wrong.
 - Fix *direction* (skill-orchestrate's opinion, not a design directive — method is this session's): verify the outcome, not the closure — which button, or that the blocked call resumed.
 - Evidence it is real (not weak): two sessions blocked on this today. `recordings` escalated it as "false positive, outside my authority"; `landing` misdiagnosed a 1Password approval twice before reaching "config is fine, approve can't handle that window". CEO: *"approve가 지금 동작을 잘 안하는듯"*.
