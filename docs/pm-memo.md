@@ -73,11 +73,13 @@ VP Type-1 allocation put two `approve` items on this session, after the record. 
 - Fix *direction* (skill-orchestrate's opinion, not a design directive — method is this session's): verify the outcome, not the closure — which button, or that the blocked call resumed.
 - Evidence it is real (not weak): two sessions blocked on this today. `recordings` escalated it as "false positive, outside my authority"; `landing` misdiagnosed a 1Password approval twice before reaching "config is fine, approve can't handle that window". CEO: *"approve가 지금 동작을 잘 안하는듯"*.
 
-### #3 — approve SKILL.md generation port (lower urgency — before cutover)
+### #3 — approve SKILL.md content port (into the live 0.4.13 skill; follow-up to #2)
 
-- Not a sync. The live-tree skill `develop/host/skills/approve/SKILL.md` is the **next generation** (English, CLI is `xpair`, router `xpair-approve-router.sh`); the installed copy `~/.claude/skills/approve/SKILL.md` is the older generation that `landing` edited last night.
-- Task: port the two pieces of content `landing` added into new-generation wording (this session writes the file; skill-orchestrate provides content only — one tree, one writer).
-- **Urgency lowered:** this machine still runs `remote-pair` (app pid 1210, AX/SR/FDA ✓, heartbeat 1s) while `xpair` is NOT running (heartbeat ~16 days STALE). The installed copy calling `remote-pair` is **currently correct**. Residual risk: when cutover reaches this machine and overwrites the installed copy with the new generation, `landing`'s fix silently disappears. Recurrence-prevention (make one a symlink of the other) belongs at that point.
+*(Re-framed for the 0.4.13 pivot. The earlier "next generation / develop / xpair" framing was 0.5.x thinking — 0.5/0.6 are abandoned, there is no cutover, and no next-gen file to port INTO. The live remote-pair skill IS the target.)*
+
+- **Target (live):** `host/skills/approve/SKILL.md` on `release/v0.4.13` — the `remote-pair` generation, and the only approve SKILL.md in a fresh checkout of the live line.
+- **Task:** port the two content pieces `landing` added (which currently live only in the installed copy `~/.claude/skills/approve/SKILL.md`) into the live repo skill `host/skills/approve/SKILL.md`. skill-orchestrate provides the content; this session writes the file (one tree, one writer).
+- **Recurrence prevention:** the installed copy `~/.claude/skills/approve/SKILL.md` and the repo `host/skills/approve/SKILL.md` diverge (landing edited only the installed one). Reconcile so a reinstall can't silently drop landing's fix — make the installed copy a symlink to the repo copy, or ensure the installer syncs. Before acting on content piece (b), verify REQ-APPROVE-5's falsifier: does a `~/.xpair`/`~/.remote-pair` bin/approve fallback actually exist on 0.4.13?
 
 **Two content pieces to port** (from skill-orchestrate):
 1. **The missing third case — "about to issue a command that will raise an approval dialog."** The skill covers only "dialog already up" and "already failed"; the common third case is arming approve *before* the signing command:
