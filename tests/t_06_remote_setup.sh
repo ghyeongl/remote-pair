@@ -26,7 +26,7 @@ it "ssh-capture/bundle-prefix"
 assert_contains "$(cat "$SSH_CAPTURE")" "com.x10lab.remote-pair-host" "번들 prefix 포함"
 
 it "ssh-capture/SOCK-aqua"
-assert_contains "$(cat "$SSH_CAPTURE")" 'SOCK="/tmp/aqua-tmux.sock"' "SOCK 변수 설정 포함"
+assert_contains "$(cat "$SSH_CAPTURE")" 'SOCK="/tmp/aqua-tmux-rp.sock"' "SOCK 변수 설정 포함"
 
 it "ssh-capture/computer-use-comment"
 assert_contains "$(cat "$SSH_CAPTURE")" "RemotePairHost" "computer-use 관련 RemotePairHost 언급"
