@@ -78,7 +78,7 @@ VP Type-1 allocation put two `approve` items on this session, after the record. 
 **Premise corrected by direct read of the live 0.4.13 skill (2026-08-21).** skill-orchestrate's report said two content pieces were "missing from the repo skill and need porting." That premise came from the abandoned 0.5.x skill and is **FALSE against the live line.** The live `host/skills/approve/SKILL.md` already carries the substance:
 
 - **(a) arm-before-dialog ordering** — line 47 already documents the "tool call already failed with Permission denied → non-blocking fallback → immediately (≤7s) retry the failed call" ordering, and that the blocking wrapper times out because the window can't be raised while it waits. That IS the order-sensitivity point.
-- **(b) non-blocking fallback vs blocking** — lines 46–47 already distinguish blocking `remote-pair approve` from the non-blocking fallback. **BUT the `~/.remote-pair/bin/approve` helper it references (lines 29/47) does NOT exist** (verified 2026-08-21: `~/.remote-pair/bin/` holds only `remote-pair-launch`, `remote-pair-watchdog.sh`, `rp-screencap`, `screen`; no `approve`, and no repo generator — `shared/install.sh` creates only the watchdog there). So the documented `bin/approve` path is **dead**; only the `touch /tmp/remote-pair.approve-request` trigger path could work, and only if something watches that file (unverified). **This is a real product gap in the live skill, not just a record error** — feed it into REQ-APPROVE-6 / the #3 residual.
+- **(b) non-blocking fallback vs blocking** — lines 46–47 already distinguish blocking `remote-pair approve` from the non-blocking fallback. **BUT the `~/.remote-pair/bin/approve` helper it references (lines 29/47) does NOT exist** (verified 2026-08-21: `~/.remote-pair/bin/` holds only `remote-pair-launch`, `remote-pair-watchdog.sh`, `rp-screencap`, `screen`; no `approve`, and no repo generator — `shared/install.sh` creates only the watchdog there). So the documented `bin/approve` path is **dead**; only the `touch /tmp/remote-pair.approve-request` trigger path could work, and only if something watches that file (unverified). **This is a real product gap in the live skill, not just a record error** — tracked under REQ-APPROVE-5's residual (and the queued approve-enhancement, which is held outside this committed record until the record PR lands).
 - **CLI is `remote-pair approve`** (skill lines 11–13), never `xpair approve`.
 
 **Residual work (small, verify-first):**
@@ -86,7 +86,7 @@ VP Type-1 allocation put two `approve` items on this session, after the record. 
 - If a real delta exists, add it to the repo skill and set recurrence-prevention (symlink installed↔repo, or installer sync) so a reinstall can't drop it.
 - Confirm (c) below is present in the repo skill.
 
-**(c) Locked vault is out of approve's scope.** If `status` shows AX/SR/FDA ✓ but signing is still refused, the problem is outside RemotePair — ask the human to unlock the vault; do **not** retry-loop. (Verify this line is in the repo skill.)
+**(c) Locked vault is out of approve's scope.** If signing keeps failing while grants show ✓ **and** the vault is confirmed unlocked, it's likely outside RemotePair — ask the human, don't retry-loop. A green `status` alone is not proof (it can be stale) — check the vault-lock state before concluding. (Verify this line is in the repo skill.)
 
 ---
 
