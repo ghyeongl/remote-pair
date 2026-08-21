@@ -125,24 +125,52 @@ dialog_gone(){
   fi
 }
 
-# 액션 + 검증 + 재시도. $1=id $2=marker $3=action. 성공(닫힘) 0, 실패 1.
-# action 이 'key:A|B|...' 면 여러 후보 키를 순차로 시도(누를 때마다 창 닫힘 검증) — 하나라도 닫으면 성공.
+# 키 후보가 현재 창에서 승인 동작임을 확인한다. 창이 닫힌 것만으로는 Decline 과 구분할 수 없으므로,
+# 화면에 표시된 승인 단축키 계약을 확인할 수 없는 키는 성공으로 간주하지 않는다.
+key_targets_approval(){
+  local id="$1" combo="$2" labels="" declared="" candidate
+  case "$id:$combo" in
+    "Claude for Chrome:cmd+return"|"Claude for Chrome:command+return")
+      labels="Always Allow|Always Approve|항상 허용|항상 승인" ;;
+    "Claude for Chrome:return"|"Claude for Chrome:enter")
+      labels="Allow Once|Approve Once|Authorize Once|한 번 허용|한 번 승인" ;;
+    *)
+      # 사용자 지정 --type 또는 rules.txt 의 key action 자체가 승인 의도를 명시한다.
+      if [ -n "$HINT_TYPE" ]; then
+        declared="${HINT_TYPE#key:}"
+      else
+        declared="$(rule_by_id "$id")"; declared="${declared#*$'\t'}"; declared="${declared#key:}"
+      fi
+      IFS='|' read -ra _DECLARED_KEYS <<< "$declared"
+      for candidate in "${_DECLARED_KEYS[@]}"; do
+        [ "$candidate" = "$combo" ] && { log "[$id] key=$combo 승인 action 명시 확인"; return 0; }
+      done
+      log "[$id] key=$combo 승인 동작 매핑 없음"; return 1 ;;
+  esac
+  [ -n "$("$OCR" "$SHOT" "$labels" 2>/dev/null)" ] || {
+    log "[$id] key=$combo 승인 라벨 미확인 (labels=$labels)"; return 1
+  }
+}
+
+# 액션 + 검증 + 재시도. $1=id $2=marker $3=action. 승인 결과가 확인되면 0, 실패 1.
+# key 후보는 승인 단축키임을 먼저 확인하고 순차 시도한다. 확인된 키가 창을 닫은 경우에만 성공.
 #   (Claude-for-Chrome 처럼 사이트마다 승인키가 cmd+return / return 으로 갈리는 창 대응)
 act_and_verify(){
   local id="$1" marker="$2" action="$3" i
   case "$action" in
-    key:*\|*)
+    key:*)
       # 각 후보 키를 짧은 간격으로 다회 연타(매번 닫힘 확인 → 닫히면 즉시 멈춰 부작용 방지).
       # 팝업 출현 타이밍과 트리거가 어긋나도 단시간 다회로 명중 확률을 높인다.
       local combo t tries="${RP_KEY_TRIES:-5}" gap="${RP_KEY_GAP:-0.3}"
       IFS='|' read -ra _KC <<< "${action#key:}"
       for combo in "${_KC[@]}"; do
         [ -z "$combo" ] && continue
+        key_targets_approval "$id" "$combo" || continue
         if [ "$DRY" = 1 ]; then echo "WOULD key '$combo' x$tries [$id]"; return 0; fi
         for t in $(seq 1 "$tries"); do
           sendkey "$combo" >/dev/null 2>&1
           sleep "$gap"
-          if dialog_gone "$marker"; then log "success [$id] (key=$combo #$t, 창 닫힘)"; return 0; fi
+          if dialog_gone "$marker"; then log "success [$id] (key=$combo #$t, 승인 단축키 확인)"; return 0; fi
         done
         log "[$id] key=$combo ${tries}회 후 미확인 → 다음 후보 키"
       done
