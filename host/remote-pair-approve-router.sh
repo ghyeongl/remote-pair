@@ -203,6 +203,7 @@ approve_1password(){
     case "$verdict" in
       ok) log "success [1Password] (method=key:$combo, 호출 결과 확인)"; return 0 ;;
       fail) log "click-outcome-unconfirmed [1Password] (method=key:$combo, 호출 실패 확인)"; return 2 ;;
+      pending) [ -n "$OUTCOME_FILE" ] && { log "click-outcome-unconfirmed [1Password] (method=key:$combo, 호출 결과 대기 한도 초과)"; return 2; } ;;
     esac
     if dialog_gone "$marker"; then
       if outcome_confirmed; then
@@ -212,10 +213,10 @@ approve_1password(){
       return 2
     fi
   done
-  C="$("$OCR" "$SHOT" "$labels" 2>/dev/null)"
-  if [ -n "$C" ]; then
-    x="${C%%,*}"; y="${C#*,}"
-    for method in cliclick system-events; do
+  for method in cliclick system-events; do
+    C="$("$OCR" "$SHOT" "$labels" 2>/dev/null)"
+    if [ -n "$C" ]; then
+      x="${C%%,*}"; y="${C#*,}"
       verdict="$(outcome_now)"
       case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
       if [ "$method" = cliclick ]; then "$CLICK" c:"$C" >/dev/null 2>&1
@@ -226,6 +227,7 @@ approve_1password(){
       case "$verdict" in
         ok) log "success [1Password] (method=$method:$C, 호출 결과 확인)"; return 0 ;;
         fail) log "click-outcome-unconfirmed [1Password] (method=$method:$C, 호출 실패 확인)"; return 2 ;;
+        pending) [ -n "$OUTCOME_FILE" ] && { log "click-outcome-unconfirmed [1Password] (method=$method:$C, 호출 결과 대기 한도 초과)"; return 2; } ;;
       esac
       if dialog_gone "$marker"; then
         if outcome_confirmed; then
@@ -234,10 +236,11 @@ approve_1password(){
         log "click-outcome-unconfirmed [1Password] (method=$method:$C, 창 닫힘이나 호출 결과 미확인)"
         return 2
       fi
-    done
-  else
-    log "[1Password] approve 버튼 좌표 못찾음 (labels=$labels)"
-  fi
+    else
+      log "[1Password] approve 버튼 좌표 못찾음 (labels=$labels)"
+      break
+    fi
+  done
   verdict="$(outcome_now)"
   case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
   ax_press "$labels" >/dev/null 2>&1
@@ -247,6 +250,7 @@ approve_1password(){
   case "$verdict" in
     ok) log "success [1Password] (method=axpress, 호출 결과 확인)"; return 0 ;;
     fail) log "click-outcome-unconfirmed [1Password] (method=axpress, 호출 실패 확인)"; return 2 ;;
+    pending) [ -n "$OUTCOME_FILE" ] && { log "click-outcome-unconfirmed [1Password] (method=axpress, 호출 결과 대기 한도 초과)"; return 2; } ;;
   esac
   if dialog_gone "$marker"; then
     if outcome_confirmed; then
@@ -284,6 +288,7 @@ approve_1password_explicit(){
         case "$verdict" in
           ok) log "success [1Password] (explicit method=key:$combo, 호출 결과 확인)"; return 0 ;;
           fail) log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 호출 실패 확인)"; return 2 ;;
+          pending) [ -n "$OUTCOME_FILE" ] && { log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 호출 결과 대기 한도 초과)"; return 2; } ;;
         esac
         if dialog_gone "$marker"; then
           if outcome_confirmed; then
@@ -302,6 +307,7 @@ approve_1password_explicit(){
       case "$verdict" in
         ok) log "success [1Password] (explicit method=ocr, 호출 결과 확인)"; return 0 ;;
         fail) log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 호출 실패 확인)"; return 2 ;;
+        pending) [ -n "$OUTCOME_FILE" ] && { log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 호출 결과 대기 한도 초과)"; return 2; } ;;
       esac
       if dialog_gone "$marker"; then
         if outcome_confirmed; then

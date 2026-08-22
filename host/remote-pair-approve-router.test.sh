@@ -14,7 +14,7 @@ if [[ -f "${OCR_PHASE_FILE:-}" ]]; then
   if [[ "$2" == "--has" ]]; then
     [[ "$phase" == present ]]
   elif [[ "$phase" == present ]]; then
-    echo 1700,1000
+    if [[ -n "${OCR_COORD_FILE:-}" ]]; then cat "$OCR_COORD_FILE"; else echo 1700,1000; fi
   fi
   exit
 fi
@@ -39,6 +39,7 @@ touch "${@: -1}"
 EOF
 cat >"$TMP/bin/cliclick" <<'EOF'
 #!/bin/bash
+[[ -n "${MOVE_COORD_FILE:-}" ]] && printf '1800,1000\n' >"$MOVE_COORD_FILE"
 :
 EOF
 cat >"$TMP/bin/osascript" <<'EOF'
@@ -93,10 +94,29 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
   RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
-  OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=ok \
-  GONE_AT=2 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
-[[ "$(cat "$TMP/capture-count")" == 2 ]]
+  OUTCOME_ON_KEY_FILE="$TMP/outcome" OUTCOME_ON_KEY_VERDICT=ok \
+  GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+[[ "$(cat "$TMP/capture-count")" == 1 ]]
 grep -q 'router: success \[1Password\] (method=key:return' "$TMP/logs/router.log"
+
+# Once the per-method outcome wait expires, an outcome-confirmed request stops
+# instead of applying the next method to a possibly queued dialog.
+printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/outcome"
+: >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
+  RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 OSASCRIPT_LOG="$TMP/osascript.log" \
+  GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then
+  echo "router advanced after a bounded outcome wait" >&2
+  exit 1
+fi
+[[ "$(grep -c 'key code' "$TMP/osascript.log")" == 1 ]]
+grep -q 'router: click-outcome-unconfirmed \[1Password\] (method=key:return, 호출 결과 대기 한도 초과)' "$TMP/logs/router.log"
 
 # Marker loss without a positive caller result preserves #124's unconfirmed
 # verdict; closure alone is never success.
@@ -109,8 +129,8 @@ if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
   RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
-  OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=fail \
-  GONE_AT=2 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then
+  OUTCOME_ON_KEY_FILE="$TMP/outcome" OUTCOME_ON_KEY_VERDICT=fail \
+  GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then
   echo "router accepted marker loss without a successful caller outcome" >&2
   exit 1
 fi
@@ -128,8 +148,8 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
   RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
-  OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=ok OSASCRIPT_LOG="$TMP/osascript.log" \
-  GONE_AT=2 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+  OUTCOME_ON_KEY_FILE="$TMP/outcome" OUTCOME_ON_KEY_VERDICT=ok OSASCRIPT_LOG="$TMP/osascript.log" \
+  GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
 grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
 grep -q 'key code 36' "$TMP/osascript.log"
 grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
@@ -216,11 +236,14 @@ grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/r
 printf '1Password\tAccess Requested\tocr:Authorize\n' >"$TMP/rules.txt"
 printf 'present\n' >"$TMP/ocr-phase"
 : >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+printf '1700,1000\n' >"$TMP/ocr-coordinate"
 if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
   RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
   RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  OCR_COORD_FILE="$TMP/ocr-coordinate" MOVE_COORD_FILE="$TMP/ocr-coordinate" OSASCRIPT_LOG="$TMP/osascript.log" \
   RP_OUTCOME_FILE= RP_OUTCOME_WAIT=0 \
   GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then
   echo "router accepted an exhausted 1Password method ladder" >&2
@@ -231,6 +254,7 @@ grep -q 'router: \[1Password\] method key:return' "$TMP/logs/router.log"
 grep -q 'router: \[1Password\] method key:cmd+return' "$TMP/logs/router.log"
 grep -q 'router: \[1Password\] method key:space' "$TMP/logs/router.log"
 grep -q 'router: \[1Password\] method cliclick:1700,1000' "$TMP/logs/router.log"
-grep -q 'router: \[1Password\] method system-events:1700,1000' "$TMP/logs/router.log"
+grep -q 'router: \[1Password\] method system-events:1800,1000' "$TMP/logs/router.log"
+grep -q 'click at {1800, 1000}' "$TMP/osascript.log"
 grep -q 'router: \[1Password\] method axpress' "$TMP/logs/router.log"
 grep -q 'router: click-outcome-unconfirmed \[1Password\] (모든 승인 방식 소진' "$TMP/logs/router.log"
