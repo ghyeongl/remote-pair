@@ -39,6 +39,7 @@ final class ApproveManager {
         var requestID: String?
         var claimedRequestIDFile: String?
         var priorLockOwner: String?
+        var ownsLock = false
         if triggerBacked, let value = readRegularCompanion(requestIDFile), !value.isEmpty {
             requestID = value
             let claimed = requestIDFile + ".claimed." + value
@@ -50,7 +51,6 @@ final class ApproveManager {
                 try? FileManager.default.removeItem(atPath: cancelRequest)
                 try? FileManager.default.removeItem(atPath: TRIGGER + ".label")
                 try? FileManager.default.removeItem(atPath: TRIGGER + ".type")
-                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
                 running = false
                 return true
             }
@@ -64,6 +64,7 @@ final class ApproveManager {
                 running = false
                 return false
             }
+            ownsLock = true
             environment["RP_REQUEST_ID"] = value
             environment["RP_CANCEL_FILE"] = cancelRequest
             if readRegularCompanion(cancelRequest) == value {
@@ -82,19 +83,27 @@ final class ApproveManager {
                     environment["RP_OUTCOME_FILE"] = candidate.path
                 }
             }
+        } else {
+            let lock = runCapture("/usr/bin/shlock", ["-f", APPROVE_LOCK, "-p", "\(getpid())"])
+            guard lock.status == 0 else { running = false; return false }
+            ownsLock = true
         }
         p.environment = environment
         p.terminationHandler = { [weak self] process in
             self?.running = false
-            if requestID != nil, self?.readRegularCompanion(APPROVE_LOCK) == "\(process.processIdentifier)" {
+            if let id = requestID, self?.readRegularCompanion(cancelRequest) == id {
+                try? FileManager.default.removeItem(atPath: cancelRequest)
+            }
+            if ownsLock, self?.readRegularCompanion(APPROVE_LOCK) == "\(process.processIdentifier)" {
                 try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
             }
-            try? FileManager.default.removeItem(atPath: cancelRequest)
         }
         do {
             try p.run()
-            if requestID != nil {
+            if ownsLock {
                 try? "\(p.processIdentifier)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+            }
+            if requestID != nil {
                 try? FileManager.default.removeItem(atPath: outcomeRequest)
                 if let claimed = claimedRequestIDFile { try? FileManager.default.removeItem(atPath: claimed) }
             }
@@ -109,6 +118,8 @@ final class ApproveManager {
                 if let owner = priorLockOwner {
                     try? "\(owner)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
                 }
+            } else if ownsLock, readRegularCompanion(APPROVE_LOCK) == "\(getpid())" {
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
             }
             log("APPROVE: router spawn 실패 \(error)"); running = false; return false
         }

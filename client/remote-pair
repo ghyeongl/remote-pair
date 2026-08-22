@@ -557,8 +557,8 @@ cmd_approve() {
   else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
   _write_companion "$APPROVE_TRIGGER.request-id" "$request_id" || return 1
   rm -f "$APPROVE_TRIGGER.cancel" 2>/dev/null || true
+  _write_companion "$APPROVE_TRIGGER" "" || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
   published=1
-  : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"
   # Print only this request's router log lines (so the agent can read the result and decide next steps).
   _router_trail() { [ -f "$LOG_FILE" ] || return 0; local tot; tot=$(wc -l < "$LOG_FILE"); [ "$tot" -gt "$base0" ] && tail -n "$(( tot - base0 ))" "$LOG_FILE" | grep -F "router: [request=$request_id]"; }
