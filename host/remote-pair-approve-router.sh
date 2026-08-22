@@ -51,6 +51,7 @@ VISION_FAILS=0; LAST_VISION_RC=0
 GENERIC_LABELS="Allow|Authorize|Authorize Once|Always Allow|Approve|Confirm|Continue|OK|허용|승인|확인|한 번 승인"
 
 log(){ printf '%s router: %s%s\n' "$(date '+%H:%M:%S')" "${REQUEST_ID:+[request=$REQUEST_ID] }" "$1" >> "$LOG"; }
+cancelled(){ [ -n "$REQUEST_ID" ] && [ -f "$CANCEL_FILE" ] && [ "$(head -1 "$CANCEL_FILE" 2>/dev/null)" = "$REQUEST_ID" ]; }
 [ -n "$OCR" ] || { log "ocr-find 없음 — 중단"; exit 1; }
 
 # 힌트: 에이전트가 "어떤 승인인지"(룰 id 또는 자유문구) 미리 알려주면 해당 룰을 우선 시도 +
@@ -84,6 +85,7 @@ capture(){ [ -n "${RP_SHOT:-}" ] && return 0; $SCAP -x "$SHOT" 2>/tmp/rp-scap.er
 # 안 먹히는 반면(실측 확인), System Events key code 는 먹힌다. 좌표 클릭(OCR 오매칭 위험) 회피.
 # "cmd+return" → key code 36 using {command down}  /  "return" → key code 36
 sendkey(){
+  cancelled && return 1
   local combo="$1" key mods="" m kc parts=""
   local -a M=()
   key="${combo##*+}"; [ "$combo" != "$key" ] && mods="${combo%+*}"
@@ -106,9 +108,12 @@ sendkey(){
 }
 
 system_click(){
+  cancelled && return 1
   local x="$1" y="$2"
   "$OSASCRIPT" -e "tell application \"System Events\" to click at {$x, $y}"
 }
+
+click_at(){ cancelled && return 1; "$CLICK" c:"$1"; }
 
 focus_1password(){
   "$OSASCRIPT" -e 'tell application "1Password" to activate'
@@ -157,6 +162,7 @@ outcome_after_method(){
 }
 
 ax_press(){
+  cancelled && return 1
   local labels="$1"
   "$OSASCRIPT" - "$labels" <<'APPLESCRIPT'
 on run argv
@@ -230,7 +236,7 @@ approve_1password(){
       x="${C%%,*}"; y="${C#*,}"
       verdict="$(outcome_now)"
       case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
-      if [ "$method" = cliclick ]; then "$CLICK" c:"$C" >/dev/null 2>&1
+      if [ "$method" = cliclick ]; then click_at "$C" >/dev/null 2>&1
       else system_click "$x" "$y" >/dev/null 2>&1; fi
       log "[1Password] method $method:$C"
       sleep "$METHOD_GAP"
@@ -339,7 +345,7 @@ do_action(){
   case "$action" in
     ocr:*) labels="${action#ocr:}"; C="$("$OCR" "$SHOT" "$labels" 2>/dev/null)"
            if [ -n "$C" ]; then
-             if [ "$DRY" = 1 ]; then echo "WOULD click ($C) [$id]"; else "$CLICK" c:"$C" >/dev/null 2>&1; fi
+             if [ "$DRY" = 1 ]; then echo "WOULD click ($C) [$id]"; else click_at "$C" >/dev/null 2>&1; fi
              log "[$id] click $C"; return 0
            fi
            log "[$id] 버튼 못찾음 (labels=$labels)"; return 1 ;;
