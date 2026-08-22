@@ -24,6 +24,7 @@ let HEARTBEAT = "\(LOG_DIR)/remote-pair.heartbeat"                    // watchdo
 let STATUS_FILE = "\(LOG_DIR)/status.json"                            // 에이전트가 읽는 ground truth: 앱 생존 + AX/SR/FDA grant
 let RULES_FILE = "\(RP_DIR)/rules.txt"                                // approve 라우터 룰
 let TRIGGER = "/tmp/remote-pair.approve-request"                     // (legacy) /approve 스킬 touch → 구 라우터 폴백
+let APPROVE_LOCK = "/tmp/remote-pair.approve-lock"
 // CLI(두뇌, 권한 0) ↔ 앱(권한 경계) primitive 채널. CLI 가 요청, 앱이 grant 로 실행.
 //   요청(INPUT_REQ, 탭구분):  shot\t<outpath>  |  click\t<x>\t<y>  |  key\t<combo>
 //   응답(INPUT_RES):          ok  |  ok\t<path>  |  err\t<msg>

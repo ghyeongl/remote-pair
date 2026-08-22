@@ -17,11 +17,12 @@ set -u
 # claude·screencapture·cliclick 가 PATH 에 있도록 (앱이 직접 스폰하는 PATH 는 빈약)
 export PATH="/usr/sbin:/usr/bin:/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 SCAP="${RP_SCREENCAPTURE:-/usr/sbin/screencapture}"
+OSASCRIPT="${RP_OSASCRIPT:-/usr/bin/osascript}"
 RP_DIR="${RP_DIR:-$HOME/.remote-pair}"
 
 OCR="$(command -v ocr-find 2>/dev/null || true)"
 [ -n "$OCR" ] || for _c in "$RP_DIR/bin/ocr-find" "$HOME/.claude/bin/ocr-find"; do [ -x "$_c" ] && { OCR="$_c"; break; }; done
-CLICK="$(command -v cliclick 2>/dev/null || echo /opt/homebrew/bin/cliclick)"
+CLICK="${RP_CLICK:-$(command -v cliclick 2>/dev/null || echo /opt/homebrew/bin/cliclick)}"
 CLAUDE="$(command -v claude 2>/dev/null || true)"
 
 RULES="${RULES_FILE:-$RP_DIR/rules.txt}"; [ -f "$RULES" ] || RULES="$HOME/.claude/auto-approve/rules.txt"
@@ -35,6 +36,11 @@ DRY="${RP_DRY:-0}"                             # RP_DRY=1 = 실제 클릭/키 �
 WAIT_SECS="${RP_WAIT_SECS:-${1:-18}}"          # 승인창 출현을 기다리는 총 윈도우(초)
 INTERVAL="${RP_INTERVAL:-1.2}"                 # 폴링 간격
 CLICK_VERIFY_DELAY="${RP_CLICK_VERIFY_DELAY:-0.8}" # 클릭 직후 1회만 결과 확인(재시도 중 timeout 오판 방지)
+METHOD_GAP="${RP_METHOD_GAP:-0.4}"             # 1Password 승인 방식별 결과 확인 전 대기
+OUTCOME_FILE="${RP_OUTCOME_FILE:-}"            # 선택: 호출자가 쓰는 ok|fail 실제 결과 채널
+OUTCOME_WAIT="${RP_OUTCOME_WAIT:-5}"           # 창 닫힘 후 실제 호출 결과 대기
+REQUEST_ID="${RP_REQUEST_ID:-}"
+CANCEL_FILE="${RP_CANCEL_FILE:-}"
 # 비전(haiku) — 구독 claude CLI 재사용, best-effort
 VISION="${RP_VISION:-auto}"                    # auto(룰 미스 시) | on | off
 VISION_MODEL="${RP_VISION_MODEL:-claude-haiku-4-5}"
@@ -44,8 +50,8 @@ VISION_MAX_FAILS="${RP_VISION_MAX_FAILS:-2}"   # 연속 claude 실패 N회 → �
 VISION_FAILS=0; LAST_VISION_RC=0
 GENERIC_LABELS="Allow|Authorize|Authorize Once|Always Allow|Approve|Confirm|Continue|OK|허용|승인|확인|한 번 승인"
 
-log(){ printf '%s router: %s\n' "$(date '+%H:%M:%S')" "$1" >> "$LOG"; }
-[ -n "$OCR" ] || { log "ocr-find 없음 — 중단"; exit 1; }
+log(){ printf '%s router: %s%s\n' "$(date '+%H:%M:%S')" "${REQUEST_ID:+[request=$REQUEST_ID] }" "$1" >> "$LOG"; }
+cancelled(){ [ -n "$REQUEST_ID" ] && [ -f "$CANCEL_FILE" ] && [ "$(head -1 "$CANCEL_FILE" 2>/dev/null)" = "$REQUEST_ID" ]; }
 
 # 힌트: 에이전트가 "어떤 승인인지"(룰 id 또는 자유문구) 미리 알려주면 해당 룰을 우선 시도 +
 #   haiku 분류 prior 로 사용. 없어도 됨. (CLI 가 .label 파일로 전달, 또는 RP_FOR 환경변수)
@@ -57,6 +63,7 @@ HINT="${RP_FOR:-}"
 HINT_TYPE="${RP_TYPE:-}"
 [ -z "$HINT_TYPE" ] && [ -f "$TYPE_FILE" ] && HINT_TYPE="$(head -1 "$TYPE_FILE" 2>/dev/null)"
 rm -f "$HINT_FILE" "$TYPE_FILE" 2>/dev/null || true
+[ -n "$OCR" ] || { log "ocr-find 없음 — 중단"; exit 1; }
 [ -n "$HINT_TYPE" ] && log "type(에이전트 지정): $HINT_TYPE"
 HINT_ID=""
 if [ -n "$HINT" ]; then
@@ -78,22 +85,258 @@ capture(){ [ -n "${RP_SHOT:-}" ] && return 0; $SCAP -x "$SHOT" 2>/tmp/rp-scap.er
 # 안 먹히는 반면(실측 확인), System Events key code 는 먹힌다. 좌표 클릭(OCR 오매칭 위험) 회피.
 # "cmd+return" → key code 36 using {command down}  /  "return" → key code 36
 sendkey(){
-  local combo="$1" key mods="" m kc parts="" M
+  cancelled && return 1
+  local combo="$1" key mods="" m kc parts=""
+  local -a M=()
   key="${combo##*+}"; [ "$combo" != "$key" ] && mods="${combo%+*}"
   case "$key" in
     return|enter) kc=36 ;; esc|escape) kc=53 ;; space) kc=49 ;; tab) kc=48 ;; *) kc="" ;;
   esac
-  IFS='+' read -ra M <<< "$mods"
-  for m in "${M[@]}"; do case "$m" in
-    cmd|command) parts="$parts command down," ;; shift) parts="$parts shift down," ;;
-    ctrl|control) parts="$parts control down," ;; alt|option) parts="$parts option down," ;;
-  esac; done
+  if [ -n "$mods" ]; then
+    IFS='+' read -ra M <<< "$mods"
+    for m in "${M[@]}"; do case "$m" in
+      cmd|command) parts="$parts command down," ;; shift) parts="$parts shift down," ;;
+      ctrl|control) parts="$parts control down," ;; alt|option) parts="$parts option down," ;;
+    esac; done
+  fi
   local mod=""; [ -n "$parts" ] && mod=" using {${parts%,}}"
   if [ -n "$kc" ]; then
-    osascript -e "tell application \"System Events\" to key code $kc$mod"
+    "$OSASCRIPT" -e "tell application \"System Events\" to key code $kc$mod"
   else
-    osascript -e "tell application \"System Events\" to keystroke \"$key\"$mod"
+    "$OSASCRIPT" -e "tell application \"System Events\" to keystroke \"$key\"$mod"
   fi
+}
+
+system_click(){
+  cancelled && return 1
+  local x="$1" y="$2"
+  "$OSASCRIPT" -e "tell application \"System Events\" to click at {$x, $y}"
+}
+
+click_at(){ cancelled && return 1; "$CLICK" c:"$1"; }
+
+focus_1password(){
+  "$OSASCRIPT" -e 'tell application "1Password" to activate'
+}
+
+outcome_confirmed(){
+  [ -n "$OUTCOME_FILE" ] || return 1
+  local deadline=$(( $(date +%s) + OUTCOME_WAIT )) verdict=""
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    [ -f "$OUTCOME_FILE" ] && verdict="$(head -1 "$OUTCOME_FILE" 2>/dev/null)"
+    case "$verdict" in ok) return 0 ;; fail) return 1 ;; esac
+    sleep 0.1
+  done
+  return 1
+}
+
+outcome_now(){
+  local raw=""
+  if [ -n "$REQUEST_ID" ] && [ -f "$CANCEL_FILE" ] && [ "$(head -1 "$CANCEL_FILE" 2>/dev/null)" = "$REQUEST_ID" ]; then
+    echo fail
+    return
+  fi
+  [ -n "$OUTCOME_FILE" ] && [ -f "$OUTCOME_FILE" ] && raw="$(head -1 "$OUTCOME_FILE" 2>/dev/null)"
+  if [ -n "$REQUEST_ID" ]; then
+    case "$raw" in "ok:$REQUEST_ID") echo ok ;; "fail:$REQUEST_ID") echo fail ;; esac
+  else
+    case "$raw" in ok) echo ok ;; fail) echo fail ;; esac
+  fi
+}
+
+# Give the blocked caller time to publish the result of the method just sent.
+# This wait happens even while an identical marker remains visible: that marker
+# may be a second queued request, not proof that the first method failed.
+outcome_after_method(){
+  [ -n "$OUTCOME_FILE" ] || { echo pending; return; }
+  local deadline verdict="$(outcome_now)"
+  case "$verdict" in ok|fail) echo "$verdict"; return ;; esac
+  [ "$OUTCOME_WAIT" -gt 0 ] 2>/dev/null || { echo pending; return; }
+  deadline=$(( $(date +%s) + OUTCOME_WAIT ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    verdict="$(outcome_now)"
+    case "$verdict" in ok|fail) echo "$verdict"; return ;; esac
+    sleep 0.1
+  done
+  echo pending
+}
+
+ax_press(){
+  cancelled && return 1
+  local labels="$1"
+  "$OSASCRIPT" - "$labels" <<'APPLESCRIPT'
+on run argv
+  set AppleScript's text item delimiters to "|"
+  set wanted to text items of item 1 of argv
+  tell application "System Events"
+    repeat with proc in (application processes whose visible is true)
+      if (name of proc as text) contains "1Password" then
+        repeat with win in windows of proc
+          try
+            repeat with elem in entire contents of win
+              try
+                if role of elem is "AXButton" and (name of elem as text) is in wanted then
+                  perform action "AXPress" of elem
+                  return "pressed"
+                end if
+              end try
+            end repeat
+          end try
+        end repeat
+      end if
+    end repeat
+  end tell
+  return "not-found"
+end run
+APPLESCRIPT
+}
+
+# 1Password CLI-access dialog: exhaust semantically approving keys and all
+# available button activation mechanisms. Each method is followed immediately
+# by the same marker check; only a declared approve method that closes the
+# approval dialog is accepted as success.
+approve_1password(){
+  local marker="$1" labels="$2" combo C x y method verdict
+  if [ "$DRY" = 1 ]; then
+    echo "WOULD try return|cmd+return|space|cliclick|system-events|axpress [1Password]"
+    return 0
+  fi
+  "$OCR" "$SHOT" --has "$marker" 2>/dev/null || {
+    log "[1Password] dialog marker not present yet"; return 1
+  }
+  verdict="$(outcome_now)"
+  case "$verdict" in
+    ok) log "success [1Password] (호출 결과가 승인 방식 전 이미 확인됨)"; return 0 ;;
+    fail) log "click-outcome-unconfirmed [1Password] (호출 실패가 승인 방식 전 이미 확인됨)"; return 2 ;;
+  esac
+  for combo in return cmd+return space; do
+    verdict="$(outcome_now)"
+    case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
+    focus_1password >/dev/null 2>&1
+    sendkey "$combo" >/dev/null 2>&1
+    log "[1Password] method key:$combo"
+    sleep "$METHOD_GAP"
+    verdict="$(outcome_after_method)"
+    case "$verdict" in
+      ok) log "success [1Password] (method=key:$combo, 호출 결과 확인)"; return 0 ;;
+      fail) log "click-outcome-unconfirmed [1Password] (method=key:$combo, 호출 실패 확인)"; return 2 ;;
+      pending) log "click-outcome-unconfirmed [1Password] (method=key:$combo, 호출 결과 미확인 — 다음 방식 중단)"; return 2 ;;
+    esac
+    if dialog_gone "$marker"; then
+      if outcome_confirmed; then
+        log "success [1Password] (method=key:$combo, 호출 결과 확인)"; return 0
+      fi
+      log "click-outcome-unconfirmed [1Password] (method=key:$combo, 창 닫힘이나 호출 결과 미확인)"
+      return 2
+    fi
+  done
+  for method in cliclick system-events; do
+    C="$("$OCR" "$SHOT" "$labels" 2>/dev/null)"
+    if [ -n "$C" ]; then
+      x="${C%%,*}"; y="${C#*,}"
+      verdict="$(outcome_now)"
+      case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
+      if [ "$method" = cliclick ]; then click_at "$C" >/dev/null 2>&1
+      else system_click "$x" "$y" >/dev/null 2>&1; fi
+      log "[1Password] method $method:$C"
+      sleep "$METHOD_GAP"
+      verdict="$(outcome_after_method)"
+      case "$verdict" in
+        ok) log "success [1Password] (method=$method:$C, 호출 결과 확인)"; return 0 ;;
+        fail) log "click-outcome-unconfirmed [1Password] (method=$method:$C, 호출 실패 확인)"; return 2 ;;
+        pending) log "click-outcome-unconfirmed [1Password] (method=$method:$C, 호출 결과 미확인 — 다음 방식 중단)"; return 2 ;;
+      esac
+      if dialog_gone "$marker"; then
+        if outcome_confirmed; then
+          log "success [1Password] (method=$method:$C, 호출 결과 확인)"; return 0
+        fi
+        log "click-outcome-unconfirmed [1Password] (method=$method:$C, 창 닫힘이나 호출 결과 미확인)"
+        return 2
+      fi
+    else
+      log "[1Password] approve 버튼 좌표 못찾음 (labels=$labels)"
+      break
+    fi
+  done
+  verdict="$(outcome_now)"
+  case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
+  ax_press "$labels" >/dev/null 2>&1
+  log "[1Password] method axpress"
+  sleep "$METHOD_GAP"
+  verdict="$(outcome_after_method)"
+  case "$verdict" in
+    ok) log "success [1Password] (method=axpress, 호출 결과 확인)"; return 0 ;;
+    fail) log "click-outcome-unconfirmed [1Password] (method=axpress, 호출 실패 확인)"; return 2 ;;
+    pending) log "click-outcome-unconfirmed [1Password] (method=axpress, 호출 결과 미확인 — 다음 방식 중단)"; return 2 ;;
+  esac
+  if dialog_gone "$marker"; then
+    if outcome_confirmed; then
+      log "success [1Password] (method=axpress, 호출 결과 확인)"; return 0
+    fi
+    log "click-outcome-unconfirmed [1Password] (method=axpress, 창 닫힘이나 호출 결과 미확인)"
+    return 2
+  fi
+  log "click-outcome-unconfirmed [1Password] (모든 승인 방식 소진, 실제 승인 결과 미확인)"
+  return 2
+}
+
+approve_1password_explicit(){
+  local marker="$1" action="$2" combo verdict
+  if [ "$DRY" = 1 ]; then do_action "1Password" "$action"; return $?; fi
+  "$OCR" "$SHOT" --has "$marker" 2>/dev/null || {
+    log "[1Password] dialog marker not present yet"; return 1
+  }
+  verdict="$(outcome_now)"
+  case "$verdict" in
+    ok) log "success [1Password] (호출 결과가 승인 방식 전 이미 확인됨)"; return 0 ;;
+    fail) log "click-outcome-unconfirmed [1Password] (호출 실패가 승인 방식 전 이미 확인됨)"; return 2 ;;
+  esac
+  case "$action" in
+    key:*)
+      IFS='|' read -ra _EXPLICIT_KEYS <<< "${action#key:}"
+      for combo in "${_EXPLICIT_KEYS[@]}"; do
+        verdict="$(outcome_now)"
+        case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
+        focus_1password >/dev/null 2>&1
+        sendkey "$combo" >/dev/null 2>&1
+        log "[1Password] explicit method key:$combo"
+        sleep "$METHOD_GAP"
+        verdict="$(outcome_after_method)"
+        case "$verdict" in
+          ok) log "success [1Password] (explicit method=key:$combo, 호출 결과 확인)"; return 0 ;;
+          fail) log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 호출 실패 확인)"; return 2 ;;
+          pending) log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 호출 결과 미확인 — 다음 방식 중단)"; return 2 ;;
+        esac
+        if dialog_gone "$marker"; then
+          if outcome_confirmed; then
+            log "success [1Password] (explicit method=key:$combo, 호출 결과 확인)"; return 0
+          fi
+          log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 창 닫힘이나 호출 결과 미확인)"
+          return 2
+        fi
+      done ;;
+    ocr:*)
+      verdict="$(outcome_now)"
+      case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
+      do_action "1Password" "$action" || return 1
+      sleep "$METHOD_GAP"
+      verdict="$(outcome_after_method)"
+      case "$verdict" in
+        ok) log "success [1Password] (explicit method=ocr, 호출 결과 확인)"; return 0 ;;
+        fail) log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 호출 실패 확인)"; return 2 ;;
+        pending) log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 호출 결과 미확인 — 다음 방식 중단)"; return 2 ;;
+      esac
+      if dialog_gone "$marker"; then
+        if outcome_confirmed; then
+          log "success [1Password] (explicit method=ocr, 호출 결과 확인)"; return 0
+        fi
+        log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 창 닫힘이나 호출 결과 미확인)"
+        return 2
+      fi ;;
+    *) log "[1Password] unsupported explicit action: $action"; return 1 ;;
+  esac
+  log "click-outcome-unconfirmed [1Password] (명시적 승인 방식 소진, 실제 승인 결과 미확인)"
+  return 2
 }
 
 # 한 action 실행 (성공적으로 "뭔가 했으면" 0). $1=id $2=action
@@ -102,7 +345,7 @@ do_action(){
   case "$action" in
     ocr:*) labels="${action#ocr:}"; C="$("$OCR" "$SHOT" "$labels" 2>/dev/null)"
            if [ -n "$C" ]; then
-             if [ "$DRY" = 1 ]; then echo "WOULD click ($C) [$id]"; else "$CLICK" c:"$C" >/dev/null 2>&1; fi
+             if [ "$DRY" = 1 ]; then echo "WOULD click ($C) [$id]"; else click_at "$C" >/dev/null 2>&1; fi
              log "[$id] click $C"; return 0
            fi
            log "[$id] 버튼 못찾음 (labels=$labels)"; return 1 ;;
@@ -157,6 +400,13 @@ key_targets_approval(){
 #   (Claude-for-Chrome 처럼 사이트마다 승인키가 cmd+return / return 으로 갈리는 창 대응)
 act_and_verify(){
   local id="$1" marker="$2" action="$3"
+  if [ "$id" = "1Password" ]; then
+    if [ -n "$HINT_TYPE" ] || [[ "$action" = key:* ]]; then
+      approve_1password_explicit "$marker" "$action"; return $?
+    elif [[ "$action" = ocr:* ]]; then
+      approve_1password "$marker" "${action#ocr:}"; return $?
+    fi
+  fi
   case "$action" in
     key:*)
       # 각 후보 키를 짧은 간격으로 다회 연타(매번 닫힘 확인 → 닫히면 즉시 멈춰 부작용 방지).
@@ -233,11 +483,27 @@ rule_by_id(){
 deadline=$(( $(date +%s) + WAIT_SECS ))
 cycle=0
 while :; do
+  if [ -n "$REQUEST_ID" ] && [ -f "$CANCEL_FILE" ] && [ "$(head -1 "$CANCEL_FILE" 2>/dev/null)" = "$REQUEST_ID" ]; then
+    log "click-outcome-unconfirmed [request cancelled before approval]"
+    exit 1
+  fi
   cycle=$((cycle+1))
   capture || { sleep "$INTERVAL"; [ "$(date +%s)" -ge "$deadline" ] && break || continue; }
 
   # 0) 힌트 룰 우선 시도 (에이전트가 어떤 승인인지 알려준 경우)
   handled=0
+  # --type 만 제공됐더라도 실제 결과 채널이 있으면, 보이는 1Password
+  # 마커를 먼저 식별해 포커스+결과확인 경로를 우회하지 않게 한다.
+  if [ -z "$HINT_ID" ] && [ -n "$HINT_TYPE" ] && [ -n "$OUTCOME_FILE" ]; then
+    _onepass="$(rule_by_id "1Password")"
+    _onemarker="${_onepass%%$'\t'*}"
+    [ -n "$_onemarker" ] && "$OCR" "$SHOT" --has "$_onemarker" 2>/dev/null && HINT_ID="1Password"
+    if [ -z "$HINT_ID" ]; then
+      [ "$(date +%s)" -ge "$deadline" ] && break
+      sleep "$INTERVAL"
+      continue
+    fi
+  fi
   # 설계철학: 에이전트가 --for 로 "이 승인이 떴다"고 명시하면 그 판단을 신뢰한다 →
   # OCR 매칭 없이도 룰 action(예: key:return)을 바로 실행. vision/OCR 은 힌트가 없을 때의 fallback 일 뿐.
   # key:<combo> 는 OCR 0% 의존(키만 전송)이라, 화면을 못 읽어도 동작한다. act_and_verify 가 '창 닫힘'으로

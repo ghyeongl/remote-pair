@@ -138,14 +138,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? "".write(toFile: HEARTBEAT, atomically: false, encoding: .utf8)
         writeStatus()   // 앱 생존 + AX/SR/FDA grant 사실을 status.json 에 — 에이전트가 추측 없이 읽도록
         if FileManager.default.fileExists(atPath: TRIGGER) {
-            try? FileManager.default.removeItem(atPath: TRIGGER)
-            log("APPROVE: trigger → router")
-            approve.run()
+            if approve.run(triggerBacked: true) {
+                try? FileManager.default.removeItem(atPath: TRIGGER)
+                log("APPROVE: trigger → router")
+            }
         }
     }
 
     @objc func grantPermissions() { Permissions.requestAndOpen() }
-    @objc func approveNow() { approve.run() }
+    @objc func approveNow() {
+        if FileManager.default.fileExists(atPath: TRIGGER) {
+            if approve.run(triggerBacked: true) {
+                try? FileManager.default.removeItem(atPath: TRIGGER)
+                log("APPROVE: manual action consumed queued trigger → router")
+            }
+        } else {
+            approve.run()
+        }
+    }
     @objc func restartHost() {
         // 진짜 재시작(서버+세션 reap 후 재기동) — 활성 세션 있으면 끊김 경고 후 진행.
         let n = Sessions.serverUp() ? Sessions.list().count : 0

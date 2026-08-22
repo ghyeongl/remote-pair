@@ -11,7 +11,7 @@
 #   remote-pair onboard        Interactive, re-runnable client setup (host, terminal app, folder mapping, doctor).
 #   remote-pair open-gui <dir> Open the configured terminal app in a new window running 'launch <dir>'.
 #   remote-pair doctor         Check SSH key connection, host app, tmux + guidance
-#   remote-pair approve [--for "<what>"] [--type "key:..|ocr:.."] [--timeout S]   Handle a blocked approval dialog
+#   remote-pair approve [--for "<what>"] [--type "key:..|ocr:.."] [--outcome-file /tmp/remote-pair.outcome.*] [--timeout S]
 #                              --for: which dialog (alias-tolerant)  ·  --type: how to approve — agent decides (key:<combo>|ocr:<label>)
 #   remote-pair status         Host server, app, heartbeat status
 #   remote-pair logs [--host] [-f] [-n N]   Tail logs (local launcher/app; --host = host logs over ssh; -f = follow)
@@ -33,6 +33,7 @@ BUNDLE_PREFIX="${BUNDLE_PREFIX:-com.x10lab.remote-pair-host}"
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
 AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux-rp.sock}"
 APPROVE_TRIGGER="${APPROVE_TRIGGER:-/tmp/remote-pair.approve-request}"
+APPROVE_LOCK="${APPROVE_LOCK:-/tmp/remote-pair.approve-lock}"
 LOG_FILE="${LOG_FILE:-$RP_DIR/logs/remote-pair.log}"
 HEARTBEAT_FILE="${HEARTBEAT_FILE:-$RP_DIR/logs/remote-pair.heartbeat}"
 REMOTE_HOST="${REMOTE_HOST:-}"
@@ -73,11 +74,9 @@ _mark() { [ "$1" = true ] && printf '✓' || printf '✗'; }
 in_host_session() { case "${TMUX:-}" in *aqua-tmux-rp.sock*) return 0;; *) return 1;; esac; }
 
 # Is the RemotePairHost app available to serve app-dependent commands here?
-#   true if the app is installed locally (bundle/process/status.json) OR we're inside a live host session.
+#   true only if the daemon is live locally, or we're inside a live host session.
 app_available() {
-  [ -d "$HOME/Applications/$APP_NAME.app" ] && return 0
   [ -n "$(app_pid)" ] && return 0
-  [ -f "$STATUS_FILE" ] && return 0
   in_host_session && host_up && return 0
   return 1
 }
@@ -494,41 +493,104 @@ EOF
 }
 
 cmd_approve() {
-  local forhint="" type="" timeout=22     # longer than the router's adaptive polling (~18s default)
+  local forhint="" type="" outcome_file="" timeout=90 request_id cancel_file published=0 completed=0
   while [ $# -gt 0 ]; do case "$1" in
     --for|--label|--expect) forhint="${2:-}"; shift 2 ;;   # 어떤 승인창인지 힌트(룰 id/자유문구; 별칭 관대)
     --type) type="${2:-}"; shift 2 ;;                       # 어떻게 승인할지 — key:<combo> | ocr:<라벨> (에이전트가 방식 지정)
-    --timeout) timeout="${2:-22}"; shift 2 ;;
+    --outcome-file) outcome_file="${2:-}"; shift 2 ;;
+    --timeout) timeout="${2:-90}"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; return 2 ;;
   esac; done
+  if [ -n "$outcome_file" ]; then
+    [ "$(dirname "$outcome_file")" = /tmp ] && [[ "$(basename "$outcome_file")" = remote-pair.outcome.* ]] || {
+      echo "--outcome-file must be a direct /tmp/remote-pair.outcome.* path" >&2; return 2
+    }
+  fi
+  request_id="$(uuidgen 2>/dev/null || printf '%s-%s' "$$" "$RANDOM")"
+  cancel_file="$APPROVE_TRIGGER.cancel.$request_id"
+  # macOS shlock uses link(2): acquisition and stale-PID replacement are
+  # atomic, with no empty-directory or takeover-guard crash window.
+  if ! /usr/bin/shlock -f "$APPROVE_LOCK" -p "$$"; then
+    echo "another remote-pair approve request is already active" >&2
+    return 1
+  fi
+  if [ -e "$APPROVE_TRIGGER" ]; then
+    rm -f "$APPROVE_LOCK" 2>/dev/null
+    echo "another approval trigger is already queued" >&2
+    return 1
+  fi
+  _write_companion() {
+    local path="$1" value="$2"
+    rm -f "$path" 2>/dev/null || return 1
+    ( umask 077; set -C; printf '%s\n' "$value" > "$path" ) 2>/dev/null
+  }
+  _approve_unlock() {
+    trap - RETURN EXIT INT TERM HUP
+    # If this caller timed out before the host consumed its slot, cancel only
+    # that still-owned request before allowing another caller to reuse it.
+    if [ "$published" = 0 ] && [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ]; then
+      rm -f "$APPROVE_TRIGGER" "$APPROVE_TRIGGER.label" "$APPROVE_TRIGGER.type" \
+        "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" "$cancel_file" "$APPROVE_LOCK.id" \
+        2>/dev/null || true
+      rm -f "$APPROVE_LOCK" 2>/dev/null
+    elif [ "$published" = 1 ] && [ "$completed" = 0 ]; then
+      # Cancellation is a correlated marker, never a check-then-delete of
+      # ownership that may already have transferred to the host/router.
+      printf '%s\n' "$request_id" > "$cancel_file" 2>/dev/null || true
+    fi
+  }
+  trap _approve_unlock RETURN EXIT
+  trap '_approve_unlock; exit 130' INT TERM HUP
   # approve needs the privileged app. If it isn't here (e.g. a client-only machine), guide to install
   # the host app instead of silently sending a trigger nobody will pick up.
   if ! app_available; then need_app_guidance; return 1; fi
+  _write_companion "$APPROVE_LOCK.id" "$$:$request_id" || return 1
+  _write_companion "$cancel_file" pending || return 1
   # base0 = log length just before triggering (so we show only this request's router log to the agent)
   local base0=0; [ -f "$LOG_FILE" ] && base0=$(wc -l < "$LOG_FILE")
   local base="$base0"
   # Pass the hint: the router reads the .label file to prioritize the matching rule + use it as a haiku prior, then consumes it.
-  if [ -n "$forhint" ]; then printf '%s\n' "$forhint" > "$APPROVE_TRIGGER.label" 2>/dev/null || true
+  if [ -n "$forhint" ]; then _write_companion "$APPROVE_TRIGGER.label" "$forhint" || return 1
   else rm -f "$APPROVE_TRIGGER.label" 2>/dev/null || true; fi
-  if [ -n "$type" ]; then printf '%s\n' "$type" > "$APPROVE_TRIGGER.type" 2>/dev/null || true
+  if [ -n "$type" ]; then _write_companion "$APPROVE_TRIGGER.type" "$type" || return 1
   else rm -f "$APPROVE_TRIGGER.type" 2>/dev/null || true; fi
-  : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
+  if [ -n "$outcome_file" ]; then
+    _write_companion "$outcome_file" "pending:$request_id" || return 1
+    _write_companion "$APPROVE_TRIGGER.outcome" "$outcome_file" || return 1
+  else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
+  _write_companion "$APPROVE_TRIGGER.request-id" "$request_id" || return 1
+  _write_companion "$APPROVE_TRIGGER" "" || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
+  published=1
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"
   # Print only this request's router log lines (so the agent can read the result and decide next steps).
-  _router_trail() { [ -f "$LOG_FILE" ] || return 0; local tot; tot=$(wc -l < "$LOG_FILE"); [ "$tot" -gt "$base0" ] && tail -n "$(( tot - base0 ))" "$LOG_FILE" | grep 'router:'; }
+  _router_trail() { [ -f "$LOG_FILE" ] || return 0; local tot; tot=$(wc -l < "$LOG_FILE"); [ "$tot" -gt "$base0" ] && tail -n "$(( tot - base0 ))" "$LOG_FILE" | grep -F "router: [request=$request_id]"; }
   local end=$(( $(date +%s) + timeout ))
   while [ "$(date +%s)" -lt "$end" ]; do
     if [ -f "$LOG_FILE" ]; then
       local now; now=$(wc -l < "$LOG_FILE")
       if [ "$now" -gt "$base" ]; then
-        local new; new=$(tail -n "$(( now - base ))" "$LOG_FILE")
+        local new; new=$(tail -n "$(( now - base ))" "$LOG_FILE" | grep -F "router: [request=$request_id]" || true)
         if printf '%s\n' "$new" | grep -qiE 'router:.*success'; then
+          completed=1
           _router_trail | sed 's/^/  /'
           echo "✓ handled (window-close verified)"; return 0
         fi
-        if printf '%s\n' "$new" | grep -q 'router: click-outcome-unconfirmed'; then
+        if printf '%s\n' "$new" | grep -q 'router:.*click-outcome-unconfirmed'; then
+          completed=1
           _router_trail | sed 's/^/  /' >&2
           echo "✗ click sent, but approval outcome is unconfirmed — retry the blocked operation" >&2
+          return 1
+        fi
+        if printf '%s\n' "$new" | grep -q 'router:.*no dialog handled within'; then
+          completed=1
+          _router_trail | sed 's/^/  /' >&2
+          echo "✗ no approval dialog appeared" >&2
+          return 1
+        fi
+        if printf '%s\n' "$new" | grep -q 'router:.*ocr-find 없음 — 중단'; then
+          completed=1
+          _router_trail | sed 's/^/  /' >&2
+          echo "✗ approve router cannot start without ocr-find" >&2
           return 1
         fi
         base="$now"

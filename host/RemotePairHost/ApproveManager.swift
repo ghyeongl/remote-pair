@@ -7,20 +7,128 @@ import Cocoa
 
 final class ApproveManager {
     private var running = false
-    func run() {
-        if running { return }                          // 라우터가 내부 재시도하므로 중복 스폰 방지
+    private func readRegularCompanion(_ path: String) -> String? {
+        let fd = Darwin.open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        defer { Darwin.close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        let count = Darwin.read(fd, &bytes, bytes.count)
+        guard count > 0 else { return nil }
+        return String(bytes: bytes.prefix(Int(count)), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @discardableResult
+    func run(triggerBacked: Bool = false) -> Bool {
+        if running { return false }                    // caller keeps trigger queued until the active router exits
         running = true
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = [ROUTER]
-        p.environment = ["HOME": HOME,
+        var environment = ["HOME": HOME,
                          // 번들 Helpers 를 PATH 앞에 — 라우터가 동봉된 ocr-find 를 찾도록
                          "PATH": "\(HELPERS):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
                          "LANG": "en_US.UTF-8",
                          // 라우터가 올바른 네임스페이스에서 룰/로그를 읽도록 명시 주입
                          "RP_DIR": RP_DIR, "RULES_FILE": RULES_FILE, "LOG_FILE": LOGP]
-        p.terminationHandler = { [weak self] _ in self?.running = false }
-        do { try p.run(); log("APPROVE: router spawned") }      // async — 메인스레드 안 막음
-        catch { log("APPROVE: router spawn 실패 \(error)"); running = false }
+        let requestIDFile = TRIGGER + ".request-id"
+        let outcomeRequest = TRIGGER + ".outcome"
+        var cancelRequest: String?
+        var requestID: String?
+        var claimedRequestIDFile: String?
+        var priorLockOwner: String?
+        var ownsLock = false
+        if triggerBacked, let value = readRegularCompanion(requestIDFile), !value.isEmpty {
+            requestID = value
+            let claimed = requestIDFile + ".claimed." + value
+            claimedRequestIDFile = claimed
+            priorLockOwner = readRegularCompanion(APPROVE_LOCK)
+            let lockBinding = readRegularCompanion(APPROVE_LOCK + ".id")
+            guard let owner = priorLockOwner, let ownerPID = Int32(owner), kill(ownerPID, 0) == 0,
+                  lockBinding == "\(owner):\(value)" else {
+                try? FileManager.default.removeItem(atPath: requestIDFile)
+                try? FileManager.default.removeItem(atPath: outcomeRequest)
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".cancel." + value)
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".label")
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".type")
+                running = false
+                return true
+            }
+            do {
+                try "\(getpid())\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                try FileManager.default.moveItem(atPath: requestIDFile, toPath: claimed)
+            } catch {
+                if let owner = priorLockOwner {
+                    try? "\(owner)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                }
+                running = false
+                return false
+            }
+            ownsLock = true
+            environment["RP_REQUEST_ID"] = value
+            let cancel = TRIGGER + ".cancel." + value
+            cancelRequest = cancel
+            environment["RP_CANCEL_FILE"] = cancel
+            if readRegularCompanion(cancel) == value {
+                try? FileManager.default.removeItem(atPath: claimed)
+                try? FileManager.default.removeItem(atPath: outcomeRequest)
+                try? FileManager.default.removeItem(atPath: cancel)
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".label")
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".type")
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK + ".id")
+                running = false
+                return true
+            }
+            if let path = readRegularCompanion(outcomeRequest) {
+                let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+                let allowedParent = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath()
+                if candidate.deletingLastPathComponent().path == allowedParent.path
+                    && candidate.lastPathComponent.hasPrefix("remote-pair.outcome.") {
+                    environment["RP_OUTCOME_FILE"] = candidate.path
+                }
+            }
+        } else {
+            let lock = runCapture("/usr/bin/shlock", ["-f", APPROVE_LOCK, "-p", "\(getpid())"])
+            guard lock.status == 0 else { running = false; return false }
+            ownsLock = true
+        }
+        p.environment = environment
+        p.terminationHandler = { [weak self] process in
+            self?.running = false
+            if let cancel = cancelRequest {
+                try? FileManager.default.removeItem(atPath: cancel)
+            }
+        }
+        do {
+            try p.run()
+            if ownsLock {
+                try? "\(p.processIdentifier)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                if let id = requestID {
+                    try? "\(p.processIdentifier):\(id)\n".write(toFile: APPROVE_LOCK + ".id", atomically: true, encoding: .utf8)
+                }
+            }
+            if requestID != nil {
+                try? FileManager.default.removeItem(atPath: outcomeRequest)
+                if let claimed = claimedRequestIDFile { try? FileManager.default.removeItem(atPath: claimed) }
+            }
+            log("APPROVE: router spawned")
+            return true
+        } // async — 메인스레드 안 막음
+        catch {
+            if requestID != nil {
+                if let claimed = claimedRequestIDFile {
+                    try? FileManager.default.moveItem(atPath: claimed, toPath: requestIDFile)
+                }
+                if let owner = priorLockOwner {
+                    try? "\(owner)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                }
+            } else if ownsLock, readRegularCompanion(APPROVE_LOCK) == "\(getpid())" {
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
+            }
+            log("APPROVE: router spawn 실패 \(error)"); running = false; return false
+        }
     }
 }
