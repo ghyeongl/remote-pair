@@ -44,6 +44,9 @@ EOF
 cat >"$TMP/bin/osascript" <<'EOF'
 #!/bin/bash
 [[ -n "${OSASCRIPT_LOG:-}" ]] && printf '%s\n' "$*" >>"$OSASCRIPT_LOG"
+if [[ "$*" == *"key code"* && -n "${OUTCOME_ON_KEY_FILE:-}" ]]; then
+  printf '%s\n' "${OUTCOME_ON_KEY_VERDICT:-ok}" >"$OUTCOME_ON_KEY_FILE"
+fi
 :
 EOF
 chmod +x "$TMP/bin/screencapture" "$TMP/bin/cliclick" "$TMP/bin/osascript"
@@ -122,8 +125,28 @@ grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
 grep -q 'key code 36' "$TMP/osascript.log"
 grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
 
+# A rule-defined 1Password key also stays on the focused/outcome-confirmed
+# path. An ok outcome stops immediately even if another matching dialog is
+# already visible (queued request).
+printf '1Password\tAccess Requested\tkey:return\n' >"$TMP/rules.txt"
+printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR=1Password RP_TYPE= RP_VISION=off \
+  RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
+  OUTCOME_ON_KEY_FILE="$TMP/outcome" OUTCOME_ON_KEY_VERDICT=ok OSASCRIPT_LOG="$TMP/osascript.log" \
+  GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+[[ "$(cat "$TMP/capture-count")" == 1 ]]
+grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
+grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
+
 # If no method closes the dialog, exhaust the full ladder and preserve #124's
 # unconfirmed failure verdict.
+printf '1Password\tAccess Requested\tocr:Authorize\n' >"$TMP/rules.txt"
 printf 'present\n' >"$TMP/ocr-phase"
 : >"$TMP/capture-count"
 if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \

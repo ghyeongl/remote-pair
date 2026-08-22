@@ -124,6 +124,10 @@ outcome_confirmed(){
   return 1
 }
 
+outcome_now(){
+  [ -n "$OUTCOME_FILE" ] && [ -f "$OUTCOME_FILE" ] && head -1 "$OUTCOME_FILE" 2>/dev/null || true
+}
+
 ax_press(){
   local labels="$1"
   "$OSASCRIPT" - "$labels" <<'APPLESCRIPT'
@@ -158,7 +162,7 @@ APPLESCRIPT
 # by the same marker check; only a declared approve method that closes the
 # approval dialog is accepted as success.
 approve_1password(){
-  local marker="$1" labels="$2" combo C x y method
+  local marker="$1" labels="$2" combo C x y method verdict
   if [ "$DRY" = 1 ]; then
     echo "WOULD try return|cmd+return|space|cliclick|system-events|axpress [1Password]"
     return 0
@@ -171,6 +175,11 @@ approve_1password(){
     sendkey "$combo" >/dev/null 2>&1
     log "[1Password] method key:$combo"
     sleep "$METHOD_GAP"
+    verdict="$(outcome_now)"
+    case "$verdict" in
+      ok) log "success [1Password] (method=key:$combo, 호출 결과 확인)"; return 0 ;;
+      fail) log "click-outcome-unconfirmed [1Password] (method=key:$combo, 호출 실패 확인)"; return 2 ;;
+    esac
     if dialog_gone "$marker"; then
       if outcome_confirmed; then
         log "success [1Password] (method=key:$combo, 호출 결과 확인)"; return 0
@@ -187,6 +196,11 @@ approve_1password(){
       else system_click "$x" "$y" >/dev/null 2>&1; fi
       log "[1Password] method $method:$C"
       sleep "$METHOD_GAP"
+      verdict="$(outcome_now)"
+      case "$verdict" in
+        ok) log "success [1Password] (method=$method:$C, 호출 결과 확인)"; return 0 ;;
+        fail) log "click-outcome-unconfirmed [1Password] (method=$method:$C, 호출 실패 확인)"; return 2 ;;
+      esac
       if dialog_gone "$marker"; then
         if outcome_confirmed; then
           log "success [1Password] (method=$method:$C, 호출 결과 확인)"; return 0
@@ -201,6 +215,11 @@ approve_1password(){
   ax_press "$labels" >/dev/null 2>&1
   log "[1Password] method axpress"
   sleep "$METHOD_GAP"
+  verdict="$(outcome_now)"
+  case "$verdict" in
+    ok) log "success [1Password] (method=axpress, 호출 결과 확인)"; return 0 ;;
+    fail) log "click-outcome-unconfirmed [1Password] (method=axpress, 호출 실패 확인)"; return 2 ;;
+  esac
   if dialog_gone "$marker"; then
     if outcome_confirmed; then
       log "success [1Password] (method=axpress, 호출 결과 확인)"; return 0
@@ -213,7 +232,7 @@ approve_1password(){
 }
 
 approve_1password_explicit(){
-  local marker="$1" action="$2" combo
+  local marker="$1" action="$2" combo verdict
   if [ "$DRY" = 1 ]; then do_action "1Password" "$action"; return $?; fi
   "$OCR" "$SHOT" --has "$marker" 2>/dev/null || {
     log "[1Password] dialog marker not present yet"; return 1
@@ -226,6 +245,11 @@ approve_1password_explicit(){
         sendkey "$combo" >/dev/null 2>&1
         log "[1Password] explicit method key:$combo"
         sleep "$METHOD_GAP"
+        verdict="$(outcome_now)"
+        case "$verdict" in
+          ok) log "success [1Password] (explicit method=key:$combo, 호출 결과 확인)"; return 0 ;;
+          fail) log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 호출 실패 확인)"; return 2 ;;
+        esac
         if dialog_gone "$marker"; then
           if outcome_confirmed; then
             log "success [1Password] (explicit method=key:$combo, 호출 결과 확인)"; return 0
@@ -237,6 +261,11 @@ approve_1password_explicit(){
     ocr:*)
       do_action "1Password" "$action" || return 1
       sleep "$METHOD_GAP"
+      verdict="$(outcome_now)"
+      case "$verdict" in
+        ok) log "success [1Password] (explicit method=ocr, 호출 결과 확인)"; return 0 ;;
+        fail) log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 호출 실패 확인)"; return 2 ;;
+      esac
       if dialog_gone "$marker"; then
         if outcome_confirmed; then
           log "success [1Password] (explicit method=ocr, 호출 결과 확인)"; return 0
@@ -312,7 +341,7 @@ key_targets_approval(){
 act_and_verify(){
   local id="$1" marker="$2" action="$3"
   if [ "$id" = "1Password" ]; then
-    if [ -n "$HINT_TYPE" ]; then
+    if [ -n "$HINT_TYPE" ] || [[ "$action" = key:* ]]; then
       approve_1password_explicit "$marker" "$action"; return $?
     elif [[ "$action" = ocr:* ]]; then
       approve_1password "$marker" "${action#ocr:}"; return $?
