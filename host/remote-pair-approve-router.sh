@@ -39,6 +39,7 @@ CLICK_VERIFY_DELAY="${RP_CLICK_VERIFY_DELAY:-0.8}" # 클릭 직후 1회만 결�
 METHOD_GAP="${RP_METHOD_GAP:-0.4}"             # 1Password 승인 방식별 결과 확인 전 대기
 OUTCOME_FILE="${RP_OUTCOME_FILE:-}"            # 선택: 호출자가 쓰는 ok|fail 실제 결과 채널
 OUTCOME_WAIT="${RP_OUTCOME_WAIT:-5}"           # 창 닫힘 후 실제 호출 결과 대기
+REQUEST_ID="${RP_REQUEST_ID:-}"
 # 비전(haiku) — 구독 claude CLI 재사용, best-effort
 VISION="${RP_VISION:-auto}"                    # auto(룰 미스 시) | on | off
 VISION_MODEL="${RP_VISION_MODEL:-claude-haiku-4-5}"
@@ -48,7 +49,7 @@ VISION_MAX_FAILS="${RP_VISION_MAX_FAILS:-2}"   # 연속 claude 실패 N회 → �
 VISION_FAILS=0; LAST_VISION_RC=0
 GENERIC_LABELS="Allow|Authorize|Authorize Once|Always Allow|Approve|Confirm|Continue|OK|허용|승인|확인|한 번 승인"
 
-log(){ printf '%s router: %s\n' "$(date '+%H:%M:%S')" "$1" >> "$LOG"; }
+log(){ printf '%s router: %s%s\n' "$(date '+%H:%M:%S')" "${REQUEST_ID:+[request=$REQUEST_ID] }" "$1" >> "$LOG"; }
 [ -n "$OCR" ] || { log "ocr-find 없음 — 중단"; exit 1; }
 
 # 힌트: 에이전트가 "어떤 승인인지"(룰 id 또는 자유문구) 미리 알려주면 해당 룰을 우선 시도 +
@@ -186,7 +187,14 @@ approve_1password(){
   "$OCR" "$SHOT" --has "$marker" 2>/dev/null || {
     log "[1Password] dialog marker not present yet"; return 1
   }
+  verdict="$(outcome_now)"
+  case "$verdict" in
+    ok) log "success [1Password] (호출 결과가 승인 방식 전 이미 확인됨)"; return 0 ;;
+    fail) log "click-outcome-unconfirmed [1Password] (호출 실패가 승인 방식 전 이미 확인됨)"; return 2 ;;
+  esac
   for combo in return cmd+return space; do
+    verdict="$(outcome_now)"
+    case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
     focus_1password >/dev/null 2>&1
     sendkey "$combo" >/dev/null 2>&1
     log "[1Password] method key:$combo"
@@ -208,6 +216,8 @@ approve_1password(){
   if [ -n "$C" ]; then
     x="${C%%,*}"; y="${C#*,}"
     for method in cliclick system-events; do
+      verdict="$(outcome_now)"
+      case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
       if [ "$method" = cliclick ]; then "$CLICK" c:"$C" >/dev/null 2>&1
       else system_click "$x" "$y" >/dev/null 2>&1; fi
       log "[1Password] method $method:$C"
@@ -228,6 +238,8 @@ approve_1password(){
   else
     log "[1Password] approve 버튼 좌표 못찾음 (labels=$labels)"
   fi
+  verdict="$(outcome_now)"
+  case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
   ax_press "$labels" >/dev/null 2>&1
   log "[1Password] method axpress"
   sleep "$METHOD_GAP"
@@ -253,10 +265,17 @@ approve_1password_explicit(){
   "$OCR" "$SHOT" --has "$marker" 2>/dev/null || {
     log "[1Password] dialog marker not present yet"; return 1
   }
+  verdict="$(outcome_now)"
+  case "$verdict" in
+    ok) log "success [1Password] (호출 결과가 승인 방식 전 이미 확인됨)"; return 0 ;;
+    fail) log "click-outcome-unconfirmed [1Password] (호출 실패가 승인 방식 전 이미 확인됨)"; return 2 ;;
+  esac
   case "$action" in
     key:*)
       IFS='|' read -ra _EXPLICIT_KEYS <<< "${action#key:}"
       for combo in "${_EXPLICIT_KEYS[@]}"; do
+        verdict="$(outcome_now)"
+        case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
         focus_1password >/dev/null 2>&1
         sendkey "$combo" >/dev/null 2>&1
         log "[1Password] explicit method key:$combo"
@@ -275,6 +294,8 @@ approve_1password_explicit(){
         fi
       done ;;
     ocr:*)
+      verdict="$(outcome_now)"
+      case "$verdict" in ok) log "success [1Password] (호출 결과 확인)"; return 0 ;; fail) log "click-outcome-unconfirmed [1Password] (호출 실패 확인)"; return 2 ;; esac
       do_action "1Password" "$action" || return 1
       sleep "$METHOD_GAP"
       verdict="$(outcome_after_method)"
@@ -450,6 +471,11 @@ while :; do
     _onepass="$(rule_by_id "1Password")"
     _onemarker="${_onepass%%$'\t'*}"
     [ -n "$_onemarker" ] && "$OCR" "$SHOT" --has "$_onemarker" 2>/dev/null && HINT_ID="1Password"
+    if [ -z "$HINT_ID" ]; then
+      [ "$(date +%s)" -ge "$deadline" ] && break
+      sleep "$INTERVAL"
+      continue
+    fi
   fi
   # 설계철학: 에이전트가 --for 로 "이 승인이 떴다"고 명시하면 그 판단을 신뢰한다 →
   # OCR 매칭 없이도 룰 action(예: key:return)을 바로 실행. vision/OCR 은 힌트가 없을 때의 fallback 일 뿐.

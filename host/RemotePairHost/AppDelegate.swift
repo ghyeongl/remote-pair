@@ -138,9 +138,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? "".write(toFile: HEARTBEAT, atomically: false, encoding: .utf8)
         writeStatus()   // 앱 생존 + AX/SR/FDA grant 사실을 status.json 에 — 에이전트가 추측 없이 읽도록
         if FileManager.default.fileExists(atPath: TRIGGER) {
-            try? FileManager.default.removeItem(atPath: TRIGGER)
-            log("APPROVE: trigger → router")
-            approve.run()
+            if approve.run() {
+                try? FileManager.default.removeItem(atPath: TRIGGER)
+                log("APPROVE: trigger → router")
+            }
         }
     }
 

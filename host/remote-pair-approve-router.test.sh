@@ -45,6 +45,9 @@ cat >"$TMP/bin/osascript" <<'EOF'
 #!/bin/bash
 [[ -n "${OSASCRIPT_LOG:-}" ]] && printf '%s\n' "$*" >>"$OSASCRIPT_LOG"
 if [[ "$*" == *"key code"* && -n "${OUTCOME_ON_KEY_FILE:-}" ]]; then
+  if [[ -n "${REQUIRE_PHASE_ON_KEY:-}" && "$(cat "${OCR_PHASE_FILE:?}")" != present ]]; then
+    : >"${KEY_BEFORE_MARKER_FILE:?}"
+  fi
   if [[ -n "${OUTCOME_ON_KEY_DELAY:-}" ]]; then
     ( sleep "$OUTCOME_ON_KEY_DELAY"; printf '%s\n' "${OUTCOME_ON_KEY_VERDICT:-ok}" >"$OUTCOME_ON_KEY_FILE" ) &
   else
@@ -150,8 +153,8 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
 [[ "$(grep -c 'key code' "$TMP/osascript.log")" == 1 ]]
 grep -q 'router: success \[1Password\] (method=key:return' "$TMP/logs/router.log"
 
-# Type-only requests with a real outcome channel identify the visible
-# 1Password rule, preserve an early caller verdict, and use the focused path.
+# Type-only requests with a real outcome channel preserve an early caller
+# verdict without dispatching a key to a queued dialog.
 printf 'present\n' >"$TMP/ocr-phase"
 printf 'ok\n' >"$TMP/outcome"
 : >"$TMP/capture-count"
@@ -164,7 +167,28 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 OSASCRIPT_LOG="$TMP/osascript.log" \
   GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
 [[ "$(cat "$TMP/capture-count")" == 1 ]]
-grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
+! grep -q 'key code' "$TMP/osascript.log"
+grep -q 'router: success \[1Password\] (호출 결과가 승인 방식 전 이미 확인됨)' "$TMP/logs/router.log"
+
+# A type-only request waits for the 1Password marker instead of sending its
+# key generically to the currently focused app on the first polling cycle.
+printf 'absent\n' >"$TMP/ocr-phase"
+: >"$TMP/outcome"
+: >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+rm -f "$TMP/key-before-marker"
+( sleep 0.4; printf 'present\n' >"$TMP/ocr-phase" ) &
+PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_TYPE=key:return RP_VISION=off \
+  RP_WAIT_SECS=2 RP_INTERVAL=0.1 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
+  OUTCOME_ON_KEY_FILE="$TMP/outcome" OUTCOME_ON_KEY_VERDICT=ok \
+  REQUIRE_PHASE_ON_KEY=1 KEY_BEFORE_MARKER_FILE="$TMP/key-before-marker" \
+  OSASCRIPT_LOG="$TMP/osascript.log" GONE_AT=999 \
+  "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+[[ ! -e "$TMP/key-before-marker" ]]
 grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
 
 # A rule-defined 1Password key also stays on the focused/outcome-confirmed
