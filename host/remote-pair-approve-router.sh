@@ -35,6 +35,7 @@ DRY="${RP_DRY:-0}"                             # RP_DRY=1 = 실제 클릭/키 �
 WAIT_SECS="${RP_WAIT_SECS:-${1:-18}}"          # 승인창 출현을 기다리는 총 윈도우(초)
 INTERVAL="${RP_INTERVAL:-1.2}"                 # 폴링 간격
 CLICK_VERIFY_DELAY="${RP_CLICK_VERIFY_DELAY:-0.8}" # 클릭 직후 1회만 결과 확인(재시도 중 timeout 오판 방지)
+METHOD_GAP="${RP_METHOD_GAP:-0.4}"             # 1Password 승인 방식별 결과 확인 전 대기
 # 비전(haiku) — 구독 claude CLI 재사용, best-effort
 VISION="${RP_VISION:-auto}"                    # auto(룰 미스 시) | on | off
 VISION_MODEL="${RP_VISION_MODEL:-claude-haiku-4-5}"
@@ -78,22 +79,105 @@ capture(){ [ -n "${RP_SHOT:-}" ] && return 0; $SCAP -x "$SHOT" 2>/tmp/rp-scap.er
 # 안 먹히는 반면(실측 확인), System Events key code 는 먹힌다. 좌표 클릭(OCR 오매칭 위험) 회피.
 # "cmd+return" → key code 36 using {command down}  /  "return" → key code 36
 sendkey(){
-  local combo="$1" key mods="" m kc parts="" M
+  local combo="$1" key mods="" m kc parts=""
+  local -a M=()
   key="${combo##*+}"; [ "$combo" != "$key" ] && mods="${combo%+*}"
   case "$key" in
     return|enter) kc=36 ;; esc|escape) kc=53 ;; space) kc=49 ;; tab) kc=48 ;; *) kc="" ;;
   esac
-  IFS='+' read -ra M <<< "$mods"
-  for m in "${M[@]}"; do case "$m" in
-    cmd|command) parts="$parts command down," ;; shift) parts="$parts shift down," ;;
-    ctrl|control) parts="$parts control down," ;; alt|option) parts="$parts option down," ;;
-  esac; done
+  if [ -n "$mods" ]; then
+    IFS='+' read -ra M <<< "$mods"
+    for m in "${M[@]}"; do case "$m" in
+      cmd|command) parts="$parts command down," ;; shift) parts="$parts shift down," ;;
+      ctrl|control) parts="$parts control down," ;; alt|option) parts="$parts option down," ;;
+    esac; done
+  fi
   local mod=""; [ -n "$parts" ] && mod=" using {${parts%,}}"
   if [ -n "$kc" ]; then
     osascript -e "tell application \"System Events\" to key code $kc$mod"
   else
     osascript -e "tell application \"System Events\" to keystroke \"$key\"$mod"
   fi
+}
+
+system_click(){
+  local x="$1" y="$2"
+  osascript -e "tell application \"System Events\" to click at {$x, $y}"
+}
+
+ax_press(){
+  local labels="$1"
+  osascript - "$labels" <<'APPLESCRIPT'
+on run argv
+  set AppleScript's text item delimiters to "|"
+  set wanted to text items of item 1 of argv
+  tell application "System Events"
+    repeat with proc in (application processes whose visible is true)
+      if (name of proc as text) contains "1Password" then
+        repeat with win in windows of proc
+          try
+            repeat with elem in entire contents of win
+              try
+                if role of elem is "AXButton" and (name of elem as text) is in wanted then
+                  perform action "AXPress" of elem
+                  return "pressed"
+                end if
+              end try
+            end repeat
+          end try
+        end repeat
+      end if
+    end repeat
+  end tell
+  return "not-found"
+end run
+APPLESCRIPT
+}
+
+# 1Password CLI-access dialog: exhaust semantically approving keys and all
+# available button activation mechanisms. Each method is followed immediately
+# by the same marker check; only a declared approve method that closes the
+# approval dialog is accepted as success.
+approve_1password(){
+  local marker="$1" labels="$2" combo C x y method
+  if [ "$DRY" = 1 ]; then
+    echo "WOULD try return|cmd+return|space|cliclick|system-events|axpress [1Password]"
+    return 0
+  fi
+  "$OCR" "$SHOT" --has "$marker" 2>/dev/null || {
+    log "[1Password] dialog marker not present yet"; return 1
+  }
+  for combo in return cmd+return space; do
+    sendkey "$combo" >/dev/null 2>&1
+    log "[1Password] method key:$combo"
+    sleep "$METHOD_GAP"
+    if dialog_gone "$marker"; then
+      log "success [1Password] (method=key:$combo, 승인 동작 후 창 닫힘)"; return 0
+    fi
+  done
+  C="$("$OCR" "$SHOT" "$labels" 2>/dev/null)"
+  if [ -n "$C" ]; then
+    x="${C%%,*}"; y="${C#*,}"
+    for method in cliclick system-events; do
+      if [ "$method" = cliclick ]; then "$CLICK" c:"$C" >/dev/null 2>&1
+      else system_click "$x" "$y" >/dev/null 2>&1; fi
+      log "[1Password] method $method:$C"
+      sleep "$METHOD_GAP"
+      if dialog_gone "$marker"; then
+        log "success [1Password] (method=$method:$C, 승인 컨트롤 후 창 닫힘)"; return 0
+      fi
+    done
+  else
+    log "[1Password] approve 버튼 좌표 못찾음 (labels=$labels)"
+  fi
+  ax_press "$labels" >/dev/null 2>&1
+  log "[1Password] method axpress"
+  sleep "$METHOD_GAP"
+  if dialog_gone "$marker"; then
+    log "success [1Password] (method=axpress, 승인 컨트롤 후 창 닫힘)"; return 0
+  fi
+  log "click-outcome-unconfirmed [1Password] (모든 승인 방식 소진, 실제 승인 결과 미확인)"
+  return 2
 }
 
 # 한 action 실행 (성공적으로 "뭔가 했으면" 0). $1=id $2=action
@@ -157,6 +241,10 @@ key_targets_approval(){
 #   (Claude-for-Chrome 처럼 사이트마다 승인키가 cmd+return / return 으로 갈리는 창 대응)
 act_and_verify(){
   local id="$1" marker="$2" action="$3"
+  if [ "$id" = "1Password" ] && [[ "$action" = ocr:* ]]; then
+    approve_1password "$marker" "${action#ocr:}"
+    return $?
+  fi
   case "$action" in
     key:*)
       # 각 후보 키를 짧은 간격으로 다회 연타(매번 닫힘 확인 → 닫히면 즉시 멈춰 부작용 방지).
