@@ -508,50 +508,25 @@ cmd_approve() {
       echo "--outcome-file must be a direct /tmp/remote-pair.outcome.* path" >&2; return 2
     }
   fi
-  _approve_lock_is_stale() {
-    local owner="" mtime=0 age=0
-    [ -f "$APPROVE_LOCK/pid" ] && owner="$(head -1 "$APPROVE_LOCK/pid" 2>/dev/null)"
-    if [ -n "$owner" ]; then ! kill -0 "$owner" 2>/dev/null; return; fi
-    # An empty lock may be between mkdir and PID publication. Reap it only
-    # after a grace period, never in that live acquisition window.
-    mtime="$(stat -f %m "$APPROVE_LOCK" 2>/dev/null || echo 0)"
-    age=$(( $(date +%s) - mtime ))
-    [ "$mtime" -gt 0 ] && [ "$age" -ge 5 ]
-  }
-  if ! mkdir "$APPROVE_LOCK" 2>/dev/null; then
-    if _approve_lock_is_stale; then
-      # Serialize stale takeover itself so two contenders cannot delete each
-      # other's newly acquired, not-yet-populated lock directory.
-      if mkdir "$APPROVE_LOCK.reap" 2>/dev/null; then
-        if _approve_lock_is_stale; then
-          rm -f "$APPROVE_LOCK/pid" 2>/dev/null; rmdir "$APPROVE_LOCK" 2>/dev/null || true
-        fi
-        mkdir "$APPROVE_LOCK" 2>/dev/null || { rmdir "$APPROVE_LOCK.reap" 2>/dev/null; echo "another remote-pair approve request is already active" >&2; return 1; }
-        printf '%s\n' "$$" > "$APPROVE_LOCK/pid"
-        rmdir "$APPROVE_LOCK.reap" 2>/dev/null || true
-      else
-        echo "another remote-pair approve request is already active" >&2
-        return 1
-      fi
-    else
-      echo "another remote-pair approve request is already active" >&2
-      return 1
-    fi
+  # macOS shlock uses link(2): acquisition and stale-PID replacement are
+  # atomic, with no empty-directory or takeover-guard crash window.
+  if ! /usr/bin/shlock -f "$APPROVE_LOCK" -p "$$"; then
+    echo "another remote-pair approve request is already active" >&2
+    return 1
   fi
-  printf '%s\n' "$$" > "$APPROVE_LOCK/pid"
   request_id="$(uuidgen 2>/dev/null || printf '%s-%s' "$$" "$RANDOM")"
   _approve_unlock() {
     trap - RETURN EXIT INT TERM HUP
     # If this caller timed out before the host consumed its slot, cancel only
     # that still-owned request before allowing another caller to reuse it.
     if [ "$published" = 0 ]; then
-      rm -f "$APPROVE_LOCK/pid" 2>/dev/null
-      rmdir "$APPROVE_LOCK" 2>/dev/null || true
-    elif [ -f "$APPROVE_TRIGGER.request-id" ] && [ "$(head -1 "$APPROVE_TRIGGER.request-id" 2>/dev/null)" = "$request_id" ]; then
+      rm -f "$APPROVE_LOCK" 2>/dev/null
+    elif [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ] \
+      && [ -f "$APPROVE_TRIGGER.request-id" ] \
+      && [ "$(head -1 "$APPROVE_TRIGGER.request-id" 2>/dev/null)" = "$request_id" ]; then
       rm -f "$APPROVE_TRIGGER" "$APPROVE_TRIGGER.label" "$APPROVE_TRIGGER.type" \
         "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" 2>/dev/null || true
-      rm -f "$APPROVE_LOCK/pid" 2>/dev/null
-      rmdir "$APPROVE_LOCK" 2>/dev/null || true
+      rm -f "$APPROVE_LOCK" 2>/dev/null
     fi
   }
   trap _approve_unlock RETURN EXIT

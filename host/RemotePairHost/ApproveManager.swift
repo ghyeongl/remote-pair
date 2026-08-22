@@ -43,27 +43,48 @@ final class ApproveManager {
             }
         }
         let requestIDFile = TRIGGER + ".request-id"
-        if triggerBacked, let requestID = readRegularCompanion(requestIDFile), !requestID.isEmpty {
-            environment["RP_REQUEST_ID"] = requestID
+        let claimedRequestIDFile = requestIDFile + ".claimed"
+        var requestID: String?
+        var priorLockOwner: String?
+        if triggerBacked, let value = readRegularCompanion(requestIDFile), !value.isEmpty {
+            requestID = value
+            priorLockOwner = readRegularCompanion(APPROVE_LOCK)
+            do {
+                try "\(getpid())\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                try FileManager.default.moveItem(atPath: requestIDFile, toPath: claimedRequestIDFile)
+            } catch {
+                if let owner = priorLockOwner {
+                    try? "\(owner)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                }
+                running = false
+                return false
+            }
+            environment["RP_REQUEST_ID"] = value
         }
         p.environment = environment
         p.terminationHandler = { [weak self] _ in
             self?.running = false
-            if triggerBacked {
-                try? FileManager.default.removeItem(atPath: APPROVE_LOCK + "/pid")
+            if requestID != nil, self?.readRegularCompanion(APPROVE_LOCK) == "\(getpid())" {
                 try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
             }
         }
         do {
             try p.run()
-            if triggerBacked {
-                try? "\(getpid())\n".write(toFile: APPROVE_LOCK + "/pid", atomically: true, encoding: .utf8)
+            if requestID != nil {
                 try? FileManager.default.removeItem(atPath: outcomeRequest)
-                try? FileManager.default.removeItem(atPath: requestIDFile)
+                try? FileManager.default.removeItem(atPath: claimedRequestIDFile)
             }
             log("APPROVE: router spawned")
             return true
         } // async — 메인스레드 안 막음
-        catch { log("APPROVE: router spawn 실패 \(error)"); running = false; return false }
+        catch {
+            if requestID != nil {
+                try? FileManager.default.moveItem(atPath: claimedRequestIDFile, toPath: requestIDFile)
+                if let owner = priorLockOwner {
+                    try? "\(owner)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                }
+            }
+            log("APPROVE: router spawn 실패 \(error)"); running = false; return false
+        }
     }
 }
