@@ -73,3 +73,4 @@ if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   exit 1
 fi
 [[ "$(cat "$TMP/capture-count")" == 2 ]]
+grep -q 'router: click-outcome-unconfirmed \[1Password\]' "$TMP/logs/router.log"

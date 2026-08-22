@@ -182,9 +182,9 @@ act_and_verify(){
       # timeout/Decline/잘못된 좌표와도 구분되지 않으므로 성공 근거로 쓰지 않는다.
       sleep "$CLICK_VERIFY_DELAY"
       if dialog_gone "$marker"; then
-        log "[$id] 클릭 후 창 닫힘 — 실제 승인 결과 미확인"
+        log "click-outcome-unconfirmed [$id] (창 닫힘, 실제 승인 결과 미확인)"
       else
-        log "[$id] 클릭 직후 닫힘 미확인 — 실제 승인 결과 미확인"
+        log "click-outcome-unconfirmed [$id] (창 열림, 실제 승인 결과 미확인)"
       fi
       return 2 ;;
   esac
