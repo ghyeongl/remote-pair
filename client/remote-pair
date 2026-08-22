@@ -495,7 +495,7 @@ EOF
 }
 
 cmd_approve() {
-  local forhint="" type="" outcome_file="" timeout=90 request_id
+  local forhint="" type="" outcome_file="" timeout=90 request_id published=0
   while [ $# -gt 0 ]; do case "$1" in
     --for|--label|--expect) forhint="${2:-}"; shift 2 ;;   # 어떤 승인창인지 힌트(룰 id/자유문구; 별칭 관대)
     --type) type="${2:-}"; shift 2 ;;                       # 어떻게 승인할지 — key:<combo> | ocr:<라벨> (에이전트가 방식 지정)
@@ -511,8 +511,20 @@ cmd_approve() {
   if ! mkdir "$APPROVE_LOCK" 2>/dev/null; then
     local lock_pid=""; [ -f "$APPROVE_LOCK/pid" ] && lock_pid="$(head -1 "$APPROVE_LOCK/pid" 2>/dev/null)"
     if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
-      rm -f "$APPROVE_LOCK/pid" 2>/dev/null; rmdir "$APPROVE_LOCK" 2>/dev/null || true
-      mkdir "$APPROVE_LOCK" 2>/dev/null || { echo "another remote-pair approve request is already active" >&2; return 1; }
+      # Serialize stale takeover itself so two contenders cannot delete each
+      # other's newly acquired, not-yet-populated lock directory.
+      if mkdir "$APPROVE_LOCK.reap" 2>/dev/null; then
+        lock_pid=""; [ -f "$APPROVE_LOCK/pid" ] && lock_pid="$(head -1 "$APPROVE_LOCK/pid" 2>/dev/null)"
+        if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+          rm -f "$APPROVE_LOCK/pid" 2>/dev/null; rmdir "$APPROVE_LOCK" 2>/dev/null || true
+        fi
+        mkdir "$APPROVE_LOCK" 2>/dev/null || { rmdir "$APPROVE_LOCK.reap" 2>/dev/null; echo "another remote-pair approve request is already active" >&2; return 1; }
+        printf '%s\n' "$$" > "$APPROVE_LOCK/pid"
+        rmdir "$APPROVE_LOCK.reap" 2>/dev/null || true
+      else
+        echo "another remote-pair approve request is already active" >&2
+        return 1
+      fi
     else
       echo "another remote-pair approve request is already active" >&2
       return 1
@@ -523,12 +535,15 @@ cmd_approve() {
   _approve_unlock() {
     # If this caller timed out before the host consumed its slot, cancel only
     # that still-owned request before allowing another caller to reuse it.
-    if [ -f "$APPROVE_TRIGGER.request-id" ] && [ "$(head -1 "$APPROVE_TRIGGER.request-id" 2>/dev/null)" = "$request_id" ]; then
+    if [ "$published" = 0 ]; then
+      rm -f "$APPROVE_LOCK/pid" 2>/dev/null
+      rmdir "$APPROVE_LOCK" 2>/dev/null || true
+    elif [ -f "$APPROVE_TRIGGER.request-id" ] && [ "$(head -1 "$APPROVE_TRIGGER.request-id" 2>/dev/null)" = "$request_id" ]; then
       rm -f "$APPROVE_TRIGGER" "$APPROVE_TRIGGER.label" "$APPROVE_TRIGGER.type" \
         "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" 2>/dev/null || true
+      rm -f "$APPROVE_LOCK/pid" 2>/dev/null
+      rmdir "$APPROVE_LOCK" 2>/dev/null || true
     fi
-    rm -f "$APPROVE_LOCK/pid" 2>/dev/null
-    rmdir "$APPROVE_LOCK" 2>/dev/null || true
   }
   trap _approve_unlock RETURN
   # approve needs the privileged app. If it isn't here (e.g. a client-only machine), guide to install
@@ -548,6 +563,7 @@ cmd_approve() {
   else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
   printf '%s\n' "$request_id" > "$APPROVE_TRIGGER.request-id" 2>/dev/null || return 1
   : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
+  published=1
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"
   # Print only this request's router log lines (so the agent can read the result and decide next steps).
   _router_trail() { [ -f "$LOG_FILE" ] || return 0; local tot; tot=$(wc -l < "$LOG_FILE"); [ "$tot" -gt "$base0" ] && tail -n "$(( tot - base0 ))" "$LOG_FILE" | grep -F "router: [request=$request_id]"; }

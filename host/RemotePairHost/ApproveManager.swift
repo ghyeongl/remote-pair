@@ -21,7 +21,7 @@ final class ApproveManager {
     }
 
     @discardableResult
-    func run() -> Bool {
+    func run(triggerBacked: Bool = false) -> Bool {
         if running { return false }                    // caller keeps trigger queued until the active router exits
         running = true
         let p = Process()
@@ -34,7 +34,7 @@ final class ApproveManager {
                          // 라우터가 올바른 네임스페이스에서 룰/로그를 읽도록 명시 주입
                          "RP_DIR": RP_DIR, "RULES_FILE": RULES_FILE, "LOG_FILE": LOGP]
         let outcomeRequest = TRIGGER + ".outcome"
-        if let path = readRegularCompanion(outcomeRequest) {
+        if triggerBacked, let path = readRegularCompanion(outcomeRequest) {
             let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
             let allowedParent = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath()
             if candidate.deletingLastPathComponent().path == allowedParent.path
@@ -43,15 +43,23 @@ final class ApproveManager {
             }
         }
         let requestIDFile = TRIGGER + ".request-id"
-        if let requestID = readRegularCompanion(requestIDFile), !requestID.isEmpty {
+        if triggerBacked, let requestID = readRegularCompanion(requestIDFile), !requestID.isEmpty {
             environment["RP_REQUEST_ID"] = requestID
         }
         p.environment = environment
-        p.terminationHandler = { [weak self] _ in self?.running = false }
+        p.terminationHandler = { [weak self] _ in
+            self?.running = false
+            if triggerBacked {
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK + "/pid")
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
+            }
+        }
         do {
             try p.run()
-            try? FileManager.default.removeItem(atPath: outcomeRequest)
-            try? FileManager.default.removeItem(atPath: requestIDFile)
+            if triggerBacked {
+                try? FileManager.default.removeItem(atPath: outcomeRequest)
+                try? FileManager.default.removeItem(atPath: requestIDFile)
+            }
             log("APPROVE: router spawned")
             return true
         } // async — 메인스레드 안 막음
