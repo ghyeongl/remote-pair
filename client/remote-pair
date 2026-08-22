@@ -526,6 +526,11 @@ cmd_approve() {
           _router_trail | sed 's/^/  /'
           echo "✓ handled (window-close verified)"; return 0
         fi
+        if printf '%s\n' "$new" | grep -q 'router: click-outcome-unconfirmed'; then
+          _router_trail | sed 's/^/  /' >&2
+          echo "✗ click sent, but approval outcome is unconfirmed — retry the blocked operation" >&2
+          return 1
+        fi
         base="$now"
       fi
     fi
