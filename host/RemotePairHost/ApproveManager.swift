@@ -13,12 +13,19 @@ final class ApproveManager {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = [ROUTER]
-        p.environment = ["HOME": HOME,
+        var environment = ["HOME": HOME,
                          // 번들 Helpers 를 PATH 앞에 — 라우터가 동봉된 ocr-find 를 찾도록
                          "PATH": "\(HELPERS):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
                          "LANG": "en_US.UTF-8",
                          // 라우터가 올바른 네임스페이스에서 룰/로그를 읽도록 명시 주입
                          "RP_DIR": RP_DIR, "RULES_FILE": RULES_FILE, "LOG_FILE": LOGP]
+        let outcomeRequest = TRIGGER + ".outcome"
+        if let raw = try? String(contentsOfFile: outcomeRequest, encoding: .utf8) {
+            let path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if path.hasPrefix("/tmp/remote-pair.") { environment["RP_OUTCOME_FILE"] = path }
+        }
+        try? FileManager.default.removeItem(atPath: outcomeRequest)
+        p.environment = environment
         p.terminationHandler = { [weak self] _ in self?.running = false }
         do { try p.run(); log("APPROVE: router spawned") }      // async — 메인스레드 안 막음
         catch { log("APPROVE: router spawn 실패 \(error)"); running = false }

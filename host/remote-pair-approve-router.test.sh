@@ -43,6 +43,7 @@ cat >"$TMP/bin/cliclick" <<'EOF'
 EOF
 cat >"$TMP/bin/osascript" <<'EOF'
 #!/bin/bash
+[[ -n "${OSASCRIPT_LOG:-}" ]] && printf '%s\n' "$*" >>"$OSASCRIPT_LOG"
 :
 EOF
 chmod +x "$TMP/bin/screencapture" "$TMP/bin/cliclick" "$TMP/bin/osascript"
@@ -78,6 +79,7 @@ printf 'present\n' >"$TMP/ocr-phase"
 PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
   RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
   RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
   OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=ok \
@@ -92,6 +94,7 @@ printf 'present\n' >"$TMP/ocr-phase"
 if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
   RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
   RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
   OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=fail \
@@ -101,6 +104,24 @@ if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
 fi
 grep -q 'router: click-outcome-unconfirmed \[1Password\] (method=key:return' "$TMP/logs/router.log"
 
+# Explicit 1Password keys keep exact-action semantics while still focusing the
+# app and requiring caller ground truth.
+printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR=1Password RP_TYPE=key:return RP_VISION=off \
+  RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
+  OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=ok OSASCRIPT_LOG="$TMP/osascript.log" \
+  RP_OSASCRIPT="$TMP/bin/osascript" \
+  GONE_AT=2 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
+grep -q 'key code 36' "$TMP/osascript.log"
+grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
+
 # If no method closes the dialog, exhaust the full ladder and preserve #124's
 # unconfirmed failure verdict.
 printf 'present\n' >"$TMP/ocr-phase"
@@ -108,6 +129,7 @@ printf 'present\n' >"$TMP/ocr-phase"
 if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
   RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
   RP_OUTCOME_FILE= RP_OUTCOME_WAIT=0 \
   GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then

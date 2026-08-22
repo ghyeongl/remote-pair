@@ -17,11 +17,12 @@ set -u
 # claude·screencapture·cliclick 가 PATH 에 있도록 (앱이 직접 스폰하는 PATH 는 빈약)
 export PATH="/usr/sbin:/usr/bin:/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 SCAP="${RP_SCREENCAPTURE:-/usr/sbin/screencapture}"
+OSASCRIPT="${RP_OSASCRIPT:-/usr/bin/osascript}"
 RP_DIR="${RP_DIR:-$HOME/.remote-pair}"
 
 OCR="$(command -v ocr-find 2>/dev/null || true)"
 [ -n "$OCR" ] || for _c in "$RP_DIR/bin/ocr-find" "$HOME/.claude/bin/ocr-find"; do [ -x "$_c" ] && { OCR="$_c"; break; }; done
-CLICK="$(command -v cliclick 2>/dev/null || echo /opt/homebrew/bin/cliclick)"
+CLICK="${RP_CLICK:-$(command -v cliclick 2>/dev/null || echo /opt/homebrew/bin/cliclick)}"
 CLAUDE="$(command -v claude 2>/dev/null || true)"
 
 RULES="${RULES_FILE:-$RP_DIR/rules.txt}"; [ -f "$RULES" ] || RULES="$HOME/.claude/auto-approve/rules.txt"
@@ -97,19 +98,19 @@ sendkey(){
   fi
   local mod=""; [ -n "$parts" ] && mod=" using {${parts%,}}"
   if [ -n "$kc" ]; then
-    osascript -e "tell application \"System Events\" to key code $kc$mod"
+    "$OSASCRIPT" -e "tell application \"System Events\" to key code $kc$mod"
   else
-    osascript -e "tell application \"System Events\" to keystroke \"$key\"$mod"
+    "$OSASCRIPT" -e "tell application \"System Events\" to keystroke \"$key\"$mod"
   fi
 }
 
 system_click(){
   local x="$1" y="$2"
-  osascript -e "tell application \"System Events\" to click at {$x, $y}"
+  "$OSASCRIPT" -e "tell application \"System Events\" to click at {$x, $y}"
 }
 
 focus_1password(){
-  osascript -e 'tell application "1Password" to activate'
+  "$OSASCRIPT" -e 'tell application "1Password" to activate'
 }
 
 outcome_confirmed(){
@@ -125,7 +126,7 @@ outcome_confirmed(){
 
 ax_press(){
   local labels="$1"
-  osascript - "$labels" <<'APPLESCRIPT'
+  "$OSASCRIPT" - "$labels" <<'APPLESCRIPT'
 on run argv
   set AppleScript's text item delimiters to "|"
   set wanted to text items of item 1 of argv
@@ -211,6 +212,44 @@ approve_1password(){
   return 2
 }
 
+approve_1password_explicit(){
+  local marker="$1" action="$2" combo
+  if [ "$DRY" = 1 ]; then do_action "1Password" "$action"; return $?; fi
+  "$OCR" "$SHOT" --has "$marker" 2>/dev/null || {
+    log "[1Password] dialog marker not present yet"; return 1
+  }
+  case "$action" in
+    key:*)
+      IFS='|' read -ra _EXPLICIT_KEYS <<< "${action#key:}"
+      for combo in "${_EXPLICIT_KEYS[@]}"; do
+        focus_1password >/dev/null 2>&1
+        sendkey "$combo" >/dev/null 2>&1
+        log "[1Password] explicit method key:$combo"
+        sleep "$METHOD_GAP"
+        if dialog_gone "$marker"; then
+          if outcome_confirmed; then
+            log "success [1Password] (explicit method=key:$combo, 호출 결과 확인)"; return 0
+          fi
+          log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 창 닫힘이나 호출 결과 미확인)"
+          return 2
+        fi
+      done ;;
+    ocr:*)
+      do_action "1Password" "$action" || return 1
+      sleep "$METHOD_GAP"
+      if dialog_gone "$marker"; then
+        if outcome_confirmed; then
+          log "success [1Password] (explicit method=ocr, 호출 결과 확인)"; return 0
+        fi
+        log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 창 닫힘이나 호출 결과 미확인)"
+        return 2
+      fi ;;
+    *) log "[1Password] unsupported explicit action: $action"; return 1 ;;
+  esac
+  log "click-outcome-unconfirmed [1Password] (명시적 승인 방식 소진, 실제 승인 결과 미확인)"
+  return 2
+}
+
 # 한 action 실행 (성공적으로 "뭔가 했으면" 0). $1=id $2=action
 do_action(){
   local id="$1" action="$2" labels C
@@ -272,9 +311,12 @@ key_targets_approval(){
 #   (Claude-for-Chrome 처럼 사이트마다 승인키가 cmd+return / return 으로 갈리는 창 대응)
 act_and_verify(){
   local id="$1" marker="$2" action="$3"
-  if [ "$id" = "1Password" ] && [ -z "$HINT_TYPE" ] && [[ "$action" = ocr:* ]]; then
-    approve_1password "$marker" "${action#ocr:}"
-    return $?
+  if [ "$id" = "1Password" ]; then
+    if [ -n "$HINT_TYPE" ]; then
+      approve_1password_explicit "$marker" "$action"; return $?
+    elif [[ "$action" = ocr:* ]]; then
+      approve_1password "$marker" "${action#ocr:}"; return $?
+    fi
   fi
   case "$action" in
     key:*)

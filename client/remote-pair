@@ -11,7 +11,7 @@
 #   remote-pair onboard        Interactive, re-runnable client setup (host, terminal app, folder mapping, doctor).
 #   remote-pair open-gui <dir> Open the configured terminal app in a new window running 'launch <dir>'.
 #   remote-pair doctor         Check SSH key connection, host app, tmux + guidance
-#   remote-pair approve [--for "<what>"] [--type "key:..|ocr:.."] [--timeout S]   Handle a blocked approval dialog
+#   remote-pair approve [--for "<what>"] [--type "key:..|ocr:.."] [--outcome-file /tmp/remote-pair.*] [--timeout S]
 #                              --for: which dialog (alias-tolerant)  ·  --type: how to approve — agent decides (key:<combo>|ocr:<label>)
 #   remote-pair status         Host server, app, heartbeat status
 #   remote-pair logs [--host] [-f] [-n N]   Tail logs (local launcher/app; --host = host logs over ssh; -f = follow)
@@ -494,11 +494,12 @@ EOF
 }
 
 cmd_approve() {
-  local forhint="" type="" timeout=22     # longer than the router's adaptive polling (~18s default)
+  local forhint="" type="" outcome_file="" timeout=90
   while [ $# -gt 0 ]; do case "$1" in
     --for|--label|--expect) forhint="${2:-}"; shift 2 ;;   # 어떤 승인창인지 힌트(룰 id/자유문구; 별칭 관대)
     --type) type="${2:-}"; shift 2 ;;                       # 어떻게 승인할지 — key:<combo> | ocr:<라벨> (에이전트가 방식 지정)
-    --timeout) timeout="${2:-22}"; shift 2 ;;
+    --outcome-file) outcome_file="${2:-}"; shift 2 ;;
+    --timeout) timeout="${2:-90}"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; return 2 ;;
   esac; done
   # approve needs the privileged app. If it isn't here (e.g. a client-only machine), guide to install
@@ -512,6 +513,10 @@ cmd_approve() {
   else rm -f "$APPROVE_TRIGGER.label" 2>/dev/null || true; fi
   if [ -n "$type" ]; then printf '%s\n' "$type" > "$APPROVE_TRIGGER.type" 2>/dev/null || true
   else rm -f "$APPROVE_TRIGGER.type" 2>/dev/null || true; fi
+  if [ -n "$outcome_file" ]; then
+    case "$outcome_file" in /tmp/remote-pair.*) : ;; *) echo "--outcome-file must be under /tmp/remote-pair.*" >&2; return 2 ;; esac
+    printf '%s\n' "$outcome_file" > "$APPROVE_TRIGGER.outcome" 2>/dev/null || return 1
+  else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
   : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"
   # Print only this request's router log lines (so the agent can read the result and decide next steps).
