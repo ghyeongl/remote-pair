@@ -125,7 +125,13 @@ outcome_confirmed(){
 }
 
 outcome_now(){
-  [ -n "$OUTCOME_FILE" ] && [ -f "$OUTCOME_FILE" ] && head -1 "$OUTCOME_FILE" 2>/dev/null || true
+  local raw=""
+  [ -n "$OUTCOME_FILE" ] && [ -f "$OUTCOME_FILE" ] && raw="$(head -1 "$OUTCOME_FILE" 2>/dev/null)"
+  if [ -n "$REQUEST_ID" ]; then
+    case "$raw" in "ok:$REQUEST_ID") echo ok ;; "fail:$REQUEST_ID") echo fail ;; esac
+  else
+    case "$raw" in ok) echo ok ;; fail) echo fail ;; esac
+  fi
 }
 
 # Give the blocked caller time to publish the result of the method just sent.

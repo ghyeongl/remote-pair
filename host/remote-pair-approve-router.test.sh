@@ -99,6 +99,24 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
 [[ "$(cat "$TMP/capture-count")" == 1 ]]
 grep -q 'router: success \[1Password\] (method=key:return' "$TMP/logs/router.log"
 
+# A stale verdict carrying another request ID is ignored; only this request's
+# tagged result can confirm the method.
+printf 'present\n' >"$TMP/ocr-phase"
+printf 'ok:old-request\n' >"$TMP/outcome"
+: >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off RP_REQUEST_ID=new-request \
+  RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
+  OUTCOME_ON_KEY_FILE="$TMP/outcome" OUTCOME_ON_KEY_VERDICT=ok:new-request \
+  OSASCRIPT_LOG="$TMP/osascript.log" GONE_AT=999 \
+  "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+[[ "$(grep -c 'key code' "$TMP/osascript.log")" == 1 ]]
+grep -q 'router: \[request=new-request\] success \[1Password\] (method=key:return' "$TMP/logs/router.log"
+
 # Once the per-method outcome wait expires, an outcome-confirmed request stops
 # instead of applying the next method to a possibly queued dialog.
 printf 'present\n' >"$TMP/ocr-phase"

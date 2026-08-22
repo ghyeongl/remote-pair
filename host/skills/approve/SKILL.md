@@ -22,7 +22,7 @@ remote-pair approve --for "Claude for Chrome" --type "key:cmd+return|return"   #
 - "Allow…" 버튼 옆에 ⏎(Return) → `--type "key:return"`   ·   ⌘⏎(Cmd+Return) → `--type "key:cmd+return"`
 - **Claude for Chrome 권한 모달은 `--type "key:cmd+return|return"` 권장** — **Cmd+Return 이 "항상 허용"(다시 안 물음)이라 먼저** 시도해 매 액션마다 반복되는 팝업을 끊는다. Cmd+Return 을 안 받는 모달이면 **Return(1회 허용)으로 자동 폴백**한다(라우터가 후보 키를 순차 시도). 즉 첫째=반복 차단, 둘째=호환 보장.
 - 단축키 표시가 없거나 키가 안 먹히는 창 → `--type "ocr:<그 버튼 텍스트>"` (예: `ocr:Allow this action`)
-- 1Password는 창 닫힘만으로 성공 처리하지 않는다. `--outcome-file /tmp/remote-pair.outcome.*`에 실제 호출자가 `ok`/`fail`을 써야 성공을 확정한다. 트리거와 `.label`/`.type`/`.outcome`/`.request-id` 제어 파일은 결과 채널로 사용할 수 없다.
+- 1Password는 창 닫힘만으로 성공 처리하지 않는다. `--outcome-file /tmp/remote-pair.outcome.*`은 요청 시 `pending:<request-id>`로 초기화된다. 실제 호출자는 그 ID를 보존해 `ok:<request-id>` 또는 `fail:<request-id>`를 써야 성공/실패를 확정한다(예: `rid=${line#pending:}`). 트리거와 `.label`/`.type`/`.outcome`/`.request-id` 제어 파일은 결과 채널로 사용할 수 없다.
 
 `--for "<무엇>"` 는 보조 힌트다(생략 가능, 별칭 관대: 브라우저명→Claude for Chrome). `--type` 이 있으면 그게 우선, 없으면 `--for` 룰의 기본 방식으로 폴백.
 폴백(힌트 없는 동작): `~/.remote-pair/bin/approve` 또는 `touch /tmp/remote-pair.approve-request`.
