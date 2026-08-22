@@ -58,7 +58,7 @@ haiku 는 구독 claude CLI 로 best-effort 호출 — 없거나 느리면 OCR �
 
 - **exit 0** = `router: success [id] (창 닫힘 검증)` — 통과. 막혔던 작업을 계속.
 - **exit 1 + `click-outcome-unconfirmed`** = 클릭은 보냈지만 실제 승인 결과는 관찰할 수 없음. 즉시 막혔던 작업을 재시도해 그 결과로 판정.
-- **1Password** = 감지 후 `return` → `cmd+return` → `space` → cliclick → System Events click → AXPress 순으로 시도하며, 승인 동작 뒤 창 닫힘이 확인되면 성공. 전부 실패하면 위 `click-outcome-unconfirmed` 계약을 유지.
+- **1Password** = 감지·포커스 후 `return` → `cmd+return` → `space` → cliclick → System Events click → AXPress 순으로 시도. `RP_OUTCOME_FILE` 결과 채널이 `ok`를 돌려준 경우에만 성공하며, 창 닫힘만으로는 성공하지 않는다. 전부 실패하거나 결과가 없으면 위 `click-outcome-unconfirmed` 계약을 유지. 명시적 `--type`은 이 자동 ladder보다 우선한다.
 - **exit 1** = 출력된 라우터 로그를 보고 분기:
   - `no dialog handled within …s` → 창이 (아직) 없음. **논블로킹 재트리거 후 막힌 호출을 즉시 재시도**(창이 그때 뜨면 폴링 중 라우터가 잡음).
   - `[id] 버튼 못찾음` → 창은 맞는데 버튼 라벨이 룰과 다름 → rules.txt 의 action 라벨 보정.

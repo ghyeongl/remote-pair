@@ -36,6 +36,9 @@ WAIT_SECS="${RP_WAIT_SECS:-${1:-18}}"          # 승인창 출현을 기다리�
 INTERVAL="${RP_INTERVAL:-1.2}"                 # 폴링 간격
 CLICK_VERIFY_DELAY="${RP_CLICK_VERIFY_DELAY:-0.8}" # 클릭 직후 1회만 결과 확인(재시도 중 timeout 오판 방지)
 METHOD_GAP="${RP_METHOD_GAP:-0.4}"             # 1Password 승인 방식별 결과 확인 전 대기
+OUTCOME_FILE="${RP_OUTCOME_FILE:-}"            # 선택: 호출자가 쓰는 ok|fail 실제 결과 채널
+OUTCOME_WAIT="${RP_OUTCOME_WAIT:-5}"           # 창 닫힘 후 실제 호출 결과 대기
+[ -n "$OUTCOME_FILE" ] && rm -f "$OUTCOME_FILE" 2>/dev/null || true
 # 비전(haiku) — 구독 claude CLI 재사용, best-effort
 VISION="${RP_VISION:-auto}"                    # auto(룰 미스 시) | on | off
 VISION_MODEL="${RP_VISION_MODEL:-claude-haiku-4-5}"
@@ -105,6 +108,21 @@ system_click(){
   osascript -e "tell application \"System Events\" to click at {$x, $y}"
 }
 
+focus_1password(){
+  osascript -e 'tell application "1Password" to activate'
+}
+
+outcome_confirmed(){
+  [ -n "$OUTCOME_FILE" ] || return 1
+  local deadline=$(( $(date +%s) + OUTCOME_WAIT )) verdict=""
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    [ -f "$OUTCOME_FILE" ] && verdict="$(head -1 "$OUTCOME_FILE" 2>/dev/null)"
+    case "$verdict" in ok) return 0 ;; fail) return 1 ;; esac
+    sleep 0.1
+  done
+  return 1
+}
+
 ax_press(){
   local labels="$1"
   osascript - "$labels" <<'APPLESCRIPT'
@@ -148,11 +166,16 @@ approve_1password(){
     log "[1Password] dialog marker not present yet"; return 1
   }
   for combo in return cmd+return space; do
+    focus_1password >/dev/null 2>&1
     sendkey "$combo" >/dev/null 2>&1
     log "[1Password] method key:$combo"
     sleep "$METHOD_GAP"
     if dialog_gone "$marker"; then
-      log "success [1Password] (method=key:$combo, 승인 동작 후 창 닫힘)"; return 0
+      if outcome_confirmed; then
+        log "success [1Password] (method=key:$combo, 호출 결과 확인)"; return 0
+      fi
+      log "click-outcome-unconfirmed [1Password] (method=key:$combo, 창 닫힘이나 호출 결과 미확인)"
+      return 2
     fi
   done
   C="$("$OCR" "$SHOT" "$labels" 2>/dev/null)"
@@ -164,7 +187,11 @@ approve_1password(){
       log "[1Password] method $method:$C"
       sleep "$METHOD_GAP"
       if dialog_gone "$marker"; then
-        log "success [1Password] (method=$method:$C, 승인 컨트롤 후 창 닫힘)"; return 0
+        if outcome_confirmed; then
+          log "success [1Password] (method=$method:$C, 호출 결과 확인)"; return 0
+        fi
+        log "click-outcome-unconfirmed [1Password] (method=$method:$C, 창 닫힘이나 호출 결과 미확인)"
+        return 2
       fi
     done
   else
@@ -174,7 +201,11 @@ approve_1password(){
   log "[1Password] method axpress"
   sleep "$METHOD_GAP"
   if dialog_gone "$marker"; then
-    log "success [1Password] (method=axpress, 승인 컨트롤 후 창 닫힘)"; return 0
+    if outcome_confirmed; then
+      log "success [1Password] (method=axpress, 호출 결과 확인)"; return 0
+    fi
+    log "click-outcome-unconfirmed [1Password] (method=axpress, 창 닫힘이나 호출 결과 미확인)"
+    return 2
   fi
   log "click-outcome-unconfirmed [1Password] (모든 승인 방식 소진, 실제 승인 결과 미확인)"
   return 2
@@ -241,7 +272,7 @@ key_targets_approval(){
 #   (Claude-for-Chrome 처럼 사이트마다 승인키가 cmd+return / return 으로 갈리는 창 대응)
 act_and_verify(){
   local id="$1" marker="$2" action="$3"
-  if [ "$id" = "1Password" ] && [[ "$action" = ocr:* ]]; then
+  if [ "$id" = "1Password" ] && [ -z "$HINT_TYPE" ] && [[ "$action" = ocr:* ]]; then
     approve_1password "$marker" "${action#ocr:}"
     return $?
   fi

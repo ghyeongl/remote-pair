@@ -31,7 +31,10 @@ count=0
 [[ -f "$count_file" ]] && count="$(cat "$count_file")"
 count=$((count + 1))
 printf '%s\n' "$count" >"$count_file"
-if [[ "$count" -ge "${GONE_AT:-999}" ]]; then printf 'gone\n' >"${OCR_PHASE_FILE:?}"; fi
+if [[ "$count" -ge "${GONE_AT:-999}" ]]; then
+  printf 'gone\n' >"${OCR_PHASE_FILE:?}"
+  [[ -n "${OUTCOME_WRITE_FILE:-}" ]] && printf '%s\n' "${OUTCOME_VERDICT:-fail}" >"$OUTCOME_WRITE_FILE"
+fi
 touch "${@: -1}"
 EOF
 cat >"$TMP/bin/cliclick" <<'EOF'
@@ -68,15 +71,35 @@ printf 'Some Dialog\tConfirm action\tkey:return\n' >"$TMP/rules.txt"
 printf '1Password\tAccess Requested\tocr:Authorize\n' >"$TMP/rules.txt"
 [[ "$(run_router decline 1Password)" == \
   "WOULD try return|cmd+return|space|cliclick|system-events|axpress [1Password]" ]]
+[[ "$(run_router always 1Password 'ocr:Authorize|Always Allow')" == \
+  "WOULD click (10,10) [1Password]" ]]
 printf 'present\n' >"$TMP/ocr-phase"
 : >"$TMP/capture-count"
 PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
   RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
+  OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=ok \
   GONE_AT=2 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
 [[ "$(cat "$TMP/capture-count")" == 2 ]]
 grep -q 'router: success \[1Password\] (method=key:return' "$TMP/logs/router.log"
+
+# Marker loss without a positive caller result preserves #124's unconfirmed
+# verdict; closure alone is never success.
+printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/capture-count"
+if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
+  RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
+  OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=fail \
+  GONE_AT=2 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then
+  echo "router accepted marker loss without a successful caller outcome" >&2
+  exit 1
+fi
+grep -q 'router: click-outcome-unconfirmed \[1Password\] (method=key:return' "$TMP/logs/router.log"
 
 # If no method closes the dialog, exhaust the full ladder and preserve #124's
 # unconfirmed failure verdict.
@@ -86,6 +109,7 @@ if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
   RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE= RP_OUTCOME_WAIT=0 \
   GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then
   echo "router accepted an exhausted 1Password method ladder" >&2
   exit 1
