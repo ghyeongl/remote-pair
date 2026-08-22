@@ -508,14 +508,22 @@ cmd_approve() {
       echo "--outcome-file must be a direct /tmp/remote-pair.outcome.* path" >&2; return 2
     }
   fi
+  _approve_lock_is_stale() {
+    local owner="" mtime=0 age=0
+    [ -f "$APPROVE_LOCK/pid" ] && owner="$(head -1 "$APPROVE_LOCK/pid" 2>/dev/null)"
+    if [ -n "$owner" ]; then ! kill -0 "$owner" 2>/dev/null; return; fi
+    # An empty lock may be between mkdir and PID publication. Reap it only
+    # after a grace period, never in that live acquisition window.
+    mtime="$(stat -f %m "$APPROVE_LOCK" 2>/dev/null || echo 0)"
+    age=$(( $(date +%s) - mtime ))
+    [ "$mtime" -gt 0 ] && [ "$age" -ge 5 ]
+  }
   if ! mkdir "$APPROVE_LOCK" 2>/dev/null; then
-    local lock_pid=""; [ -f "$APPROVE_LOCK/pid" ] && lock_pid="$(head -1 "$APPROVE_LOCK/pid" 2>/dev/null)"
-    if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
+    if _approve_lock_is_stale; then
       # Serialize stale takeover itself so two contenders cannot delete each
       # other's newly acquired, not-yet-populated lock directory.
       if mkdir "$APPROVE_LOCK.reap" 2>/dev/null; then
-        lock_pid=""; [ -f "$APPROVE_LOCK/pid" ] && lock_pid="$(head -1 "$APPROVE_LOCK/pid" 2>/dev/null)"
-        if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+        if _approve_lock_is_stale; then
           rm -f "$APPROVE_LOCK/pid" 2>/dev/null; rmdir "$APPROVE_LOCK" 2>/dev/null || true
         fi
         mkdir "$APPROVE_LOCK" 2>/dev/null || { rmdir "$APPROVE_LOCK.reap" 2>/dev/null; echo "another remote-pair approve request is already active" >&2; return 1; }

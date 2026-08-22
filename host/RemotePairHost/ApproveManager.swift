@@ -57,6 +57,7 @@ final class ApproveManager {
         do {
             try p.run()
             if triggerBacked {
+                try? "\(getpid())\n".write(toFile: APPROVE_LOCK + "/pid", atomically: true, encoding: .utf8)
                 try? FileManager.default.removeItem(atPath: outcomeRequest)
                 try? FileManager.default.removeItem(atPath: requestIDFile)
             }
