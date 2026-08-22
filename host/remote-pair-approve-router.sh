@@ -39,7 +39,6 @@ CLICK_VERIFY_DELAY="${RP_CLICK_VERIFY_DELAY:-0.8}" # 클릭 직후 1회만 결�
 METHOD_GAP="${RP_METHOD_GAP:-0.4}"             # 1Password 승인 방식별 결과 확인 전 대기
 OUTCOME_FILE="${RP_OUTCOME_FILE:-}"            # 선택: 호출자가 쓰는 ok|fail 실제 결과 채널
 OUTCOME_WAIT="${RP_OUTCOME_WAIT:-5}"           # 창 닫힘 후 실제 호출 결과 대기
-[ -n "$OUTCOME_FILE" ] && rm -f "$OUTCOME_FILE" 2>/dev/null || true
 # 비전(haiku) — 구독 claude CLI 재사용, best-effort
 VISION="${RP_VISION:-auto}"                    # auto(룰 미스 시) | on | off
 VISION_MODEL="${RP_VISION_MODEL:-claude-haiku-4-5}"
@@ -428,6 +427,13 @@ while :; do
 
   # 0) 힌트 룰 우선 시도 (에이전트가 어떤 승인인지 알려준 경우)
   handled=0
+  # --type 만 제공됐더라도 실제 결과 채널이 있으면, 보이는 1Password
+  # 마커를 먼저 식별해 포커스+결과확인 경로를 우회하지 않게 한다.
+  if [ -z "$HINT_ID" ] && [ -n "$HINT_TYPE" ] && [ -n "$OUTCOME_FILE" ]; then
+    _onepass="$(rule_by_id "1Password")"
+    _onemarker="${_onepass%%$'\t'*}"
+    [ -n "$_onemarker" ] && "$OCR" "$SHOT" --has "$_onemarker" 2>/dev/null && HINT_ID="1Password"
+  fi
   # 설계철학: 에이전트가 --for 로 "이 승인이 떴다"고 명시하면 그 판단을 신뢰한다 →
   # OCR 매칭 없이도 룰 action(예: key:return)을 바로 실행. vision/OCR 은 힌트가 없을 때의 fallback 일 뿐.
   # key:<combo> 는 OCR 0% 의존(키만 전송)이라, 화면을 못 읽어도 동작한다. act_and_verify 가 '창 닫힘'으로

@@ -503,7 +503,9 @@ cmd_approve() {
     *) echo "unknown arg: $1" >&2; return 2 ;;
   esac; done
   if [ -n "$outcome_file" ]; then
-    case "$outcome_file" in /tmp/remote-pair.*) : ;; *) echo "--outcome-file must be under /tmp/remote-pair.*" >&2; return 2 ;; esac
+    [ "$(dirname "$outcome_file")" = /tmp ] && [[ "$(basename "$outcome_file")" = remote-pair.* ]] || {
+      echo "--outcome-file must be a direct /tmp/remote-pair.* path" >&2; return 2
+    }
   fi
   # approve needs the privileged app. If it isn't here (e.g. a client-only machine), guide to install
   # the host app instead of silently sending a trigger nobody will pick up.
@@ -517,6 +519,7 @@ cmd_approve() {
   if [ -n "$type" ]; then printf '%s\n' "$type" > "$APPROVE_TRIGGER.type" 2>/dev/null || true
   else rm -f "$APPROVE_TRIGGER.type" 2>/dev/null || true; fi
   if [ -n "$outcome_file" ]; then
+    rm -f "$outcome_file" 2>/dev/null || return 1
     printf '%s\n' "$outcome_file" > "$APPROVE_TRIGGER.outcome" 2>/dev/null || return 1
   else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
   : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
@@ -541,6 +544,11 @@ cmd_approve() {
         if printf '%s\n' "$new" | grep -q 'router: no dialog handled within'; then
           _router_trail | sed 's/^/  /' >&2
           echo "✗ no approval dialog appeared" >&2
+          return 1
+        fi
+        if printf '%s\n' "$new" | grep -q 'router: ocr-find 없음 — 중단'; then
+          _router_trail | sed 's/^/  /' >&2
+          echo "✗ approve router cannot start without ocr-find" >&2
           return 1
         fi
         base="$now"

@@ -22,7 +22,12 @@ final class ApproveManager {
         let outcomeRequest = TRIGGER + ".outcome"
         if let raw = try? String(contentsOfFile: outcomeRequest, encoding: .utf8) {
             let path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if path.hasPrefix("/tmp/remote-pair.") { environment["RP_OUTCOME_FILE"] = path }
+            let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            let allowedParent = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath()
+            if candidate.deletingLastPathComponent().path == allowedParent.path
+                && candidate.lastPathComponent.hasPrefix("remote-pair.") {
+                environment["RP_OUTCOME_FILE"] = candidate.path
+            }
         }
         try? FileManager.default.removeItem(atPath: outcomeRequest)
         p.environment = environment

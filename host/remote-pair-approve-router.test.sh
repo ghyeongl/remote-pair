@@ -78,6 +78,7 @@ printf '1Password\tAccess Requested\tocr:Authorize\n' >"$TMP/rules.txt"
 [[ "$(run_router always 1Password 'ocr:Authorize|Always Allow')" == \
   "WOULD click (10,10) [1Password]" ]]
 printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/outcome"
 : >"$TMP/capture-count"
 PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
@@ -93,6 +94,7 @@ grep -q 'router: success \[1Password\] (method=key:return' "$TMP/logs/router.log
 # Marker loss without a positive caller result preserves #124's unconfirmed
 # verdict; closure alone is never success.
 printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/outcome"
 : >"$TMP/capture-count"
 if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
@@ -110,6 +112,7 @@ grep -q 'router: click-outcome-unconfirmed \[1Password\] (method=key:return' "$T
 # Explicit 1Password keys keep exact-action semantics while still focusing the
 # app and requiring caller ground truth.
 printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/outcome"
 : >"$TMP/capture-count"
 : >"$TMP/osascript.log"
 PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
@@ -119,10 +122,26 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
   RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 \
   OUTCOME_WRITE_FILE="$TMP/outcome" OUTCOME_VERDICT=ok OSASCRIPT_LOG="$TMP/osascript.log" \
-  RP_OSASCRIPT="$TMP/bin/osascript" \
   GONE_AT=2 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
 grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
 grep -q 'key code 36' "$TMP/osascript.log"
+grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
+
+# Type-only requests with a real outcome channel identify the visible
+# 1Password rule, preserve an early caller verdict, and use the focused path.
+printf 'present\n' >"$TMP/ocr-phase"
+printf 'ok\n' >"$TMP/outcome"
+: >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_TYPE=key:return RP_VISION=off \
+  RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=0 OSASCRIPT_LOG="$TMP/osascript.log" \
+  GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+[[ "$(cat "$TMP/capture-count")" == 1 ]]
+grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
 grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
 
 # A rule-defined 1Password key also stays on the focused/outcome-confirmed
@@ -130,6 +149,7 @@ grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/r
 # already visible (queued request).
 printf '1Password\tAccess Requested\tkey:return\n' >"$TMP/rules.txt"
 printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/outcome"
 : >"$TMP/capture-count"
 : >"$TMP/osascript.log"
 PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
