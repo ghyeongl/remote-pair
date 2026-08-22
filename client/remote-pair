@@ -519,8 +519,18 @@ cmd_approve() {
     fi
   fi
   printf '%s\n' "$$" > "$APPROVE_LOCK/pid"
-  trap 'rm -f "$APPROVE_LOCK/pid" 2>/dev/null; rmdir "$APPROVE_LOCK" 2>/dev/null || true' RETURN
   request_id="$(uuidgen 2>/dev/null || printf '%s-%s' "$$" "$RANDOM")"
+  _approve_unlock() {
+    # If this caller timed out before the host consumed its slot, cancel only
+    # that still-owned request before allowing another caller to reuse it.
+    if [ -f "$APPROVE_TRIGGER.request-id" ] && [ "$(head -1 "$APPROVE_TRIGGER.request-id" 2>/dev/null)" = "$request_id" ]; then
+      rm -f "$APPROVE_TRIGGER" "$APPROVE_TRIGGER.label" "$APPROVE_TRIGGER.type" \
+        "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" 2>/dev/null || true
+    fi
+    rm -f "$APPROVE_LOCK/pid" 2>/dev/null
+    rmdir "$APPROVE_LOCK" 2>/dev/null || true
+  }
+  trap _approve_unlock RETURN
   # approve needs the privileged app. If it isn't here (e.g. a client-only machine), guide to install
   # the host app instead of silently sending a trigger nobody will pick up.
   if ! app_available; then need_app_guidance; return 1; fi

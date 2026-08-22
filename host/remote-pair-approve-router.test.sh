@@ -116,7 +116,7 @@ if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   exit 1
 fi
 [[ "$(grep -c 'key code' "$TMP/osascript.log")" == 1 ]]
-grep -q 'router: click-outcome-unconfirmed \[1Password\] (method=key:return, 호출 결과 대기 한도 초과)' "$TMP/logs/router.log"
+grep -q 'router: click-outcome-unconfirmed \[1Password\] (method=key:return, 호출 결과 미확인 — 다음 방식 중단)' "$TMP/logs/router.log"
 
 # Marker loss without a positive caller result preserves #124's unconfirmed
 # verdict; closure alone is never success.
@@ -231,30 +231,23 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
 grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
 grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
 
-# If no method closes the dialog, exhaust the full ladder and preserve #124's
-# unconfirmed failure verdict.
+# Without a correlated outcome, stop after the first ambiguous method rather
+# than risk applying the remainder of the ladder to a queued dialog.
 printf '1Password\tAccess Requested\tocr:Authorize\n' >"$TMP/rules.txt"
 printf 'present\n' >"$TMP/ocr-phase"
 : >"$TMP/capture-count"
 : >"$TMP/osascript.log"
-printf '1700,1000\n' >"$TMP/ocr-coordinate"
 if PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
   LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
   RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
   RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
-  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
-  OCR_COORD_FILE="$TMP/ocr-coordinate" MOVE_COORD_FILE="$TMP/ocr-coordinate" OSASCRIPT_LOG="$TMP/osascript.log" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" OSASCRIPT_LOG="$TMP/osascript.log" \
   RP_OUTCOME_FILE= RP_OUTCOME_WAIT=0 \
   GONE_AT=999 "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1; then
-  echo "router accepted an exhausted 1Password method ladder" >&2
+  echo "router accepted an unconfirmed 1Password method" >&2
   exit 1
 fi
-[[ "$(cat "$TMP/capture-count")" == 7 ]]
+[[ "$(cat "$TMP/capture-count")" == 1 ]]
 grep -q 'router: \[1Password\] method key:return' "$TMP/logs/router.log"
-grep -q 'router: \[1Password\] method key:cmd+return' "$TMP/logs/router.log"
-grep -q 'router: \[1Password\] method key:space' "$TMP/logs/router.log"
-grep -q 'router: \[1Password\] method cliclick:1700,1000' "$TMP/logs/router.log"
-grep -q 'router: \[1Password\] method system-events:1800,1000' "$TMP/logs/router.log"
-grep -q 'click at {1800, 1000}' "$TMP/osascript.log"
-grep -q 'router: \[1Password\] method axpress' "$TMP/logs/router.log"
-grep -q 'router: click-outcome-unconfirmed \[1Password\] (모든 승인 방식 소진' "$TMP/logs/router.log"
+! grep -q 'router: \[1Password\] method key:cmd+return' "$TMP/logs/router.log"
+grep -q 'router: click-outcome-unconfirmed \[1Password\] (method=key:return, 호출 결과 미확인 — 다음 방식 중단)' "$TMP/logs/router.log"

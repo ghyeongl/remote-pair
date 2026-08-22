@@ -42,15 +42,19 @@ final class ApproveManager {
                 environment["RP_OUTCOME_FILE"] = candidate.path
             }
         }
-        try? FileManager.default.removeItem(atPath: outcomeRequest)
         let requestIDFile = TRIGGER + ".request-id"
         if let requestID = readRegularCompanion(requestIDFile), !requestID.isEmpty {
             environment["RP_REQUEST_ID"] = requestID
         }
-        try? FileManager.default.removeItem(atPath: requestIDFile)
         p.environment = environment
         p.terminationHandler = { [weak self] _ in self?.running = false }
-        do { try p.run(); log("APPROVE: router spawned"); return true } // async — 메인스레드 안 막음
+        do {
+            try p.run()
+            try? FileManager.default.removeItem(atPath: outcomeRequest)
+            try? FileManager.default.removeItem(atPath: requestIDFile)
+            log("APPROVE: router spawned")
+            return true
+        } // async — 메인스레드 안 막음
         catch { log("APPROVE: router spawn 실패 \(error)"); running = false; return false }
     }
 }
