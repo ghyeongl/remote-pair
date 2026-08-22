@@ -16,7 +16,7 @@
 set -u
 # claude·screencapture·cliclick 가 PATH 에 있도록 (앱이 직접 스폰하는 PATH 는 빈약)
 export PATH="/usr/sbin:/usr/bin:/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-SCAP=/usr/sbin/screencapture
+SCAP="${RP_SCREENCAPTURE:-/usr/sbin/screencapture}"
 RP_DIR="${RP_DIR:-$HOME/.remote-pair}"
 
 OCR="$(command -v ocr-find 2>/dev/null || true)"
@@ -34,7 +34,7 @@ DRY="${RP_DRY:-0}"                             # RP_DRY=1 = 실제 클릭/키 �
 # 적응형 폴링/검증 튜너블
 WAIT_SECS="${RP_WAIT_SECS:-${1:-18}}"          # 승인창 출현을 기다리는 총 윈도우(초)
 INTERVAL="${RP_INTERVAL:-1.2}"                 # 폴링 간격
-VERIFY_RETRY="${RP_VERIFY_RETRY:-3}"           # 클릭 후 "닫혔나" 확인 재시도
+CLICK_VERIFY_DELAY="${RP_CLICK_VERIFY_DELAY:-0.8}" # 클릭 직후 1회만 결과 확인(재시도 중 timeout 오판 방지)
 # 비전(haiku) — 구독 claude CLI 재사용, best-effort
 VISION="${RP_VISION:-auto}"                    # auto(룰 미스 시) | on | off
 VISION_MODEL="${RP_VISION_MODEL:-claude-haiku-4-5}"
@@ -156,7 +156,7 @@ key_targets_approval(){
 # key 후보는 승인 단축키임을 먼저 확인하고 순차 시도한다. 확인된 키가 창을 닫은 경우에만 성공.
 #   (Claude-for-Chrome 처럼 사이트마다 승인키가 cmd+return / return 으로 갈리는 창 대응)
 act_and_verify(){
-  local id="$1" marker="$2" action="$3" i
+  local id="$1" marker="$2" action="$3"
   case "$action" in
     key:*)
       # 각 후보 키를 짧은 간격으로 다회 연타(매번 닫힘 확인 → 닫히면 즉시 멈춰 부작용 방지).
@@ -178,14 +178,24 @@ act_and_verify(){
     *)
       do_action "$id" "$action" || return 1
       [ "$DRY" = 1 ] && return 0
-      for i in $(seq 1 "$VERIFY_RETRY"); do
-        sleep 0.8
-        if dialog_gone "$marker"; then log "success [$id] (검증: 창 닫힘)"; return 0; fi
-        log "[$id] 아직 안 닫힘 — 재클릭 ($i/$VERIFY_RETRY)"
-        do_action "$id" "$action" || break
-      done
-      log "[$id] 클릭했으나 닫힘 미확인"; return 1 ;;
+      # OCR/click에는 호출 결과(op read 등)를 관찰할 채널이 없다. 창 닫힘은
+      # timeout/Decline/잘못된 좌표와도 구분되지 않으므로 성공 근거로 쓰지 않는다.
+      sleep "$CLICK_VERIFY_DELAY"
+      if dialog_gone "$marker"; then
+        log "[$id] 클릭 후 창 닫힘 — 실제 승인 결과 미확인"
+      else
+        log "[$id] 클릭 직후 닫힘 미확인 — 실제 승인 결과 미확인"
+      fi
+      return 2 ;;
   esac
+}
+
+# 2=click outcome unconfirmed. Dialog disappearance alone cannot prove approval,
+# so terminate this router attempt without reporting success.
+attempt_and_route(){
+  act_and_verify "$@"; local rc=$?
+  [ "$rc" -eq 2 ] && exit 1
+  return "$rc"
 }
 
 # haiku 분류: 화면에 어떤 "알려진 승인창"이 떴는지 ID 한 토큰. (좌표 안 줌 — 분류 전용)
@@ -238,7 +248,7 @@ while :; do
     [ -n "$hra" ] && { hmarker="${hra%%$'\t'*}"; haction="${hra#*$'\t'}"; }
     [ -n "$HINT_TYPE" ] && haction="$HINT_TYPE"          # --type: 에이전트가 방식 직접 지정 → 룰 action override
     [ -z "$haction" ] && haction="ocr:$GENERIC_LABELS"   # for/type 둘 다 모호 → 범용 승인 버튼
-    if act_and_verify "${HINT_ID:-agent-type}" "$hmarker" "$haction"; then exit 0; fi
+    if attempt_and_route "${HINT_ID:-agent-type}" "$hmarker" "$haction"; then exit 0; fi
     handled=1
   fi
 
@@ -247,7 +257,7 @@ while :; do
     case "$id" in ''|\#*) continue;; esac
     { [ -z "${marker:-}" ] || [ -z "${action:-}" ]; } && continue
     "$OCR" "$SHOT" --has "$marker" 2>/dev/null || continue
-    if act_and_verify "$id" "$marker" "$action"; then exit 0; fi
+    if attempt_and_route "$id" "$marker" "$action"; then exit 0; fi
     handled=1   # 시도는 했음(검증 실패) → 다음 사이클 재시도
   done < "$RULES"
 
@@ -265,14 +275,14 @@ while :; do
     log "vision → $vid"
     case "$vid" in
       NONE|none|"") : ;;
-      UNKNOWN|unknown) if act_and_verify "vision-unknown" "" "ocr:$GENERIC_LABELS"; then exit 0; fi ;;
+      UNKNOWN|unknown) if attempt_and_route "vision-unknown" "" "ocr:$GENERIC_LABELS"; then exit 0; fi ;;
       *) ra="$(rule_by_id "$vid")"
          if [ -n "$ra" ]; then
            vmarker="${ra%%$'\t'*}"; vaction="${ra#*$'\t'}"
-           if act_and_verify "$vid" "$vmarker" "$vaction"; then exit 0; fi
+           if attempt_and_route "$vid" "$vmarker" "$vaction"; then exit 0; fi
          else
            # haiku 가 임의 토큰 반환 → 일반 라벨로 시도
-           if act_and_verify "vision:$vid" "" "ocr:$GENERIC_LABELS"; then exit 0; fi
+           if attempt_and_route "vision:$vid" "" "ocr:$GENERIC_LABELS"; then exit 0; fi
          fi ;;
     esac
   fi
