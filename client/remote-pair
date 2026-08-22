@@ -74,11 +74,9 @@ _mark() { [ "$1" = true ] && printf '✓' || printf '✗'; }
 in_host_session() { case "${TMUX:-}" in *aqua-tmux-rp.sock*) return 0;; *) return 1;; esac; }
 
 # Is the RemotePairHost app available to serve app-dependent commands here?
-#   true if the app is installed locally (bundle/process/status.json) OR we're inside a live host session.
+#   true only if the daemon is live locally, or we're inside a live host session.
 app_available() {
-  [ -d "$HOME/Applications/$APP_NAME.app" ] && return 0
   [ -n "$(app_pid)" ] && return 0
-  [ -f "$STATUS_FILE" ] && return 0
   in_host_session && host_up && return 0
   return 1
 }
@@ -519,7 +517,7 @@ cmd_approve() {
     trap - RETURN EXIT INT TERM HUP
     # If this caller timed out before the host consumed its slot, cancel only
     # that still-owned request before allowing another caller to reuse it.
-    if [ "$published" = 0 ]; then
+    if [ "$published" = 0 ] && [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ]; then
       rm -f "$APPROVE_LOCK" 2>/dev/null
     elif [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ] \
       && [ -f "$APPROVE_TRIGGER.request-id" ] \
@@ -547,8 +545,8 @@ cmd_approve() {
     printf '%s\n' "$outcome_file" > "$APPROVE_TRIGGER.outcome" 2>/dev/null || return 1
   else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
   printf '%s\n' "$request_id" > "$APPROVE_TRIGGER.request-id" 2>/dev/null || return 1
-  : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
   published=1
+  : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"
   # Print only this request's router log lines (so the agent can read the result and decide next steps).
   _router_trail() { [ -f "$LOG_FILE" ] || return 0; local tot; tot=$(wc -l < "$LOG_FILE"); [ "$tot" -gt "$base0" ] && tail -n "$(( tot - base0 ))" "$LOG_FILE" | grep -F "router: [request=$request_id]"; }

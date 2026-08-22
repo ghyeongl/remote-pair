@@ -33,25 +33,19 @@ final class ApproveManager {
                          "LANG": "en_US.UTF-8",
                          // 라우터가 올바른 네임스페이스에서 룰/로그를 읽도록 명시 주입
                          "RP_DIR": RP_DIR, "RULES_FILE": RULES_FILE, "LOG_FILE": LOGP]
-        let outcomeRequest = TRIGGER + ".outcome"
-        if triggerBacked, let path = readRegularCompanion(outcomeRequest) {
-            let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
-            let allowedParent = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath()
-            if candidate.deletingLastPathComponent().path == allowedParent.path
-                && candidate.lastPathComponent.hasPrefix("remote-pair.outcome.") {
-                environment["RP_OUTCOME_FILE"] = candidate.path
-            }
-        }
         let requestIDFile = TRIGGER + ".request-id"
-        let claimedRequestIDFile = requestIDFile + ".claimed"
+        let outcomeRequest = TRIGGER + ".outcome"
         var requestID: String?
+        var claimedRequestIDFile: String?
         var priorLockOwner: String?
         if triggerBacked, let value = readRegularCompanion(requestIDFile), !value.isEmpty {
             requestID = value
+            let claimed = requestIDFile + ".claimed." + value
+            claimedRequestIDFile = claimed
             priorLockOwner = readRegularCompanion(APPROVE_LOCK)
             do {
                 try "\(getpid())\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
-                try FileManager.default.moveItem(atPath: requestIDFile, toPath: claimedRequestIDFile)
+                try FileManager.default.moveItem(atPath: requestIDFile, toPath: claimed)
             } catch {
                 if let owner = priorLockOwner {
                     try? "\(owner)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
@@ -60,26 +54,37 @@ final class ApproveManager {
                 return false
             }
             environment["RP_REQUEST_ID"] = value
+            if let path = readRegularCompanion(outcomeRequest) {
+                let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+                let allowedParent = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath()
+                if candidate.deletingLastPathComponent().path == allowedParent.path
+                    && candidate.lastPathComponent.hasPrefix("remote-pair.outcome.") {
+                    environment["RP_OUTCOME_FILE"] = candidate.path
+                }
+            }
         }
         p.environment = environment
         p.terminationHandler = { [weak self] _ in
             self?.running = false
-            if requestID != nil, self?.readRegularCompanion(APPROVE_LOCK) == "\(getpid())" {
+            if requestID != nil, self?.readRegularCompanion(APPROVE_LOCK) == "\(p.processIdentifier)" {
                 try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
             }
         }
         do {
             try p.run()
             if requestID != nil {
+                try? "\(p.processIdentifier)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
                 try? FileManager.default.removeItem(atPath: outcomeRequest)
-                try? FileManager.default.removeItem(atPath: claimedRequestIDFile)
+                if let claimed = claimedRequestIDFile { try? FileManager.default.removeItem(atPath: claimed) }
             }
             log("APPROVE: router spawned")
             return true
         } // async — 메인스레드 안 막음
         catch {
             if requestID != nil {
-                try? FileManager.default.moveItem(atPath: claimedRequestIDFile, toPath: requestIDFile)
+                if let claimed = claimedRequestIDFile {
+                    try? FileManager.default.moveItem(atPath: claimed, toPath: requestIDFile)
+                }
                 if let owner = priorLockOwner {
                     try? "\(owner)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
                 }
