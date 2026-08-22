@@ -40,6 +40,7 @@ METHOD_GAP="${RP_METHOD_GAP:-0.4}"             # 1Password 승인 방식별 결�
 OUTCOME_FILE="${RP_OUTCOME_FILE:-}"            # 선택: 호출자가 쓰는 ok|fail 실제 결과 채널
 OUTCOME_WAIT="${RP_OUTCOME_WAIT:-5}"           # 창 닫힘 후 실제 호출 결과 대기
 REQUEST_ID="${RP_REQUEST_ID:-}"
+CANCEL_FILE="${RP_CANCEL_FILE:-}"
 # 비전(haiku) — 구독 claude CLI 재사용, best-effort
 VISION="${RP_VISION:-auto}"                    # auto(룰 미스 시) | on | off
 VISION_MODEL="${RP_VISION_MODEL:-claude-haiku-4-5}"
@@ -126,6 +127,10 @@ outcome_confirmed(){
 
 outcome_now(){
   local raw=""
+  if [ -n "$REQUEST_ID" ] && [ -f "$CANCEL_FILE" ] && [ "$(head -1 "$CANCEL_FILE" 2>/dev/null)" = "$REQUEST_ID" ]; then
+    echo fail
+    return
+  fi
   [ -n "$OUTCOME_FILE" ] && [ -f "$OUTCOME_FILE" ] && raw="$(head -1 "$OUTCOME_FILE" 2>/dev/null)"
   if [ -n "$REQUEST_ID" ]; then
     case "$raw" in "ok:$REQUEST_ID") echo ok ;; "fail:$REQUEST_ID") echo fail ;; esac
@@ -472,6 +477,10 @@ rule_by_id(){
 deadline=$(( $(date +%s) + WAIT_SECS ))
 cycle=0
 while :; do
+  if [ -n "$REQUEST_ID" ] && [ -f "$CANCEL_FILE" ] && [ "$(head -1 "$CANCEL_FILE" 2>/dev/null)" = "$REQUEST_ID" ]; then
+    log "click-outcome-unconfirmed [request cancelled before approval]"
+    exit 1
+  fi
   cycle=$((cycle+1))
   capture || { sleep "$INTERVAL"; [ "$(date +%s)" -ge "$deadline" ] && break || continue; }
 

@@ -35,6 +35,7 @@ final class ApproveManager {
                          "RP_DIR": RP_DIR, "RULES_FILE": RULES_FILE, "LOG_FILE": LOGP]
         let requestIDFile = TRIGGER + ".request-id"
         let outcomeRequest = TRIGGER + ".outcome"
+        let cancelRequest = TRIGGER + ".cancel"
         var requestID: String?
         var claimedRequestIDFile: String?
         var priorLockOwner: String?
@@ -43,6 +44,14 @@ final class ApproveManager {
             let claimed = requestIDFile + ".claimed." + value
             claimedRequestIDFile = claimed
             priorLockOwner = readRegularCompanion(APPROVE_LOCK)
+            guard let owner = priorLockOwner, let ownerPID = Int32(owner), kill(ownerPID, 0) == 0 else {
+                try? FileManager.default.removeItem(atPath: requestIDFile)
+                try? FileManager.default.removeItem(atPath: outcomeRequest)
+                try? FileManager.default.removeItem(atPath: cancelRequest)
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
+                running = false
+                return true
+            }
             do {
                 try "\(getpid())\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
                 try FileManager.default.moveItem(atPath: requestIDFile, toPath: claimed)
@@ -54,6 +63,15 @@ final class ApproveManager {
                 return false
             }
             environment["RP_REQUEST_ID"] = value
+            environment["RP_CANCEL_FILE"] = cancelRequest
+            if readRegularCompanion(cancelRequest) == value {
+                try? FileManager.default.removeItem(atPath: claimed)
+                try? FileManager.default.removeItem(atPath: outcomeRequest)
+                try? FileManager.default.removeItem(atPath: cancelRequest)
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
+                running = false
+                return true
+            }
             if let path = readRegularCompanion(outcomeRequest) {
                 let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
                 let allowedParent = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath()
@@ -64,11 +82,12 @@ final class ApproveManager {
             }
         }
         p.environment = environment
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] process in
             self?.running = false
-            if requestID != nil, self?.readRegularCompanion(APPROVE_LOCK) == "\(p.processIdentifier)" {
+            if requestID != nil, self?.readRegularCompanion(APPROVE_LOCK) == "\(process.processIdentifier)" {
                 try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
             }
+            try? FileManager.default.removeItem(atPath: cancelRequest)
         }
         do {
             try p.run()

@@ -493,7 +493,7 @@ EOF
 }
 
 cmd_approve() {
-  local forhint="" type="" outcome_file="" timeout=90 request_id published=0
+  local forhint="" type="" outcome_file="" timeout=90 request_id published=0 completed=0
   while [ $# -gt 0 ]; do case "$1" in
     --for|--label|--expect) forhint="${2:-}"; shift 2 ;;   # 어떤 승인창인지 힌트(룰 id/자유문구; 별칭 관대)
     --type) type="${2:-}"; shift 2 ;;                       # 어떻게 승인할지 — key:<combo> | ocr:<라벨> (에이전트가 방식 지정)
@@ -512,6 +512,11 @@ cmd_approve() {
     echo "another remote-pair approve request is already active" >&2
     return 1
   fi
+  if [ -e "$APPROVE_TRIGGER" ]; then
+    rm -f "$APPROVE_LOCK" 2>/dev/null
+    echo "another approval trigger is already queued" >&2
+    return 1
+  fi
   request_id="$(uuidgen 2>/dev/null || printf '%s-%s' "$$" "$RANDOM")"
   _approve_unlock() {
     trap - RETURN EXIT INT TERM HUP
@@ -519,12 +524,10 @@ cmd_approve() {
     # that still-owned request before allowing another caller to reuse it.
     if [ "$published" = 0 ] && [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ]; then
       rm -f "$APPROVE_LOCK" 2>/dev/null
-    elif [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ] \
-      && [ -f "$APPROVE_TRIGGER.request-id" ] \
-      && [ "$(head -1 "$APPROVE_TRIGGER.request-id" 2>/dev/null)" = "$request_id" ]; then
-      rm -f "$APPROVE_TRIGGER" "$APPROVE_TRIGGER.label" "$APPROVE_TRIGGER.type" \
-        "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" 2>/dev/null || true
-      rm -f "$APPROVE_LOCK" 2>/dev/null
+    elif [ "$published" = 1 ] && [ "$completed" = 0 ]; then
+      # Cancellation is a correlated marker, never a check-then-delete of
+      # ownership that may already have transferred to the host/router.
+      printf '%s\n' "$request_id" > "$APPROVE_TRIGGER.cancel" 2>/dev/null || true
     fi
   }
   trap _approve_unlock RETURN EXIT
@@ -545,6 +548,7 @@ cmd_approve() {
     printf '%s\n' "$outcome_file" > "$APPROVE_TRIGGER.outcome" 2>/dev/null || return 1
   else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
   printf '%s\n' "$request_id" > "$APPROVE_TRIGGER.request-id" 2>/dev/null || return 1
+  rm -f "$APPROVE_TRIGGER.cancel" 2>/dev/null || true
   published=1
   : > "$APPROVE_TRIGGER" 2>/dev/null || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"
@@ -557,20 +561,24 @@ cmd_approve() {
       if [ "$now" -gt "$base" ]; then
         local new; new=$(tail -n "$(( now - base ))" "$LOG_FILE" | grep -F "router: [request=$request_id]" || true)
         if printf '%s\n' "$new" | grep -qiE 'router:.*success'; then
+          completed=1
           _router_trail | sed 's/^/  /'
           echo "✓ handled (window-close verified)"; return 0
         fi
         if printf '%s\n' "$new" | grep -q 'router: click-outcome-unconfirmed'; then
+          completed=1
           _router_trail | sed 's/^/  /' >&2
           echo "✗ click sent, but approval outcome is unconfirmed — retry the blocked operation" >&2
           return 1
         fi
         if printf '%s\n' "$new" | grep -q 'router: no dialog handled within'; then
+          completed=1
           _router_trail | sed 's/^/  /' >&2
           echo "✗ no approval dialog appeared" >&2
           return 1
         fi
         if printf '%s\n' "$new" | grep -q 'router: ocr-find 없음 — 중단'; then
+          completed=1
           _router_trail | sed 's/^/  /' >&2
           echo "✗ approve router cannot start without ocr-find" >&2
           return 1
