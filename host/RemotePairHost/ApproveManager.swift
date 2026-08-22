@@ -35,7 +35,7 @@ final class ApproveManager {
                          "RP_DIR": RP_DIR, "RULES_FILE": RULES_FILE, "LOG_FILE": LOGP]
         let requestIDFile = TRIGGER + ".request-id"
         let outcomeRequest = TRIGGER + ".outcome"
-        let cancelRequest = TRIGGER + ".cancel"
+        var cancelRequest: String?
         var requestID: String?
         var claimedRequestIDFile: String?
         var priorLockOwner: String?
@@ -45,10 +45,12 @@ final class ApproveManager {
             let claimed = requestIDFile + ".claimed." + value
             claimedRequestIDFile = claimed
             priorLockOwner = readRegularCompanion(APPROVE_LOCK)
-            guard let owner = priorLockOwner, let ownerPID = Int32(owner), kill(ownerPID, 0) == 0 else {
+            let lockBinding = readRegularCompanion(APPROVE_LOCK + ".id")
+            guard let owner = priorLockOwner, let ownerPID = Int32(owner), kill(ownerPID, 0) == 0,
+                  lockBinding == "\(owner):\(value)" else {
                 try? FileManager.default.removeItem(atPath: requestIDFile)
                 try? FileManager.default.removeItem(atPath: outcomeRequest)
-                try? FileManager.default.removeItem(atPath: cancelRequest)
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".cancel." + value)
                 try? FileManager.default.removeItem(atPath: TRIGGER + ".label")
                 try? FileManager.default.removeItem(atPath: TRIGGER + ".type")
                 running = false
@@ -66,14 +68,17 @@ final class ApproveManager {
             }
             ownsLock = true
             environment["RP_REQUEST_ID"] = value
-            environment["RP_CANCEL_FILE"] = cancelRequest
-            if readRegularCompanion(cancelRequest) == value {
+            let cancel = TRIGGER + ".cancel." + value
+            cancelRequest = cancel
+            environment["RP_CANCEL_FILE"] = cancel
+            if readRegularCompanion(cancel) == value {
                 try? FileManager.default.removeItem(atPath: claimed)
                 try? FileManager.default.removeItem(atPath: outcomeRequest)
-                try? FileManager.default.removeItem(atPath: cancelRequest)
+                try? FileManager.default.removeItem(atPath: cancel)
                 try? FileManager.default.removeItem(atPath: TRIGGER + ".label")
                 try? FileManager.default.removeItem(atPath: TRIGGER + ".type")
                 try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
+                try? FileManager.default.removeItem(atPath: APPROVE_LOCK + ".id")
                 running = false
                 return true
             }
@@ -93,17 +98,17 @@ final class ApproveManager {
         p.environment = environment
         p.terminationHandler = { [weak self] process in
             self?.running = false
-            if let id = requestID, self?.readRegularCompanion(cancelRequest) == id {
-                try? FileManager.default.removeItem(atPath: cancelRequest)
-            }
-            if ownsLock, self?.readRegularCompanion(APPROVE_LOCK) == "\(process.processIdentifier)" {
-                try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
+            if let cancel = cancelRequest {
+                try? FileManager.default.removeItem(atPath: cancel)
             }
         }
         do {
             try p.run()
             if ownsLock {
                 try? "\(p.processIdentifier)\n".write(toFile: APPROVE_LOCK, atomically: true, encoding: .utf8)
+                if let id = requestID {
+                    try? "\(p.processIdentifier):\(id)\n".write(toFile: APPROVE_LOCK + ".id", atomically: true, encoding: .utf8)
+                }
             }
             if requestID != nil {
                 try? FileManager.default.removeItem(atPath: outcomeRequest)

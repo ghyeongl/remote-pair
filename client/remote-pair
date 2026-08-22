@@ -493,7 +493,7 @@ EOF
 }
 
 cmd_approve() {
-  local forhint="" type="" outcome_file="" timeout=90 request_id published=0 completed=0
+  local forhint="" type="" outcome_file="" timeout=90 request_id cancel_file published=0 completed=0
   while [ $# -gt 0 ]; do case "$1" in
     --for|--label|--expect) forhint="${2:-}"; shift 2 ;;   # 어떤 승인창인지 힌트(룰 id/자유문구; 별칭 관대)
     --type) type="${2:-}"; shift 2 ;;                       # 어떻게 승인할지 — key:<combo> | ocr:<라벨> (에이전트가 방식 지정)
@@ -506,6 +506,8 @@ cmd_approve() {
       echo "--outcome-file must be a direct /tmp/remote-pair.outcome.* path" >&2; return 2
     }
   fi
+  request_id="$(uuidgen 2>/dev/null || printf '%s-%s' "$$" "$RANDOM")"
+  cancel_file="$APPROVE_TRIGGER.cancel.$request_id"
   # macOS shlock uses link(2): acquisition and stale-PID replacement are
   # atomic, with no empty-directory or takeover-guard crash window.
   if ! /usr/bin/shlock -f "$APPROVE_LOCK" -p "$$"; then
@@ -517,7 +519,6 @@ cmd_approve() {
     echo "another approval trigger is already queued" >&2
     return 1
   fi
-  request_id="$(uuidgen 2>/dev/null || printf '%s-%s' "$$" "$RANDOM")"
   _write_companion() {
     local path="$1" value="$2"
     rm -f "$path" 2>/dev/null || return 1
@@ -529,13 +530,13 @@ cmd_approve() {
     # that still-owned request before allowing another caller to reuse it.
     if [ "$published" = 0 ] && [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ]; then
       rm -f "$APPROVE_TRIGGER" "$APPROVE_TRIGGER.label" "$APPROVE_TRIGGER.type" \
-        "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" "$APPROVE_TRIGGER.cancel" \
+        "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" "$cancel_file" "$APPROVE_LOCK.id" \
         2>/dev/null || true
       rm -f "$APPROVE_LOCK" 2>/dev/null
     elif [ "$published" = 1 ] && [ "$completed" = 0 ]; then
       # Cancellation is a correlated marker, never a check-then-delete of
       # ownership that may already have transferred to the host/router.
-      _write_companion "$APPROVE_TRIGGER.cancel" "$request_id" || true
+      printf '%s\n' "$request_id" > "$cancel_file" 2>/dev/null || true
     fi
   }
   trap _approve_unlock RETURN EXIT
@@ -543,6 +544,8 @@ cmd_approve() {
   # approve needs the privileged app. If it isn't here (e.g. a client-only machine), guide to install
   # the host app instead of silently sending a trigger nobody will pick up.
   if ! app_available; then need_app_guidance; return 1; fi
+  _write_companion "$APPROVE_LOCK.id" "$$:$request_id" || return 1
+  _write_companion "$cancel_file" pending || return 1
   # base0 = log length just before triggering (so we show only this request's router log to the agent)
   local base0=0; [ -f "$LOG_FILE" ] && base0=$(wc -l < "$LOG_FILE")
   local base="$base0"
@@ -556,7 +559,6 @@ cmd_approve() {
     _write_companion "$APPROVE_TRIGGER.outcome" "$outcome_file" || return 1
   else rm -f "$APPROVE_TRIGGER.outcome" 2>/dev/null || true; fi
   _write_companion "$APPROVE_TRIGGER.request-id" "$request_id" || return 1
-  rm -f "$APPROVE_TRIGGER.cancel" 2>/dev/null || true
   _write_companion "$APPROVE_TRIGGER" "" || { echo "failed to write trigger: $APPROVE_TRIGGER" >&2; return 1; }
   published=1
   echo "approve request → $APP_NAME${forhint:+ (expect: $forhint)} (observing up to ${timeout}s)"

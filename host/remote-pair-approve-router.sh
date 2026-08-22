@@ -52,7 +52,6 @@ GENERIC_LABELS="Allow|Authorize|Authorize Once|Always Allow|Approve|Confirm|Cont
 
 log(){ printf '%s router: %s%s\n' "$(date '+%H:%M:%S')" "${REQUEST_ID:+[request=$REQUEST_ID] }" "$1" >> "$LOG"; }
 cancelled(){ [ -n "$REQUEST_ID" ] && [ -f "$CANCEL_FILE" ] && [ "$(head -1 "$CANCEL_FILE" 2>/dev/null)" = "$REQUEST_ID" ]; }
-[ -n "$OCR" ] || { log "ocr-find 없음 — 중단"; exit 1; }
 
 # 힌트: 에이전트가 "어떤 승인인지"(룰 id 또는 자유문구) 미리 알려주면 해당 룰을 우선 시도 +
 #   haiku 분류 prior 로 사용. 없어도 됨. (CLI 가 .label 파일로 전달, 또는 RP_FOR 환경변수)
@@ -64,6 +63,7 @@ HINT="${RP_FOR:-}"
 HINT_TYPE="${RP_TYPE:-}"
 [ -z "$HINT_TYPE" ] && [ -f "$TYPE_FILE" ] && HINT_TYPE="$(head -1 "$TYPE_FILE" 2>/dev/null)"
 rm -f "$HINT_FILE" "$TYPE_FILE" 2>/dev/null || true
+[ -n "$OCR" ] || { log "ocr-find 없음 — 중단"; exit 1; }
 [ -n "$HINT_TYPE" ] && log "type(에이전트 지정): $HINT_TYPE"
 HINT_ID=""
 if [ -n "$HINT" ]; then
