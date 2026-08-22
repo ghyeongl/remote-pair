@@ -528,6 +528,9 @@ cmd_approve() {
     # If this caller timed out before the host consumed its slot, cancel only
     # that still-owned request before allowing another caller to reuse it.
     if [ "$published" = 0 ] && [ "$(head -1 "$APPROVE_LOCK" 2>/dev/null)" = "$$" ]; then
+      rm -f "$APPROVE_TRIGGER" "$APPROVE_TRIGGER.label" "$APPROVE_TRIGGER.type" \
+        "$APPROVE_TRIGGER.outcome" "$APPROVE_TRIGGER.request-id" "$APPROVE_TRIGGER.cancel" \
+        2>/dev/null || true
       rm -f "$APPROVE_LOCK" 2>/dev/null
     elif [ "$published" = 1 ] && [ "$completed" = 0 ]; then
       # Cancellation is a correlated marker, never a check-then-delete of
