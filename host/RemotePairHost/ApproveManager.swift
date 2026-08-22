@@ -71,6 +71,8 @@ final class ApproveManager {
                 try? FileManager.default.removeItem(atPath: claimed)
                 try? FileManager.default.removeItem(atPath: outcomeRequest)
                 try? FileManager.default.removeItem(atPath: cancelRequest)
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".label")
+                try? FileManager.default.removeItem(atPath: TRIGGER + ".type")
                 try? FileManager.default.removeItem(atPath: APPROVE_LOCK)
                 running = false
                 return true
