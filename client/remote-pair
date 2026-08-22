@@ -11,7 +11,7 @@
 #   remote-pair onboard        Interactive, re-runnable client setup (host, terminal app, folder mapping, doctor).
 #   remote-pair open-gui <dir> Open the configured terminal app in a new window running 'launch <dir>'.
 #   remote-pair doctor         Check SSH key connection, host app, tmux + guidance
-#   remote-pair approve [--for "<what>"] [--type "key:..|ocr:.."] [--outcome-file /tmp/remote-pair.*] [--timeout S]
+#   remote-pair approve [--for "<what>"] [--type "key:..|ocr:.."] [--outcome-file /tmp/remote-pair.outcome.*] [--timeout S]
 #                              --for: which dialog (alias-tolerant)  ·  --type: how to approve — agent decides (key:<combo>|ocr:<label>)
 #   remote-pair status         Host server, app, heartbeat status
 #   remote-pair logs [--host] [-f] [-n N]   Tail logs (local launcher/app; --host = host logs over ssh; -f = follow)
@@ -503,8 +503,8 @@ cmd_approve() {
     *) echo "unknown arg: $1" >&2; return 2 ;;
   esac; done
   if [ -n "$outcome_file" ]; then
-    [ "$(dirname "$outcome_file")" = /tmp ] && [[ "$(basename "$outcome_file")" = remote-pair.* ]] || {
-      echo "--outcome-file must be a direct /tmp/remote-pair.* path" >&2; return 2
+    [ "$(dirname "$outcome_file")" = /tmp ] && [[ "$(basename "$outcome_file")" = remote-pair.outcome.* ]] || {
+      echo "--outcome-file must be a direct /tmp/remote-pair.outcome.* path" >&2; return 2
     }
   fi
   # approve needs the privileged app. If it isn't here (e.g. a client-only machine), guide to install

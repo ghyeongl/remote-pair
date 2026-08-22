@@ -127,6 +127,23 @@ outcome_now(){
   [ -n "$OUTCOME_FILE" ] && [ -f "$OUTCOME_FILE" ] && head -1 "$OUTCOME_FILE" 2>/dev/null || true
 }
 
+# Give the blocked caller time to publish the result of the method just sent.
+# This wait happens even while an identical marker remains visible: that marker
+# may be a second queued request, not proof that the first method failed.
+outcome_after_method(){
+  [ -n "$OUTCOME_FILE" ] || { echo pending; return; }
+  local deadline verdict="$(outcome_now)"
+  case "$verdict" in ok|fail) echo "$verdict"; return ;; esac
+  [ "$OUTCOME_WAIT" -gt 0 ] 2>/dev/null || { echo pending; return; }
+  deadline=$(( $(date +%s) + OUTCOME_WAIT ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    verdict="$(outcome_now)"
+    case "$verdict" in ok|fail) echo "$verdict"; return ;; esac
+    sleep 0.1
+  done
+  echo pending
+}
+
 ax_press(){
   local labels="$1"
   "$OSASCRIPT" - "$labels" <<'APPLESCRIPT'
@@ -174,7 +191,7 @@ approve_1password(){
     sendkey "$combo" >/dev/null 2>&1
     log "[1Password] method key:$combo"
     sleep "$METHOD_GAP"
-    verdict="$(outcome_now)"
+    verdict="$(outcome_after_method)"
     case "$verdict" in
       ok) log "success [1Password] (method=key:$combo, 호출 결과 확인)"; return 0 ;;
       fail) log "click-outcome-unconfirmed [1Password] (method=key:$combo, 호출 실패 확인)"; return 2 ;;
@@ -195,7 +212,7 @@ approve_1password(){
       else system_click "$x" "$y" >/dev/null 2>&1; fi
       log "[1Password] method $method:$C"
       sleep "$METHOD_GAP"
-      verdict="$(outcome_now)"
+      verdict="$(outcome_after_method)"
       case "$verdict" in
         ok) log "success [1Password] (method=$method:$C, 호출 결과 확인)"; return 0 ;;
         fail) log "click-outcome-unconfirmed [1Password] (method=$method:$C, 호출 실패 확인)"; return 2 ;;
@@ -214,7 +231,7 @@ approve_1password(){
   ax_press "$labels" >/dev/null 2>&1
   log "[1Password] method axpress"
   sleep "$METHOD_GAP"
-  verdict="$(outcome_now)"
+  verdict="$(outcome_after_method)"
   case "$verdict" in
     ok) log "success [1Password] (method=axpress, 호출 결과 확인)"; return 0 ;;
     fail) log "click-outcome-unconfirmed [1Password] (method=axpress, 호출 실패 확인)"; return 2 ;;
@@ -244,7 +261,7 @@ approve_1password_explicit(){
         sendkey "$combo" >/dev/null 2>&1
         log "[1Password] explicit method key:$combo"
         sleep "$METHOD_GAP"
-        verdict="$(outcome_now)"
+        verdict="$(outcome_after_method)"
         case "$verdict" in
           ok) log "success [1Password] (explicit method=key:$combo, 호출 결과 확인)"; return 0 ;;
           fail) log "click-outcome-unconfirmed [1Password] (explicit method=key:$combo, 호출 실패 확인)"; return 2 ;;
@@ -260,7 +277,7 @@ approve_1password_explicit(){
     ocr:*)
       do_action "1Password" "$action" || return 1
       sleep "$METHOD_GAP"
-      verdict="$(outcome_now)"
+      verdict="$(outcome_after_method)"
       case "$verdict" in
         ok) log "success [1Password] (explicit method=ocr, 호출 결과 확인)"; return 0 ;;
         fail) log "click-outcome-unconfirmed [1Password] (explicit method=ocr, 호출 실패 확인)"; return 2 ;;

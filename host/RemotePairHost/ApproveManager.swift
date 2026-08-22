@@ -25,7 +25,7 @@ final class ApproveManager {
             let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
             let allowedParent = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath()
             if candidate.deletingLastPathComponent().path == allowedParent.path
-                && candidate.lastPathComponent.hasPrefix("remote-pair.") {
+                && candidate.lastPathComponent.hasPrefix("remote-pair.outcome.") {
                 environment["RP_OUTCOME_FILE"] = candidate.path
             }
         }

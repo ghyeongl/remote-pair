@@ -45,7 +45,11 @@ cat >"$TMP/bin/osascript" <<'EOF'
 #!/bin/bash
 [[ -n "${OSASCRIPT_LOG:-}" ]] && printf '%s\n' "$*" >>"$OSASCRIPT_LOG"
 if [[ "$*" == *"key code"* && -n "${OUTCOME_ON_KEY_FILE:-}" ]]; then
-  printf '%s\n' "${OUTCOME_ON_KEY_VERDICT:-ok}" >"$OUTCOME_ON_KEY_FILE"
+  if [[ -n "${OUTCOME_ON_KEY_DELAY:-}" ]]; then
+    ( sleep "$OUTCOME_ON_KEY_DELAY"; printf '%s\n' "${OUTCOME_ON_KEY_VERDICT:-ok}" >"$OUTCOME_ON_KEY_FILE" ) &
+  else
+    printf '%s\n' "${OUTCOME_ON_KEY_VERDICT:-ok}" >"$OUTCOME_ON_KEY_FILE"
+  fi
 fi
 :
 EOF
@@ -126,6 +130,25 @@ PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
 grep -q 'tell application.*1Password.*activate' "$TMP/osascript.log"
 grep -q 'key code 36' "$TMP/osascript.log"
 grep -q 'router: success \[1Password\] (explicit method=key:return' "$TMP/logs/router.log"
+
+# A delayed result for the first method wins before the ladder can send a
+# second method to an identical queued dialog.
+printf '1Password\tAccess Requested\tocr:Authorize\n' >"$TMP/rules.txt"
+printf 'present\n' >"$TMP/ocr-phase"
+: >"$TMP/outcome"
+: >"$TMP/capture-count"
+: >"$TMP/osascript.log"
+PATH="$TMP/bin:$PATH" RP_DIR="$TMP" RULES_FILE="$TMP/rules.txt" \
+  LOG_FILE="$TMP/logs/router.log" RP_FOR= RP_VISION=off \
+  RP_WAIT_SECS=0 RP_METHOD_GAP=0 RP_SCREENCAPTURE="$TMP/bin/screencapture" \
+  RP_OSASCRIPT="$TMP/bin/osascript" RP_CLICK="$TMP/bin/cliclick" \
+  OCR_PHASE_FILE="$TMP/ocr-phase" CAPTURE_COUNT_FILE="$TMP/capture-count" \
+  RP_OUTCOME_FILE="$TMP/outcome" RP_OUTCOME_WAIT=2 \
+  OUTCOME_ON_KEY_FILE="$TMP/outcome" OUTCOME_ON_KEY_VERDICT=ok OUTCOME_ON_KEY_DELAY=0.5 \
+  OSASCRIPT_LOG="$TMP/osascript.log" GONE_AT=999 \
+  "$ROOT/host/remote-pair-approve-router.sh" >/dev/null 2>&1
+[[ "$(grep -c 'key code' "$TMP/osascript.log")" == 1 ]]
+grep -q 'router: success \[1Password\] (method=key:return' "$TMP/logs/router.log"
 
 # Type-only requests with a real outcome channel identify the visible
 # 1Password rule, preserve an early caller verdict, and use the focused path.
