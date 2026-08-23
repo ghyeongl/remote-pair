@@ -220,7 +220,7 @@ respawn_body() {
 
 # engine_env_preamble — engine-specific env exports injected ahead of respawn_body into the
 # session script, so values that live in the launcher process reach the (limited-env) tmux
-# server shell. Local sessions only; remote transport of these is not wired yet.
+# server shell. Used for both local (inline) and remote (base64 via ENGINE_ENV_B64) sessions.
 engine_env_preamble() {
   [ "$RP_ENGINE" = opencode ] && [ -n "${OPENCODE_CONFIG_CONTENT:-}" ] && \
     printf 'export OPENCODE_CONFIG_CONTENT=%q\n' "$OPENCODE_CONFIG_CONTENT"
@@ -618,6 +618,9 @@ fi
 _rn_final="$(_remote_next_n "$REMOTE_PROJ")"
 RN="${_rn_final%% *}"
 RESPAWN_B64="$(respawn_body | base64 | tr -d '\n')"
+# Engine env exports (CODEX_HOME / OPENCODE_CONFIG_CONTENT) forwarded to the remote host the
+# same way as the respawn body — base64 sidesteps any heredoc/quoting hazard from user values.
+ENGINE_ENV_B64="$(engine_env_preamble | base64 | tr -d '\n')"
 
 # Current window size — create the remote detached tmux session at this size to avoid
 # a jump-resize on attach.
@@ -656,6 +659,7 @@ if [ "${RP_ENGINE}" = claude ] || [ "${RP_ENGINE}" = claudex ]; then
   fi
 fi
 RESPAWN_B64='${RESPAWN_B64}'
+ENGINE_ENV_B64='${ENGINE_ENV_B64}'
 [ -d '${HOST_DIR}' ] || { echo "host dir missing: ${HOST_DIR}"; exit 14; }
 cd '${HOST_DIR}'
 # Session name is fully resolved (including romanization) on the client side before injection —
@@ -686,7 +690,7 @@ NEED_CREATE=1
 if tm has-session -t "=\$SESSION" 2>/dev/null; then NEED_CREATE=0; fi
 if [ "\$NEED_CREATE" = 1 ]; then
   T=\$(mktemp -t claude-respawn.XXXXXX)
-  { printf "export CLAUDE_WARP_RC=%q\n" "\$SESSION"; printf '%s' "\$RESPAWN_B64" | base64 -d; } > "\$T"
+  { printf "export CLAUDE_WARP_RC=%q\n" "\$SESSION"; printf '%s' "\$ENGINE_ENV_B64" | base64 -d; printf '%s' "\$RESPAWN_B64" | base64 -d; } > "\$T"
   tm new-session -d -x ${COLS} -y ${LINES} -s "\$SESSION" -c '${HOST_DIR}' "bash \$T"
 fi
 # host-side session-lifecycle log (correlation id = session name; records which client attached)
