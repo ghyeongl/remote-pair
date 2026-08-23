@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # remote-pair — RemotePair single entry-point CLI (client side).
 #
-#   remote-pair launch [<dir>] [--local|--remote] [--fresh] [--yes]
+#   remote-pair launch [<dir>] [--local|--remote] [--fresh] [--yes] [--engine <claude|claudex|codex|opencode>]
 #                              Launch/attach a claude session (remote host/local) for a folder. Prompts to register if unmapped.
 #   remote-pair ls             List host (or local) tmux-aqua sessions + registered folder mappings
 #   remote-pair map [list|add <clientDir> [hostDir]|rm <clientDir>]
@@ -367,6 +367,7 @@ cmd_launch() {
   local pass=() dir=""
   while [ $# -gt 0 ]; do case "$1" in
     --local|--remote|--fresh|--yes|-y) pass+=("$1"); [ "$1" = "--yes" ] || [ "$1" = "-y" ] && RP_YES=1; shift ;;
+    --engine) pass+=("$1" "${2:?--engine needs a value}"); shift 2 ;;
     *) dir="$1"; shift ;;
   esac; done
   dir="$(cd "${dir:-$PWD}" 2>/dev/null && pwd)" || { echo "folder not found" >&2; return 1; }

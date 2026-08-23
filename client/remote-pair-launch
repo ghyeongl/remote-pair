@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# remote-pair-launch — open a claude session (remote host or local) for a single folder and attach.
+# remote-pair-launch — open an agent session (Claude, Claudex, Codex, or OpenCode) for a single folder and attach.
 #
 # Key behavior (1:1 connection only — no session sharing / multi-attach):
 #   • Path mapping: client folder → host folder (FOLDER_MAPS; content is identical via external sync
@@ -9,13 +9,13 @@
 #   • _N numbering: if _1 already has a client (tab) attached → _2 is opened fresh;
 #                   detached sessions are taken over with attach -d
 #   • computer-use: session is added to the patched tmux-aqua server socket started by
-#                   RemotePairHost → claude inherits its permissions
+#                   RemotePairHost → claude/claudex inherits its permissions
 #   • non-interactive: RP_YES=1 (or --yes) skips all prompts (auto dir creation, etc.)
 #
-# Usage:  remote-pair-launch [--local|--remote] [--fresh] [--yes] [<dir>]
+# Usage:  remote-pair-launch [--local|--remote] [--fresh] [--yes] [--engine <claude|claudex|codex|opencode>] [<dir>]
 #         (typically called via 'remote-pair launch <dir>' or a Finder Service)
 set -euo pipefail
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # ── config (single source of truth: ~/.remote-pair) ──
 RP_DIR="${RP_DIR:-$HOME/.remote-pair}"
@@ -32,6 +32,16 @@ AQUA_SOCK="${AQUA_SOCK:-/tmp/aqua-tmux-rp.sock}"
 MOSH_SERVER="${MOSH_SERVER:-/opt/homebrew/bin/mosh-server}"
 FOLDER_MAPS="${FOLDER_MAPS:-}"
 HROMANIZE="${HROMANIZE:-$RP_DIR/bin/hangul-romanize}"
+RP_ENGINE="${RP_ENGINE:-}"
+RP_ENGINE_EXPLICIT=0
+[ -n "$RP_ENGINE" ] && RP_ENGINE_EXPLICIT=1
+canonical_engine() {
+  case "${1:-}" in
+    claude|claudecode|claude-code) printf 'claude' ;;
+    claudex|codex|opencode) printf '%s' "$1" ;;
+    *) return 1 ;;
+  esac
+}
 
 # ── args ──
 TARGET_PREF=""; FRESH=0; RP_YES="${RP_YES:-0}"; DIR_ARG=""
@@ -40,6 +50,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --remote) TARGET_PREF=remote; shift ;;
   --fresh)  FRESH=1; shift ;;
   --yes|-y) RP_YES=1; shift ;;
+  --engine) [ $# -ge 2 ] || { printf 'missing value for --engine\n' >&2; exit 2; }; RP_ENGINE="$2"; RP_ENGINE_EXPLICIT=1; shift 2 ;;
+  --*)      printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
   *)        DIR_ARG="$1"; shift ;;
 esac; done
 
@@ -67,6 +79,55 @@ ask() { # $1=prompt → echo answer ('' if non-interactive/no tty)
   [ "$RP_YES" = 1 ] && { echo ""; return; }
   local a=""; { printf '%s' "$1" > /dev/tty; read -r a < /dev/tty; } 2>/dev/null || true; printf '%s' "$a"
 }
+have_tty() { { : < /dev/tty; } 2>/dev/null; }   # matches ask(): usable controlling tty, even if stdin is piped
+engine_label() {
+  case "$1" in
+    claude) printf 'Claude' ;;
+    claudex) printf 'Claudex' ;;
+    codex) printf 'Codex' ;;
+    opencode) printf 'OpenCode' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+choose_engine() {
+  [ "${RP_ENGINE_EXPLICIT:-0}" = 1 ] && return 0
+  [ "$RP_YES" = 1 ] && return 0
+  have_tty || return 0
+
+  local def ans choice
+  case "$RP_ENGINE" in
+    claudex) def=2 ;;
+    codex) def=3 ;;
+    opencode) def=4 ;;
+    *) def=1 ;;
+  esac
+
+  local d1="" d2="" d3="" d4=""
+  [ "$def" = 1 ] && d1=" (default)"
+  [ "$def" = 2 ] && d2=" (default)"
+  [ "$def" = 3 ] && d3=" (default)"
+  [ "$def" = 4 ] && d4=" (default)"
+  printf 'Agent engine:\n  [1] Claude%s\n  [2] Claudex%s\n  [3] Codex%s\n  [4] OpenCode%s\n' \
+    "$d1" "$d2" "$d3" "$d4"
+  ans="$(ask "select engine [1/2/3/4] (default $def): ")"
+  choice="${ans:-$def}"
+  case "$choice" in
+    1|claude|claudecode|claude-code) RP_ENGINE=claude ;;
+    2|claudex) RP_ENGINE=claudex ;;
+    3|codex) RP_ENGINE=codex ;;
+    4|opencode) RP_ENGINE=opencode ;;
+    *) printf 'unknown engine selection: %s — keeping %s\n' "$choice" "$(engine_label "$RP_ENGINE")" >&2 ;;
+  esac
+}
+
+if _canon="$(canonical_engine "$RP_ENGINE")"; then
+  RP_ENGINE="$_canon"
+elif [ -n "$RP_ENGINE" ]; then
+  printf 'unknown engine: %s (use claude|claudecode|claudex|codex|opencode)\n' "$RP_ENGINE" >&2
+  exit 2
+else
+  RP_ENGINE=claude
+fi
 
 PROJECT_DIR="$(cd "${DIR_ARG:-$PWD}" 2>/dev/null && pwd)" || die "directory not found: ${DIR_ARG:-$PWD}"
 LOCAL_HOST="$(hostname -s)"
@@ -99,7 +160,24 @@ _readable() {
     *[!A-Za-z0-9._-]*) : ;;                 # non-ASCII → translate
     *) printf '%s' "$s"; return ;;          # already ASCII → use as-is (fast path)
   esac
-  local key cf eng=""
+  local eng=""
+  # Only plain `claude` uses the `claude -p` translation and its cache. claudex (proxy),
+  # codex, and opencode romanize instead: they must NOT call `claude -p` (it would hit the
+  # user's real Claude account / the wrong proxy) and must NOT share claude's cache key
+  # (keyed on the folder name only — a cross-engine write would poison claude's session
+  # name and break reattach). They cache under a separate `rom:` namespace so their own
+  # slug stays stable regardless of whether hangul-romanize is installed yet.
+  case "$RP_ENGINE" in
+    claude) ;;
+    *)
+      local rkey rcf
+      rkey="$(printf 'rom:%s' "$s" | shasum -a 256 | cut -c1-12)"; rcf="$_TRCACHE/$rkey"
+      [ -s "$rcf" ] && { cat "$rcf"; return; }
+      [ -x "$HROMANIZE" ] && eng="$("$HROMANIZE" "$s")"
+      [ -z "$eng" ] && eng="$s"
+      mkdir -p "$_TRCACHE"; printf '%s' "$eng" > "$rcf"; printf '%s' "$eng"; return ;;
+  esac
+  local key cf
   key="$(printf '%s' "$s" | shasum -a 256 | cut -c1-12)"; cf="$_TRCACHE/$key"
   [ -s "$cf" ] && { cat "$cf"; return; }    # cache hit → always same result (stable re-attach)
   if command -v claude >/dev/null 2>&1; then
@@ -124,17 +202,44 @@ _proj_base() {
 # (':' is a tmux reserved char → normalize to '_'. '.' too: .claude → _claude)
 # Local session name is based on PROJECT_DIR; remote session name on map_to_host result —
 # both computed locally (SSOT; cache avoids duplicate claude calls).
+choose_engine   # finalize engine BEFORE _proj_base — non-Claude engines must not hit the claude -p slug path
 LOCAL_PROJ="${LOCAL_HOST}_$(_proj_base "$PROJECT_DIR")"
 LOCAL_PROJ="${LOCAL_PROJ//[.:]/_}"
+[ "$RP_ENGINE" != claude ] && LOCAL_PROJ="${LOCAL_PROJ}-${RP_ENGINE}"
 
-# ── respawn body (claude + crash restart) ──
+# ── respawn body (engine + crash restart) ──
 respawn_body() {
+  case "$RP_ENGINE" in
+    claude)   respawn_body_claude ;;
+    claudex)  respawn_body_claudex ;;
+    codex)    respawn_body_codex ;;
+    opencode) respawn_body_opencode ;;
+    *)        respawn_body_claude ;;
+  esac
+}
+
+# engine_env_preamble — engine-specific env exports injected ahead of respawn_body into the
+# session script, so values that live in the launcher process reach the (limited-env) tmux
+# server shell. Used for both local (inline) and remote (base64 via ENGINE_ENV_B64) sessions.
+engine_env_preamble() {
+  [ "$RP_ENGINE" = opencode ] && [ -n "${OPENCODE_CONFIG_CONTENT:-}" ] && \
+    printf 'export OPENCODE_CONFIG_CONTENT=%q\n' "$OPENCODE_CONFIG_CONTENT"
+  [ "$RP_ENGINE" = codex ] && [ -n "${CODEX_HOME:-}" ] && \
+    printf 'export CODEX_HOME=%q\n' "$CODEX_HOME"
+  return 0
+}
+
+respawn_body_claude() {
   # CLAUDE_WARP_RC env var = tmux session name = RC. Injected by launcher via temp file (SSOT).
   cat <<'RESPAWN'
 # Clean up claude child processes when tmux/bash exits — bash has huponexit OFF by default,
 # so children don't receive SIGHUP on normal exit and claude may survive as an orphan (reparented to init).
 # EXIT trap kills the entire process group → prevents accumulation of orphan claude --remote-control instances.
 trap 'kill -- -$$ 2>/dev/null' EXIT
+
+# This body runs inside the long-lived tmux-aqua server, whose PATH is only Homebrew +
+# system (HostManager) — re-extend it so a native ~/.local/bin install resolves.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # RC = CLAUDE_WARP_RC (injected by launcher). Fallback computed only if env is missing.
 RC="${CLAUDE_WARP_RC:-$(hostname -s)_$(basename "$PWD")}"
@@ -159,6 +264,126 @@ while :; do
   FIRST_LAUNCH=0
   [ "$CLAUDE_RC" -eq 0 ] && break
   printf '\n[claude crashed — restarting in 3s, Ctrl+C to abort]\n'
+  sleep 3 || break
+done
+RESPAWN
+}
+
+respawn_body_claudex() {
+  # Claudex is Claude Code routed through CLIProxyAPI; keep Claude's exact remote-control/resume behavior.
+  cat <<'RESPAWN'
+# Clean up claude child processes when tmux/bash exits — bash has huponexit OFF by default,
+# so children don't receive SIGHUP on normal exit and claude may survive as an orphan (reparented to init).
+# EXIT trap kills the entire process group → prevents accumulation of orphan claude --remote-control instances.
+trap 'kill -- -$$ 2>/dev/null' EXIT
+
+# This body runs inside the long-lived tmux-aqua server, whose PATH is only Homebrew +
+# system (HostManager) — re-extend it so a native ~/.local/bin claude install resolves.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+command -v claude >/dev/null 2>&1 || {
+  printf '\n[claude not found on host — claudex uses the real claude binary; use --engine claude after installing Claude Code]\n' >&2
+  exit 11
+}
+[ -f "$HOME/.cli-proxy-api/claudex-api-key" ] || {
+  printf '\n[claudex setup not found on host — missing ~/.cli-proxy-api/claudex-api-key; use --engine claude]\n' >&2
+  exit 11
+}
+
+# RC = CLAUDE_WARP_RC (injected by launcher). Fallback computed only if env is missing.
+RC="${CLAUDE_WARP_RC:-$(hostname -s)_$(basename "$PWD")}"
+RC="${RC//[.:]/_}"
+export CLAUDE_WARP_RC="$RC"
+# Claudex = Claude Code routed through CLIProxyAPI. Wrap the proxy env + model so the
+# OWN_SID session loop below is byte-for-byte the same policy as respawn_body_claude:
+# fresh conversation on launch, exact-ID resume on crash restart (never --continue).
+claudex_run() {
+  ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
+  ANTHROPIC_API_KEY="$(cat ~/.cli-proxy-api/claudex-api-key)" \
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
+  CLAUDE_CODE_SUBAGENT_MODEL=gpt-5.6-sol \
+  CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1 \
+  CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=3 \
+  ENABLE_TOOL_SEARCH=false \
+  claude --model gpt-5.6-sol --dangerously-skip-permissions "$@"
+}
+OWN_SID="$(uuidgen | tr 'A-Z' 'a-z')"
+FIRST_LAUNCH=1
+while :; do
+  # A newly-created tmux always starts a fresh conversation. Existing live context
+  # survives by reattaching to its tmux and never reaches this initial path. This tmux
+  # owns its conversation ID so concurrent _N sessions never collide; a failed
+  # crash-resume falls back to a new ID.
+  if [ "$FIRST_LAUNCH" = 1 ]; then
+    claudex_run --session-id "$OWN_SID" --remote-control "$RC"
+  elif ! claudex_run --resume "$OWN_SID" --remote-control "$RC"; then
+    OWN_SID="$(uuidgen | tr 'A-Z' 'a-z')"
+    claudex_run --session-id "$OWN_SID" --remote-control "$RC"
+  else
+    :
+  fi
+  CLAUDE_RC=$?
+  FIRST_LAUNCH=0
+  [ "$CLAUDE_RC" -eq 0 ] && break
+  printf '\n[claudex crashed — restarting in 3s, Ctrl+C to abort]\n'
+  sleep 3 || break
+done
+RESPAWN
+}
+
+respawn_body_codex() {
+  # Codex has only provider-global resume, not a RemotePair path/session-keyed resume.
+  # Existing sessions keep context through tmux reattach; newly spawned codex shells must be clean.
+  cat <<'RESPAWN'
+# Reap codex children when tmux/bash exits — bash has huponexit OFF by default, so without this
+# EXIT trap (process-group kill) the agent CLI could survive as an orphan reparented to init.
+trap 'kill -- -$$ 2>/dev/null' EXIT
+
+# This body runs inside the long-lived tmux-aqua server, whose PATH is only Homebrew +
+# system (HostManager) — re-extend it so native installs (~/.local/bin, ~/.opencode/bin) resolve.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+# codex must be present on the host (resolved on the host, not the client).
+command -v codex >/dev/null 2>&1 || {
+  printf '\n[codex not found on host — install it with the native Codex installer or use --engine claude]\n' >&2
+  exit 11
+}
+while :; do
+  codex --dangerously-bypass-approvals-and-sandbox
+  [ $? -eq 0 ] && break
+  printf '\n[codex crashed — restarting in 3s, Ctrl+C to abort]\n'
+  sleep 3 || break
+done
+RESPAWN
+}
+
+respawn_body_opencode() {
+  # OpenCode starts clean; no global --continue. Existing sessions keep context through tmux reattach.
+  cat <<'RESPAWN'
+# Reap opencode children when tmux/bash exits — bash has huponexit OFF by default, so without this
+# EXIT trap (process-group kill) the agent CLI could survive as an orphan reparented to init.
+trap 'kill -- -$$ 2>/dev/null' EXIT
+
+# This body runs inside the long-lived tmux-aqua server, whose PATH is only Homebrew +
+# system (HostManager) — re-extend it so native installs (~/.local/bin, ~/.opencode/bin) resolve.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+# opencode must be present on the host (resolved on the host, not the client).
+command -v opencode >/dev/null 2>&1 || {
+  printf '\n[opencode not found on host — install it with the native OpenCode installer or use --engine claude]\n' >&2
+  exit 11
+}
+# Auto-approve via inline config default (TUI has no skip-permissions flag).
+# Only inject when the user hasn't already supplied inline config (preserve their model/plugins).
+# NOTE: use an explicit if — a ${VAR:=json} default would be mangled by brace/quote parsing.
+if [ -z "${OPENCODE_CONFIG_CONTENT:-}" ]; then
+  OPENCODE_CONFIG_CONTENT='{"permission":{"edit":"allow","bash":"allow","webfetch":"allow"}}'
+fi
+export OPENCODE_CONFIG_CONTENT
+while :; do
+  opencode
+  [ $? -eq 0 ] && break
+  printf '\n[opencode crashed — restarting in 3s, Ctrl+C to abort]\n'
   sleep 3 || break
 done
 RESPAWN
@@ -235,9 +460,19 @@ ensure_local_host() {
 
 # ---------------- local launch (function — also used as fallback when remote fails) ----------------
 launch_local() {
-  command -v claude >/dev/null 2>&1 || die "claude not found on $LOCAL_HOST (PATH=$PATH)" 11
+  case "$RP_ENGINE" in
+    claude)
+      command -v claude >/dev/null 2>&1 || die "claude not found on $LOCAL_HOST (PATH=$PATH)" 11 ;;
+    claudex)
+      command -v claude >/dev/null 2>&1 || die "claude not found on $LOCAL_HOST (PATH=$PATH) — claudex uses the real claude binary; use --engine claude after installing Claude Code" 11
+      [ -f "$HOME/.cli-proxy-api/claudex-api-key" ] || die "claudex setup not found on $LOCAL_HOST — missing ~/.cli-proxy-api/claudex-api-key; use --engine claude" 11 ;;
+    codex)
+      command -v codex >/dev/null 2>&1 || die "codex not found on $LOCAL_HOST (PATH=$PATH) — install it with the native Codex installer or use --engine claude" 11 ;;
+    opencode)
+      command -v opencode >/dev/null 2>&1 || die "opencode not found on $LOCAL_HOST (PATH=$PATH) — install it with the native OpenCode installer or use --engine claude" 11 ;;
+  esac
   local T; T="$(mktemp -t claude-respawn.XXXXXX)"
-  sync_claude_local
+  case "$RP_ENGINE" in claude|claudex) sync_claude_local ;; esac   # non-Claude engines don't use ~/.claude state
   cd "$PROJECT_DIR"                                 # local: host == client
   # For computer-use, claude must be inside the patched-tmux server under the granted
   # .app (RemotePairHost) process subtree. If RemotePair host (aqua-tmux) is on this machine,
@@ -250,7 +485,7 @@ launch_local() {
     tm_local has-session -t "=$SESS" 2>/dev/null && NEED_CREATE=0             # detached → take-over re-attach
     if [ "$NEED_CREATE" = 1 ]; then
       [ -d "$PROJECT_DIR" ] || die "project directory missing: $PROJECT_DIR" 1
-      { printf "export CLAUDE_WARP_RC=%q\n" "$SESS"; respawn_body; } > "$T"
+      { printf "export CLAUDE_WARP_RC=%q\n" "$SESS"; engine_env_preamble; respawn_body; } > "$T"
       tm_local new-session -d -s "$SESS" -c "$PROJECT_DIR" "bash $T"
     fi   # RemotePairHost subtree → computer-use
     # host-side session-lifecycle log (local==host here; correlation id = session name)
@@ -268,7 +503,7 @@ launch_local() {
   if tmux has-session -t "=$TSESS" 2>/dev/null; then
     exec tmux attach -d -t "=$TSESS"                 # detached → take-over re-attach (-d: drop stale clients)
   else
-    { printf "export CLAUDE_WARP_RC=%q\n" "$TSESS"; respawn_body; } > "$T"
+    { printf "export CLAUDE_WARP_RC=%q\n" "$TSESS"; engine_env_preamble; respawn_body; } > "$T"
     exec tmux new -s "$TSESS" "bash $T"
   fi
 }
@@ -282,6 +517,7 @@ launch_local() {
 HOST_DIR="$(map_to_host "$PROJECT_DIR")"
 REMOTE_PROJ="${REMOTE_HOST}_$(_proj_base "$HOST_DIR")"
 REMOTE_PROJ="${REMOTE_PROJ//[.:]/_}"
+[ "$RP_ENGINE" != claude ] && REMOTE_PROJ="${REMOTE_PROJ}-${RP_ENGINE}"
 
 if [ -n "$TARGET_PREF" ]; then
   TARGET="$TARGET_PREF"
@@ -295,8 +531,8 @@ else
   _rn="${_rn_out%% *}"; _rs="${_rn_out#* }"
   _ln_out="$(_local_next_n "$LOCAL_PROJ")"
   _ln="${_ln_out%% *}"; _ls="${_ln_out#* }"
-  printf 'Launch claude for "%s":\n  [1] %s (remote, default)  → session _%s  (%s)\n  [2] %s (local)            → session _%s  (%s)\n' \
-    "$LOCAL_PROJ" "$REMOTE_HOST" "$_rn" "$_rs" "$LOCAL_HOST" "$_ln" "$_ls"
+  printf 'Launch %s for "%s":\n  [1] %s (remote, default)  → session _%s  (%s)\n  [2] %s (local)            → session _%s  (%s)\n' \
+    "$(engine_label "$RP_ENGINE")" "$LOCAL_PROJ" "$REMOTE_HOST" "$_rn" "$_rs" "$LOCAL_HOST" "$_ln" "$_ls"
   ans="$(ask 'select [1/2]: ')"; [ "${ans:-1}" = 2 ] && TARGET=local || TARGET=remote
 fi
 [ "$TARGET" = local ] && launch_local
@@ -382,6 +618,9 @@ fi
 _rn_final="$(_remote_next_n "$REMOTE_PROJ")"
 RN="${_rn_final%% *}"
 RESPAWN_B64="$(respawn_body | base64 | tr -d '\n')"
+# Engine env exports (CODEX_HOME / OPENCODE_CONFIG_CONTENT) forwarded to the remote host the
+# same way as the respawn body — base64 sidesteps any heredoc/quoting hazard from user values.
+ENGINE_ENV_B64="$(engine_env_preamble | base64 | tr -d '\n')"
 
 # Current window size — create the remote detached tmux session at this size to avoid
 # a jump-resize on attach.
@@ -390,18 +629,37 @@ LINES="$(tput lines 2>/dev/null || echo 50)"
 
 REMOTE_SCRIPT=$(cat <<EOF
 set -e
-export PATH="\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
+export PATH="\$HOME/.local/bin:\$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
-if ! command -v claude >/dev/null 2>&1; then
-  printf 'claude not found on %s (PATH=%s)\n' "\$(hostname -s)" "\$PATH" >&2
-  exit 11
+if [ "${RP_ENGINE}" = claude ]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    printf 'claude not found on %s (PATH=%s)\n' "\$(hostname -s)" "\$PATH" >&2
+    exit 11
+  fi
+elif [ "${RP_ENGINE}" = claudex ]; then
+  if ! command -v claude >/dev/null 2>&1; then
+    printf 'claude not found on %s (PATH=%s) — claudex uses the real claude binary; use --engine claude after installing Claude Code\n' "\$(hostname -s)" "\$PATH" >&2
+    exit 11
+  fi
+  if [ ! -f "\$HOME/.cli-proxy-api/claudex-api-key" ]; then
+    printf 'claudex setup not found on %s — missing ~/.cli-proxy-api/claudex-api-key; use --engine claude\n' "\$(hostname -s)" >&2
+    exit 11
+  fi
+elif [ "${RP_ENGINE}" = codex ] || [ "${RP_ENGINE}" = opencode ]; then
+  if ! command -v ${RP_ENGINE} >/dev/null 2>&1; then
+    printf '${RP_ENGINE} not found on %s (PATH=%s) — install it with the native installer or use --engine claude\n' "\$(hostname -s)" "\$PATH" >&2
+    exit 11
+  fi
 fi
-# Optional ~/.claude sync (only when present — not a RemotePair requirement)
-if [ -d "\$HOME/.claude/.git" ]; then
-  ( cd "\$HOME/.claude" && git fetch -q origin main 2>/dev/null && git merge --no-edit -X ours origin/main >/dev/null 2>&1 || git merge --abort >/dev/null 2>&1 || true ) || true
+# Optional ~/.claude sync (only when present, and only for Claude-based engines — not a RemotePair requirement)
+if [ "${RP_ENGINE}" = claude ] || [ "${RP_ENGINE}" = claudex ]; then
+  if [ -d "\$HOME/.claude/.git" ]; then
+    ( cd "\$HOME/.claude" && git fetch -q origin main 2>/dev/null && git merge --no-edit -X ours origin/main >/dev/null 2>&1 || git merge --abort >/dev/null 2>&1 || true ) || true
+  fi
 fi
 RESPAWN_B64='${RESPAWN_B64}'
+ENGINE_ENV_B64='${ENGINE_ENV_B64}'
 [ -d '${HOST_DIR}' ] || { echo "host dir missing: ${HOST_DIR}"; exit 14; }
 cd '${HOST_DIR}'
 # Session name is fully resolved (including romanization) on the client side before injection —
@@ -432,7 +690,7 @@ NEED_CREATE=1
 if tm has-session -t "=\$SESSION" 2>/dev/null; then NEED_CREATE=0; fi
 if [ "\$NEED_CREATE" = 1 ]; then
   T=\$(mktemp -t claude-respawn.XXXXXX)
-  { printf "export CLAUDE_WARP_RC=%q\n" "\$SESSION"; printf '%s' "\$RESPAWN_B64" | base64 -d; } > "\$T"
+  { printf "export CLAUDE_WARP_RC=%q\n" "\$SESSION"; printf '%s' "\$ENGINE_ENV_B64" | base64 -d; printf '%s' "\$RESPAWN_B64" | base64 -d; } > "\$T"
   tm new-session -d -x ${COLS} -y ${LINES} -s "\$SESSION" -c '${HOST_DIR}' "bash \$T"
 fi
 # host-side session-lifecycle log (correlation id = session name; records which client attached)
