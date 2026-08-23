@@ -161,15 +161,21 @@ _readable() {
     *) printf '%s' "$s"; return ;;          # already ASCII → use as-is (fast path)
   esac
   local eng=""
-  # Non-Claude engines must NOT invoke `claude -p` nor touch the translation cache: the
-  # cache is keyed on the folder name only (not the engine), so a non-claude write would
-  # poison a later claude launch's session name and break reattach. Romanize/original only.
+  # Only plain `claude` uses the `claude -p` translation and its cache. claudex (proxy),
+  # codex, and opencode romanize instead: they must NOT call `claude -p` (it would hit the
+  # user's real Claude account / the wrong proxy) and must NOT share claude's cache key
+  # (keyed on the folder name only — a cross-engine write would poison claude's session
+  # name and break reattach). They cache under a separate `rom:` namespace so their own
+  # slug stays stable regardless of whether hangul-romanize is installed yet.
   case "$RP_ENGINE" in
-    claude|claudex) ;;
+    claude) ;;
     *)
+      local rkey rcf
+      rkey="$(printf 'rom:%s' "$s" | shasum -a 256 | cut -c1-12)"; rcf="$_TRCACHE/$rkey"
+      [ -s "$rcf" ] && { cat "$rcf"; return; }
       [ -x "$HROMANIZE" ] && eng="$("$HROMANIZE" "$s")"
       [ -z "$eng" ] && eng="$s"
-      printf '%s' "$eng"; return ;;
+      mkdir -p "$_TRCACHE"; printf '%s' "$eng" > "$rcf"; printf '%s' "$eng"; return ;;
   esac
   local key cf
   key="$(printf '%s' "$s" | shasum -a 256 | cut -c1-12)"; cf="$_TRCACHE/$key"
@@ -218,6 +224,8 @@ respawn_body() {
 engine_env_preamble() {
   [ "$RP_ENGINE" = opencode ] && [ -n "${OPENCODE_CONFIG_CONTENT:-}" ] && \
     printf 'export OPENCODE_CONFIG_CONTENT=%q\n' "$OPENCODE_CONFIG_CONTENT"
+  [ "$RP_ENGINE" = codex ] && [ -n "${CODEX_HOME:-}" ] && \
+    printf 'export CODEX_HOME=%q\n' "$CODEX_HOME"
   return 0
 }
 
@@ -228,6 +236,10 @@ respawn_body_claude() {
 # so children don't receive SIGHUP on normal exit and claude may survive as an orphan (reparented to init).
 # EXIT trap kills the entire process group → prevents accumulation of orphan claude --remote-control instances.
 trap 'kill -- -$$ 2>/dev/null' EXIT
+
+# This body runs inside the long-lived tmux-aqua server, whose PATH is only Homebrew +
+# system (HostManager) — re-extend it so a native ~/.local/bin install resolves.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # RC = CLAUDE_WARP_RC (injected by launcher). Fallback computed only if env is missing.
 RC="${CLAUDE_WARP_RC:-$(hostname -s)_$(basename "$PWD")}"
@@ -264,6 +276,10 @@ respawn_body_claudex() {
 # so children don't receive SIGHUP on normal exit and claude may survive as an orphan (reparented to init).
 # EXIT trap kills the entire process group → prevents accumulation of orphan claude --remote-control instances.
 trap 'kill -- -$$ 2>/dev/null' EXIT
+
+# This body runs inside the long-lived tmux-aqua server, whose PATH is only Homebrew +
+# system (HostManager) — re-extend it so a native ~/.local/bin claude install resolves.
+export PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 command -v claude >/dev/null 2>&1 || {
   printf '\n[claude not found on host — claudex uses the real claude binary; use --engine claude after installing Claude Code]\n' >&2
