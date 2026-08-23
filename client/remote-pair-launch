@@ -160,7 +160,18 @@ _readable() {
     *[!A-Za-z0-9._-]*) : ;;                 # non-ASCII → translate
     *) printf '%s' "$s"; return ;;          # already ASCII → use as-is (fast path)
   esac
-  local key cf eng=""
+  local eng=""
+  # Non-Claude engines must NOT invoke `claude -p` nor touch the translation cache: the
+  # cache is keyed on the folder name only (not the engine), so a non-claude write would
+  # poison a later claude launch's session name and break reattach. Romanize/original only.
+  case "$RP_ENGINE" in
+    claude|claudex) ;;
+    *)
+      [ -x "$HROMANIZE" ] && eng="$("$HROMANIZE" "$s")"
+      [ -z "$eng" ] && eng="$s"
+      printf '%s' "$eng"; return ;;
+  esac
+  local key cf
   key="$(printf '%s' "$s" | shasum -a 256 | cut -c1-12)"; cf="$_TRCACHE/$key"
   [ -s "$cf" ] && { cat "$cf"; return; }    # cache hit → always same result (stable re-attach)
   if command -v claude >/dev/null 2>&1; then
@@ -185,9 +196,9 @@ _proj_base() {
 # (':' is a tmux reserved char → normalize to '_'. '.' too: .claude → _claude)
 # Local session name is based on PROJECT_DIR; remote session name on map_to_host result —
 # both computed locally (SSOT; cache avoids duplicate claude calls).
+choose_engine   # finalize engine BEFORE _proj_base — non-Claude engines must not hit the claude -p slug path
 LOCAL_PROJ="${LOCAL_HOST}_$(_proj_base "$PROJECT_DIR")"
 LOCAL_PROJ="${LOCAL_PROJ//[.:]/_}"
-choose_engine
 [ "$RP_ENGINE" != claude ] && LOCAL_PROJ="${LOCAL_PROJ}-${RP_ENGINE}"
 
 # ── respawn body (engine + crash restart) ──
@@ -199,6 +210,15 @@ respawn_body() {
     opencode) respawn_body_opencode ;;
     *)        respawn_body_claude ;;
   esac
+}
+
+# engine_env_preamble — engine-specific env exports injected ahead of respawn_body into the
+# session script, so values that live in the launcher process reach the (limited-env) tmux
+# server shell. Local sessions only; remote transport of these is not wired yet.
+engine_env_preamble() {
+  [ "$RP_ENGINE" = opencode ] && [ -n "${OPENCODE_CONFIG_CONTENT:-}" ] && \
+    printf 'export OPENCODE_CONFIG_CONTENT=%q\n' "$OPENCODE_CONFIG_CONTENT"
+  return 0
 }
 
 respawn_body_claude() {
@@ -449,7 +469,7 @@ launch_local() {
     tm_local has-session -t "=$SESS" 2>/dev/null && NEED_CREATE=0             # detached → take-over re-attach
     if [ "$NEED_CREATE" = 1 ]; then
       [ -d "$PROJECT_DIR" ] || die "project directory missing: $PROJECT_DIR" 1
-      { printf "export CLAUDE_WARP_RC=%q\n" "$SESS"; respawn_body; } > "$T"
+      { printf "export CLAUDE_WARP_RC=%q\n" "$SESS"; engine_env_preamble; respawn_body; } > "$T"
       tm_local new-session -d -s "$SESS" -c "$PROJECT_DIR" "bash $T"
     fi   # RemotePairHost subtree → computer-use
     # host-side session-lifecycle log (local==host here; correlation id = session name)
@@ -467,7 +487,7 @@ launch_local() {
   if tmux has-session -t "=$TSESS" 2>/dev/null; then
     exec tmux attach -d -t "=$TSESS"                 # detached → take-over re-attach (-d: drop stale clients)
   else
-    { printf "export CLAUDE_WARP_RC=%q\n" "$TSESS"; respawn_body; } > "$T"
+    { printf "export CLAUDE_WARP_RC=%q\n" "$TSESS"; engine_env_preamble; respawn_body; } > "$T"
     exec tmux new -s "$TSESS" "bash $T"
   fi
 }
